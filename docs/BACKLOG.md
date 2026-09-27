@@ -60,9 +60,23 @@ Two candidate fixes, not mutually exclusive:
    silently. Cheap, and it also covers a hand-edited `cnConfigCredentials`
    Secret, which produces the same dead end by a different route.
 
-(1) removes the common cause; (2) catches every other route to the same state.
-Worth doing (2) regardless, because "the operator logged it 358 times and told
-nobody" is the part that cost the afternoon.
+3. **Converge it, and stop calling it create-only.** `olcRootPW` on
+   `olcDatabase={0}config` is node-local and runtime-modifiable — a textbook
+   ADR-024 R1 candidate — yet nothing writes it after `slaptest` renders it at
+   first bootstrap (`grep` finds exactly one `olcRootPW` write in the operator,
+   and it creates a *data* database). So the Secret is not merely create-only,
+   it is **unreconciled**: editing it locks the operator out of every pod at
+   once, with no repair path and no signal. Converging it per pod would make
+   (1)'s reinstall self-heal and make rotation an ordinary operation — exactly
+   what ADR-027 decision 6 did for the replication identity two metres away, and
+   the same defect class it retired. One ordering trap makes this more than a
+   one-liner: the operator must bind with the OLD password to write the new
+   hash, so during the change some pods hold the new one and some the old.
+   Try-new-then-old, the shape ADR-008's monitoring bind already uses.
+
+(1) removes the common cause; (2) catches every other route to the same state;
+(3) removes the class. Worth doing (2) regardless, because "the operator logged
+it 358 times and told nobody" is the part that cost the afternoon.
 
 ---
 
@@ -629,15 +643,34 @@ whether the operator should set an explicit strategy or the docs should simply
 never use `rollout status` as a readiness gate (the demo now waits on
 `status.readyReplicas`, which cannot lie).
 
-### 2026-09-16: `readyReplicas` *can* lie, and did — the slapd container has no probes
+### 2026-09-16: `readyReplicas` *can* lie, and did
 
-The parenthesis above is wrong, and the correction is the actionable part of
-this entry. The slapd container defines **no `readinessProbe` and no
-`livenessProbe`**, so "Ready" means only that the process exists. A slapd frozen
-for 874 s — accepting TCP, answering nothing, logging nothing — held
-`readyReplicas: 3`, `phase=Running` and its place in the Service endpoints for
-the entire freeze (see the 2026-09-16 ledger entry). Every wait built on
-`readyReplicas`, in the demo and in e2e, inherits that blindness.
+The parenthesis above is wrong: the slapd container has no probes at all, so
+`status.readyReplicas` is no more trustworthy than `rollout status` was.
+Promoted to its own entry — see "The slapd container has no `readinessProbe`"
+below.
+
+---
+
+## The slapd container has no `readinessProbe` — `readyReplicas` can lie
+
+*Promoted 2026-09-27 out of a subsection of "`kubectl rollout status` returns
+before readiness", where it was easy to miss. The finding itself is 2026-09-16.*
+
+The slapd container defines **no `readinessProbe` and no `livenessProbe`**, so
+"Ready" means only that the process exists. A slapd frozen for 874 s — accepting
+TCP, answering nothing, logging nothing — held `readyReplicas: 3`,
+`phase=Running` and its place in the Service endpoints for the entire freeze
+(see "The `cn=config` pause freeze" below). Every wait built on `readyReplicas`,
+in the demo and in e2e, inherits that blindness.
+
+**Why it was never urgent, which is the reusable part.** ADR-013 (2026-05-14)
+asked the *hard* question — should readiness mean "slapd has converged data"? —
+and deferred it for reasons that still hold (what "converged" means; the
+implementation surface). The easy question — "does slapd answer LDAP at all?" —
+has none of those problems and was never asked separately. It rode along in the
+deferral of the ambitious one. That is how a trivial guard goes missing for four
+months: not by being rejected, but by being bundled.
 
 **Wanted:** a `readinessProbe` doing a real rootDSE query, with a
 `failureThreshold` sized well above a normal sub-second `cn=config` pause so
@@ -646,6 +679,47 @@ liveness probe — restarting a pod mid-freeze would invalidate every peer's
 syncrepl addresses again under ADR-016, turning a recoverable stall into a
 topology event. Sizing that threshold is the whole design question and wants
 measured pause durations, not a guess.
+
+**Four constraints to design against:**
+
+1. **`publishNotReadyAddresses` is not set on the headless Service** (verified in
+   `reconcileHeadlessService`; it defaults false). Every per-pod operation the
+   operator performs resolves `<name>-<ordinal>.<name>-headless…`. A NotReady pod
+   leaves that DNS, so the operator cannot dial it, cannot converge it, and
+   ADR-027's gate then withholds syncrepl site-wide. ADR-013 already named the
+   fix and it never shipped, because the probe it was written for never shipped.
+   Land it **on its own, before the probe**: today nothing is ever NotReady, so
+   it is a literal no-op, and shipping it in the same commit as the probe is how
+   the deadlock gets discovered the hard way.
+2. **`OrderedReady` turns a wrong probe into "no cluster at all."** Ready is
+   trivially true today, so the StatefulSet always proceeds. With a probe, a
+   pod-0 that never goes Ready means pod-1 is never *created* — and the operator
+   cannot help, because there is no pod to converge.
+3. **Distroless has no exec probe.** kubelet offers HTTPGet, TCPSocket, Exec.
+   slapd speaks no HTTP; TCPSocket is what we have and is *proven* insufficient
+   (the frozen pod accepted TCP throughout); Exec needs a binary in the image —
+   the cost of ADR-013's option C', resurfacing, and the second item in the class
+   `BUG-ANALYSIS-database-dirs-rolling-restart.md` opened. `spec.readinessGates`
+   driven by the operator avoids touching the image and reuses an observation it
+   already makes every 60 s, but an unset gate defaults False, which is
+   constraint 2 wearing a different hat. Rule it out on the record, not by
+   omission.
+4. **Any LDAP answer is success**, `err=50` / `err=32` included: anonymous access
+   to the rootDSE may legitimately be denied by ACLs (ADR-025 treats uniform
+   invisibility as normal, not as divergence). Only timeout and
+   connection-refused are failures. What is measured is "the server answers",
+   never "the server answers *me*".
+
+**Free first step, independent of all four.** The operator already makes this
+observation and throws it away: 106 consecutive bind timeouts against the frozen
+pod, logged at INFO, reaching nobody. Promoting that to a status condition does
+not fix Service endpoints, but it makes the failure *visible* — most of what was
+missing — at zero risk to bootstrap.
+
+**Treat the probe as a replication-path change** and run one multi-site cycle
+before merging. Specs waiting on `readyReplicas` will start genuinely waiting
+instead of passing spuriously; that is the point, and it will surface latent
+timing assumptions.
 
 ---
 
@@ -716,6 +790,59 @@ it should. Changing it needs an ADR-027 amendment recording why the narrower
 scope still satisfies the cutover's ordering property, and what an operator
 should see instead (today the withholding is an INFO line and nothing surfaces
 on the CR — arguably the worse half of this entry).
+
+---
+
+## Rotating `replication-password` does not revoke the leaked credential
+
+**What:** `ensureReplicationUser` is create-only — it searches for
+`cn=replication,<suffix>`, finds it, and returns without comparing anything
+(`slapddatabase_controller.go:2013`). ADR-027 made the *node-local* identity
+converged, so a rotation of the Secret's `replication-password` does move
+`cn=repl-<db>,cn=slaptain-auth` and every stanza's `credentials=` (measured 52 s
+across four pods). The legacy entry is not touched: it keeps the **old**
+password, and ADR-027 steps 2+3 deliberately keep its `olcAccess` read-all and
+its `olcLimits` exemption on both the data DB and the journal.
+
+**Consequence:** rotation today is hygiene, not containment. If the password
+leaked, the leaked value still binds as `cn=replication,<suffix>` afterwards,
+with read over the whole data tree *and* over the accesslog — which is the
+ADR-020 bypass surface (an anonymous read of a shared journal once returned
+`reqMod: userPassword:+ {SSHA}…` for a user the data DB denies; the legacy
+identity is explicitly granted there). There is no revocation path that the
+operator performs.
+
+**Why it is not the DONE item above:** that entry closed the two-store
+*drift* problem and records this window's caveats as an availability concern —
+"rotating the Secret mid-window strands the create-only legacy entry", i.e. a
+not-yet-upgraded peer locks out. The security reading is sharper and is written
+down nowhere: the stale copy is not merely useless, it is a live credential the
+rotation was supposed to kill.
+
+**The real fix is already scheduled:** ADR-027 migration step 4 drops the legacy
+grants, which makes the stale entry inert (deleting the entry itself stays a
+manual cleanup — ADR-026 R2, it is replicated state the operator does not own).
+Until that release lands, an incident cannot wait, so what is missing is the
+interim answer.
+
+**Options considered:**
+
+1. **Converge the legacy entry too** — a small change to `ensureReplicationUser`,
+   and rejected: it writes into the replicated customer tree on every pass,
+   which is exactly the shared multi-writer state ADR-026 R2 forbids and half of
+   why ADR-027 moved the identity out.
+2. **Runbook** (preferred): rotate the Secret, then delete or repair
+   `cn=replication,<suffix>` by hand, accepting that un-upgraded peers break
+   until they upgrade. Matches the ADR-019 R8 precedent — a manual runbook in
+   preference to an unsafe automated write.
+3. **Make step 4 conditional** on observing that every peer is upgraded. The
+   operator cannot see a remote site's auth database, so cross-site this
+   collapses back into (2).
+
+**Wanted:** an ADR-027 amendment stating the leaked-credential case explicitly
+(rotation ≠ revocation while the legacy grants stand), plus the (2) runbook
+written down where an operator under time pressure will find it. Step 4 then
+closes it for good.
 
 ---
 
@@ -1035,6 +1162,8 @@ window caveats are recorded in CLAUDE.md and ADR-027: the migration window is
 one-directional (a NEW consumer against an OLD provider fails — pin
 `externalPeers[].bindDN` meanwhile), and rotating the Secret mid-window strands
 the create-only legacy entry.
+That second caveat has a security half that is its own open item — see
+"Rotating `replication-password` does not revoke the leaked credential".
 
 ---
 
@@ -1241,3 +1370,62 @@ which means the scale-to-zero leaves storage behind and should say so. Red-first
 per Test Discipline: an e2e that deploys with `readReplicas: 1`, flips it to 0, and
 asserts the StatefulSet, both Services and the pod are gone — it is red against
 current code for the right reason today.
+
+---
+
+## The operator's control channel has no stated TLS posture
+
+Every connection the operator makes to configure a pod is **plain `ldap://` on
+port 1024**. Verified across all nine `cn=config` call sites —
+`slapdcluster_tunables.go:119`, `slapddatabase_controller.go:552/1993/2099/2243/2905/3116`,
+`slapddatabase_authdb.go:164`, `slapdschema_controller.go:182` — each a bare
+`ldap.DialURL("ldap://"+addr)`, no StartTLS. Only the replication path (1025) and
+the schemed readers in `csn.go` / `slapdbackup_controller.go` ever use `ldaps://`.
+
+So the `<name>-config-password` Secret **authenticates** the operator; it does not
+**encrypt** anything. What crosses the pod network in the clear, on every pod, on
+every convergence pass:
+
+- the `cn=admin,cn=config` password itself, in a SIMPLE bind;
+- every `olcSyncRepl` value written by `applySyncreplToPod` — and a stanza carries
+  `credentials=<replication password>` in plaintext by construction (ADR-027
+  Consequences: "inherent to simple bind");
+- whatever a seed carries, on the one pod-0 pass that applies it.
+
+Nothing restricts who may reach that port, either: the only NetworkPolicy in the
+repo is `charts/operator/templates/networkpolicy.yaml`, which gates **metrics
+ingress to the operator** and says nothing about slapd. Port 1024 on every pod is
+reachable by anything the CNI's default allows.
+
+**This is not a bug report.** In-cluster control traffic over a trusted pod network
+is what most database operators do, and it may well be the right call here. The
+gap is that it was never *decided* in writing. The posture appears exactly once in
+the repo, as an annotation inside a log walkthrough
+(`docs/BOOTSTRAP.md:350`, "← plaintext LDAP, port 1024"), and nowhere as a
+statement anyone could agree or disagree with. ADR-029 argues TLS should be on by
+default for client traffic and does not mention the control channel at all; ADR-027
+option C counts "no plaintext secret anywhere in `cn=config`" as a benefit mTLS
+would buy, without noting that the write which puts it there is itself plaintext.
+A reader auditing slaptain's TLS story today has to read Go to find this out.
+
+**Wanted:** a stated posture, in `docs/TLS.md` and as an ADR if the answer is
+anything other than "yes, deliberately, forever". The three candidate answers, with
+their real costs:
+
+1. **Keep it, and say so.** Cheapest and possibly correct. Then say what it assumes
+   (a trusted pod network) and what would make it false (shared/multi-tenant
+   clusters, CNIs without encryption), and pair it with a shipped NetworkPolicy for
+   1024 so the assumption has something enforcing it.
+2. **`ldaps://` on 1025.** slapd already listens there. The operator would have to
+   verify a certificate whose SAN covers the pod's headless FQDN — which
+   `tests/gencert.sh` mints but a user-supplied Secret need not — and it can only
+   apply when `spec.ldap.tls.enabled`, so the plaintext posture survives for
+   precisely the clusters that opted out of TLS. That conditionality is the design
+   question, not the dialling.
+3. **StartTLS on 1024.** Same certificate question, no second port, and a graceful
+   downgrade path. Probably the smallest step that changes the answer.
+
+Whichever wins, note that it does not remove the plaintext `credentials=` from
+`cn=config` on disk — that is ADR-027 option C's territory, deferred separately —
+and it does not touch the diagnostics leak recorded there (`slctl debug-dump`
+collects stanzas verbatim).

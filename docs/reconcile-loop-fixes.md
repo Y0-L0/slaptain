@@ -1836,3 +1836,107 @@ theory — `kubectl logs --since` silently reads only the current file on a pod
 that rotates every 90 s, and an `ipBlock`-only NetworkPolicy denies in-cluster
 pod traffic, because Cilium matches pod sources by identity and not by CIDR. Both
 produced confident, wrong readings before being caught.
+
+---
+
+## 2026-09-28: every scale-up rolled the whole fleet — a vestigial env var kept the replica count in the pod template
+
+**Symptom:** `replicas: 3 → 4` on a live cluster restarted *all four* pods, not
+just the new one. Observed on the demo cluster; pod ages immediately after the
+edit read 28 s / 31 s / 34 s / 38 s for ordinals 0/1/2/3 — descending, which is
+the StatefulSet `RollingUpdate` signature (highest ordinal first), not a
+scale-up. Nothing in the CR asked for a restart.
+
+**Root cause:** `LDAP_REPLICAS` was injected into the init container's env with
+`strconv.Itoa(int(sc.Spec.Replicas))` as its value. That is a **pod-template**
+field, and the template hash is what the StatefulSet controller rolls on, so the
+count could not change without replacing every pod. Its only consumer anywhere
+in the repo was a *presence* test — `bootstrap.sh`, `[[ -n "${LDAP_REPLICAS:-}" ]]`.
+The number was never read.
+
+**It used to be right, which is the interesting part.** `bootstrap.sh` once
+wrote the peer list itself:
+
+```bash
+for ((i=0; i<LDAP_REPLICAS; i++)); do
+    echo "serverID ${sid} ${url}" >> "$TMP_CONF"
+```
+
+It needed the count because it was emitting N lines. `fee7137` (2026-07-17,
+ADR-017) replaced that loop with a single `$HOSTNAME`-derived integer, and
+ADR-003's runtime reconcile moved stanza generation into the operator. **The
+last numeric consumer died there; the parameter did not.** The value stopped
+meaning anything and never stopped costing a fleet restart.
+
+Second finding, from reading the surviving gate: it was redundant too.
+`LDAP_REPLICAS` is set iff `!readOnly` and `LDAP_READONLY_REPLICA=true` is set
+iff `readOnly`, so `[[ "$READONLY_REPLICA" != "true" ]] && [[ -n "${LDAP_REPLICAS:-}" ]]`
+tested one fact twice. The variable conveyed neither a value nor a bit.
+
+**Fix:** delete the env var from `buildStatefulSetSpec` and drop the redundant
+clause from `bootstrap.sh`, leaving `if [[ "$READONLY_REPLICA" != "true" ]]`.
+`LDAP_SERVER_ID_BASE` stays — it is a constant per cluster, not per replica
+count. The comment at the injection site now records *why* there is no count
+there, so the next person does not helpfully add one back.
+
+**Version-skew note, accepted deliberately:** an **old** `slapd-init` image
+against a **new** operator loses the `-n` clause's subject, so a freshly
+bootstrapped pod emits no `serverID` and stamps CSNs as sid 0 until
+`ensureServerIDs` converges it — and a sid-0 CSN that reaches `contextCSN` is a
+dormant SID forever (ITS#9580 food, ADR-021). By default both images track the
+operator's own tag, so this only reaches someone who pinned `spec.images.init`
+independently. Ship both images together.
+
+**Why it was hard to spot:** nothing was broken, only expensive, and the expense
+is invisible from one site — a rolled pod comes back healthy and the cluster
+reconverges. The cost lands on the *peers*: under ADR-016 every replaced pod
+invalidates the syncrepl addresses each remote site holds for it (130-268 s
+measured). A single-site lab shows a scale-up that works; a mesh shows a
+scale-up that works and costs every peer a rediscovery window per pod. The env
+var also reads entirely plausible — an init container that knows the replica
+count is unremarkable, and the grep that would have shown it unread is one
+nobody runs on a variable that "obviously" does something.
+
+**Coverage:** `internal/controller/statefulset_replica_churn_test.go` builds the
+pod template at 3 vs 4, 2 vs 5 and 4 vs 3 and requires deep equality, naming the
+offending env var on failure. Observed red before the fix, on all three pairs,
+identifying `LDAP_REPLICAS` as the sole offender — which is also what proves no
+*other* field varies with the count. The 1 ↔ 2 boundary is deliberately excluded:
+`NeedsAccesslogVolume()` flips there and the roll is legitimate.
+
+The integration half is `tests/e2e/scale_topology_test.go` (ungated, Label
+`scale-topology`): it scales the fixture up and back down and asserts both
+halves of the claim, because either alone is weak — the StatefulSet's revision
+hash and every surviving pod's UID unchanged (nothing was rolled), *and* each
+surviving pod's `olcSyncRepl` count moving by exactly one in each direction
+(the reconfiguration actually happened). It restores the original replica count
+in `DeferCleanup` so the rest of the suite does not inherit a resized cluster.
+
+**Verified live, 2026-09-28** (scm-s1, `slaptain-demo`, 3 RW + 1 RO, both
+images rebuilt): with the operator settled, `replicas: 3 -> 4` left
+`slapd-0/1/2` at their prior ages and `slapd-readonly-0` untouched; only
+`slapd-3` was new. `replicas: 4 -> 3` removed `slapd-3` and restarted nothing.
+`slctl inspect` reported 13 passed / 0 failed at both counts, with identical
+`contextCSN` across all 5 and then all 4 pods — the new pod refreshed and
+converged.
+
+The reconfiguration the restart used to pay for is visible in the same output
+and is the actual point: at 4, every RW pod carried **3** in-cluster stanzas
+instead of 2 (`slapd-0` gained `rid=104`) and the RO pod went 3 -> 4; at 3,
+`rid=104` was gone from every pod. `olcSyncRepl` rewritten on every pod, RO
+fleet included, with no pod replaced.
+
+**Not verified:** the confound that produced the first, misleading run. Scaling
+immediately after an operator redeploy rolls everything regardless — unpinned
+`spec.images` default to the operator's own tag (`defaultDataPlaneRepo` +
+`DefaultImageTag`), so a new operator tag rewrites both data-plane image strings
+in both pod templates. The giveaway was that `slapd-readonly-0` rolled too,
+which `LDAP_REPLICAS` could not explain since it was never set on RO pods. Any
+future test of this must let the operator settle first.
+
+**Lesson:** when work moves out of the init container, its inputs must move with
+it, or they become invisible restart triggers. A pod-template value that is read
+only for its presence is a latent full-fleet roll — the grep that matters is not
+"who sets this?" but "who reads the *value*?". And the generalisation worth
+keeping: anything that varies with `spec.Replicas` belongs on the StatefulSet,
+never inside its pod template.

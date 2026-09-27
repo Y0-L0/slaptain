@@ -1003,14 +1003,23 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	// sid-0 epoch). cn=config is node-local (ADR-002), so the pod needs only
 	// its own ID; bootstrap.sh derives the ordinal from $HOSTNAME, needing just
 	// the base (no FQDN/domain — that self-match was the ADR-015 crash surface).
-	// LDAP_REPLICAS stays as the "operator-managed RW pod" gate. The
-	// SlapdDatabase controller reconciles the value at runtime (ensureServerIDs),
-	// so this is only the fresh-bootstrap fast path. External-peer ID
-	// coordination during hot migration is handled separately via ExternalPeer
-	// config.
+	// The SlapdDatabase controller reconciles the value at runtime
+	// (ensureServerIDs), so this is only the fresh-bootstrap fast path.
+	// External-peer ID coordination during hot migration is handled separately
+	// via ExternalPeer config.
+	//
+	// NO replica count here, deliberately. bootstrap.sh needed one while it
+	// wrote the peer list itself; ADR-017 replaced that loop with a single
+	// ordinal-derived integer and ADR-003 moved stanza generation into the
+	// operator, which left LDAP_REPLICAS carrying a value nothing read — inside
+	// the POD TEMPLATE, whose hash is what the StatefulSet rolls on. Every
+	// scale-up therefore restarted the entire fleet, and on a mesh each
+	// restarted pod costs every remote peer a syncrepl address rediscovery
+	// (ADR-016). Anything that varies with spec.Replicas belongs on the
+	// StatefulSet, never in here. Guarded by
+	// statefulset_replica_churn_test.go.
 	if !readOnly {
 		initEnv = append(initEnv,
-			corev1.EnvVar{Name: "LDAP_REPLICAS", Value: strconv.Itoa(int(sc.Spec.Replicas))},
 			corev1.EnvVar{Name: "LDAP_SERVER_ID_BASE", Value: strconv.Itoa(int(sc.Spec.Replication.ServerIDBase))},
 		)
 	}

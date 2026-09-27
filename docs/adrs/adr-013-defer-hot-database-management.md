@@ -218,3 +218,37 @@ replication) is non-trivial.
   persistent storage, not by pod restart on ephemeral.
 - `docs/BUG-ANALYSIS-database-dirs-rolling-restart.md` — the detailed
   investigation that produced this ADR.
+
+## Amendment (2026-09-28): `DATABASE_DIRS` is the *accepted* pod-template roll — everything else is a defect
+
+This ADR accepted one rolling restart, for one reason: `DATABASE_DIRS` must be a
+pod-template env var because only the init container can create a directory on
+the pod filesystem, and the alternatives cost either the distroless property
+(option C') or a permanent sidecar (option G).
+
+That acceptance was read more broadly than it was written. A second pod-template
+value — `LDAP_REPLICAS` — carried `spec.Replicas` into the init container's env,
+so **every scale-up rolled the entire fleet**, and it went unremarked for months
+in a repo whose own ADR says pod-template churn causes rolls. Its value had not
+been read since ADR-017; see the 2026-09-28 entry in
+`docs/reconcile-loop-fixes.md`.
+
+**The rule this ADR did not state, and now does:** `DATABASE_DIRS` is the *only*
+sanctioned pod-template roll trigger. Any other spec field that reaches the pod
+template and can change during a cluster's life is a defect, not a wart — it
+pays the price of option C' without buying its capability. In particular,
+nothing that varies with `spec.Replicas` may enter the pod template: scaling is
+a StatefulSet-level operation and must stay one.
+
+The cost is not local, which is why the distinction matters. Under ADR-016 every
+replaced pod invalidates the syncrepl addresses each remote site holds for it
+(130-268 s measured). A mesh member that rolls four pods to add one replica
+hands every peer four rediscovery windows for an operation that should have
+produced exactly one new pod.
+
+Guarded twice: `internal/controller/statefulset_replica_churn_test.go` compares
+pod templates across replica counts above the 1 ↔ 2 boundary — where
+`NeedsAccesslogVolume()` legitimately flips and the roll is correct — and
+`tests/e2e/scale_topology_test.go` asserts on a live cluster that a scale in
+either direction leaves the StatefulSet revision and every surviving pod's UID
+untouched while `olcSyncRepl` is rewritten on each of them.

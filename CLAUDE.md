@@ -160,6 +160,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
         ├── accesslog_test.go        # Per-database accesslog: structure, no cross-DB lost-sync, convergence, ADR-020 ACL
         ├── sessionlog_test.go       # ADR-022: olcSpSessionlog on every RW pod's data DB; none on accesslog DBs
         ├── tunables_test.go         # ADR-024 degrades/hygiene tunables: cn=config posture per pod (ungated)
+        ├── scale_topology_test.go   # spec.replicas up/down must rewrite olcSyncRepl on every surviving pod WITHOUT replacing one: STS revision + pod UIDs unchanged, stanza count +/-1 (ungated, Label "scale-topology")
         ├── cleanup_policy_test.go   # ADR-005 cleanupPolicy: Delete tears a replicated DB (+ its accesslog DB) off EVERY pod; Retain leaves it; re-adoption (ungated, Label "cleanup-policy"; rolls the cluster per ADR-013)
         ├── scale_test.go            # many-entries fixture: 1200-entry seed + churn (gated: E2E_SCALE=1; knobs E2E_SCALE_ENTRIES/E2E_SCALE_CHURN)
         └── scaleup_test.go         # standalone → HA transition: schema/modules/serverID runtime convergence (gated: E2E_SCALEUP=1)

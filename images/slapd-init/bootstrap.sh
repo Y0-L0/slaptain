@@ -136,7 +136,7 @@ EOF
     # path: the operator reconciles olcServerID to the ordinal-derived value at
     # runtime (ensureServerIDs), because this script never touches an existing
     # config again.
-    if [[ "$READONLY_REPLICA" != "true" ]] && [[ -n "${LDAP_REPLICAS:-}" ]]; then
+    if [[ "$READONLY_REPLICA" != "true" ]]; then
         sid_base="${LDAP_SERVER_ID_BASE:-0}"
         ordinal="${HOSTNAME##*-}"
         if ! [[ "$ordinal" =~ ^[0-9]+$ ]]; then

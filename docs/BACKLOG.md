@@ -1429,3 +1429,60 @@ Whichever wins, note that it does not remove the plaintext `credentials=` from
 `cn=config` on disk — that is ADR-027 option C's territory, deferred separately —
 and it does not touch the diagnostics leak recorded there (`slctl debug-dump`
 collects stanzas verbatim).
+
+---
+
+## An operator upgrade rolls every slapd pod in every cluster it manages
+
+When `spec.images` is unset — the documented, recommended shape — both
+data-plane images resolve from the operator's own reference:
+`defaultDataPlaneRepo(r.OperatorImage, "slapd"|"slapd-init")` for the repository
+and `r.DefaultImageTag` (the `OPERATOR_IMAGE_TAG` env, injected by the chart
+from `Chart.AppVersion`) for the tag. So upgrading the operator rewrites the
+`slapd` and `slapd-init` image strings in **every pod template of every
+StatefulSet of every SlapdCluster it manages**, read-only fleets included, and
+the StatefulSet controller rolls all of them.
+
+The *defaulting* is deliberate and good (CloudNativePG's pattern, described in
+CLAUDE.md): operand images track the operator's version instead of drifting. The
+**consequence** is stated nowhere. `helm upgrade slaptain` is, today, a rolling
+restart of every directory in the cluster, and nothing in the docs says so.
+
+**Found by accident, 2026-09-28:** it masked the first verification of the
+`LDAP_REPLICAS` fix — scaling right after an operator redeploy rolled everything
+and looked like the fix had failed. The giveaway was `slapd-readonly-0` rolling
+too, which `LDAP_REPLICAS` could not explain because it was never set on RO
+pods. Anyone testing pod-template churn must let the operator settle first; that
+is now recorded in `docs/reconcile-loop-fixes.md`.
+
+**Why this is heavier here than for a single-site database operator.** The pods
+keep their PVCs, so there is no refresh storm (ADR-021 is not in play). What
+*is* in play is ADR-016: every replaced pod invalidates the syncrepl addresses
+each remote site holds for it, measured at 130-268 s of cross-site outage per
+event. An operator upgrade on a three-site mesh therefore produces one
+rediscovery window per pod per site — with **none** of the gating ADR-023
+specifies for precisely this operation (proceed only while `minAvailable`
+*current* copies survive; wait for `ReplicationConverged`; wait for peer
+rediscovery to settle). The StatefulSet controller's own gate is pod Readiness,
+and Readiness here means "the process exists" — see "The slapd container has no
+`readinessProbe`" above, which makes this roll able to outrun convergence.
+
+**Wanted:** a decision, then documentation to match it. Three candidates:
+
+1. **State it and leave it.** Cheapest. Document that an operator upgrade rolls
+   the fleet, and recommend pinning `spec.images` on mesh deployments so
+   data-plane upgrades become a separate, deliberate act. Cost: pinned images
+   drift from the operator, which is the property the defaulting exists to
+   provide, and ADR-021's dual-image rules make "always pin both or neither" a
+   trap someone will step in.
+2. **Default at creation only.** Resolve the tag when the StatefulSet is first
+   written and leave whatever is there afterwards. Keeps first-run convenience,
+   removes the surprise — and removes the upgrade-tracking property entirely,
+   silently, which is worse than either explicit choice.
+3. **Sequence it.** Reuse the ADR-023 gates for an operator-initiated roll:
+   ordinal at a time, gated on convergence and peer rediscovery. Correct and the
+   most work; note the machinery already has to exist for ADR-023 anyway, so the
+   marginal cost is the trigger and the bookkeeping, not the state machine.
+
+Whichever wins, the demo and `docs/DEVELOPMENT.md` should stop implying that
+`make operator-helm-install` is a control-plane-only operation.

@@ -418,6 +418,39 @@ pod serves. The flake is that state persisting, not its appearance.
 
 ## Cross-site recovery after a pod-IP change: the bottleneck is downstream of discovery
 
+### 2026-09-28: it is also the dominant term in e2e wall-clock, and it varies 50x
+
+Two full three-site runs an hour apart, same code, same gates, same 98/99:
+**953 s and 1352 s**. The 42 % swing is almost entirely this entry. Per-spec:
+
+| spec | run A | run B |
+|---|---|---|
+| resilience, simultaneous restart of all pods | 5 s | **4m20s** |
+| resilience, one pod restarted | 5 s | **45 s** |
+
+4m20s is inside the 130-268 s band this entry already records. The *5 s* readings
+are the anomaly: they mean Kubernetes happened to give the pods back their
+previous IPs, so no peer had anything to rediscover. Nothing in the fixture
+controls that, so any single measurement of "how long does a restart cost" is a
+coin flip between ~5 s and ~5 min.
+
+Two consequences worth keeping:
+
+- **A runtime regression hunt should start here.** The obvious suspects for a
+  suite that got 400 s slower — a new probe, a new condition, an added wait —
+  were all wrong; the answer was IPAM luck in one spec. Comparing per-spec
+  `• [N seconds]` lines finds it in a minute, where comparing totals does not.
+- **A live demo should not restart a pod and expect cross-site convergence.**
+  On the unlucky side of that coin it is five minutes of nothing happening.
+
+A third, smaller confound from the same comparison, unrelated to this entry:
+Ginkgo's seed changes the spec order, and `job-lease`'s "no terminated pod holds
+a slapd PVC" check landed straight after the `replicated restore` specs in one
+run (90 s waiting for their Job pods to be reaped) and after a quiet spec in the
+other (0.02 s). Both pass; the budget is doing its job. It is a reminder that
+this suite's specs share one cluster and its timings are not independent.
+
+
 Supersedes the earlier item "Peer address discovery has no vote in the requeue
 decision", whose premise **measurement refuted**.
 

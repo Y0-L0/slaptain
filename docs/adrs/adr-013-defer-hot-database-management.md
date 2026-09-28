@@ -325,6 +325,19 @@ full node holds the lease just as a finished one does, so this needs a timeout
 and a legible condition, not an unbounded wait. N pods means N Jobs; serial is
 fine, a database add is not latency-sensitive.
 
+**Two reaping rules, not one, learned from the first live run.** The Job's name
+is a hash of (pod, path set), which is what makes it idempotent — but it also
+means the reap is keyed on the same hash. A path set that changes between
+creating a Job and coming back to observe it (a second database applied moments
+later, a scale across the 1↔2 accesslog boundary, an operator restart mid-flight)
+leaves a Job that nothing will ever look up again, and only
+`TTLSecondsAfterFinished` removes it — which ADR-018 R4 reserves for crashes.
+Measured: a Job from the demo's one-database standalone stage outlived three
+database adds and went at 5m03s, the TTL. So each pass first reaps this pod's
+Jobs from any *superseded* path set, regardless of their state — a Job for a
+path set that no longer applies has no reason to run, and a Pending one holds
+the lease while never reaching a terminal state to be swept from.
+
 ### And the other half: the list leaves the pod template
 
 The list moves to a ConfigMap, mounted as a file that the init container reads

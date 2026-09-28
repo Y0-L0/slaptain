@@ -88,6 +88,28 @@ func (r *SlapdDatabaseReconciler) ensureDatabaseDirs(
 	}
 
 	name := dirJobName(podName, paths)
+
+	// Reap this pod's Jobs from any SUPERSEDED path set before looking at the
+	// current one. The name is a hash of (pod, paths), so a path set that
+	// changes between creating a Job and coming back to observe it — a second
+	// database applied moments later, a scale across the 1<->2 accesslog
+	// boundary, an operator restart mid-flight — leaves a Job nothing will ever
+	// Get() again. Without this, only TTLSecondsAfterFinished removes it, and
+	// ADR-018 R4 makes the TTL a CRASH backstop, not the routine path: until it
+	// fires, that Job's pod holds a deletion lease on this pod's PVCs (R1).
+	//
+	// Observed live 2026-09-28: a `slapd-0-mkdir-7adce24e` from the demo's
+	// one-database standalone stage outlived three database adds and was
+	// removed by the TTL at 5m03s.
+	//
+	// Reaped regardless of state, not just when terminal: a Job for a
+	// superseded path set has no reason to run, and a PENDING one (unschedulable
+	// node) holds the lease exactly as firmly while never reaching a terminal
+	// state to be swept from.
+	if err := r.reapSupersededDirJobs(ctx, sc.Namespace, podName, name); err != nil {
+		return err
+	}
+
 	job := &batchv1.Job{}
 	err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: sc.Namespace}, job)
 	switch {
@@ -239,4 +261,30 @@ func (r *SlapdDatabaseReconciler) buildDirJob(
 		return nil, err
 	}
 	return job, nil
+}
+
+// reapSupersededDirJobs deletes this pod's mkdir Jobs other than `keep`.
+//
+// Selected by the pod label rather than by listing every Job in the namespace,
+// so it can never touch a backup or restore Job — those carry their own labels
+// and their own reaping rules.
+func (r *SlapdDatabaseReconciler) reapSupersededDirJobs(
+	ctx context.Context, namespace, podName, keep string,
+) error {
+	var jobs batchv1.JobList
+	if err := r.List(ctx, &jobs, client.InNamespace(namespace),
+		client.MatchingLabels{dirJobLabel: podName}); err != nil {
+		return fmt.Errorf("list mkdir Jobs for %s: %w", podName, err)
+	}
+	var errs []error
+	for i := range jobs.Items {
+		j := &jobs.Items[i]
+		if j.Name == keep || j.DeletionTimestamp != nil {
+			continue
+		}
+		if err := reapJob(ctx, r.Client, namespace, j.Name); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }

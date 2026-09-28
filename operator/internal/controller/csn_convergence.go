@@ -42,6 +42,14 @@ type csnReading struct {
 	CSNs []string
 	// Err is non-empty when the query failed. CSNs is then meaningless.
 	Err string
+	// Answered records whether the SERVER responded at all, which is a
+	// different question from whether the query succeeded: a bind rejection or
+	// a search refusal is an answer, a dial timeout is not. Same rule ADR-030's
+	// readiness probe uses, and for the same reason — "is it up" must not be
+	// confused with "may this identity read that".
+	//
+	// True whenever Err is empty.
+	Answered bool
 }
 
 // localVerdict is the outcome of comparing local per-pod contextCSN readings.

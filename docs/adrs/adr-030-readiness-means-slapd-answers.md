@@ -149,10 +149,17 @@ stopping traffic at an unready pod is the entire point of the probe.
   still filling from its peers is Ready and will serve incomplete reads — which
   is what `DataPresent` (ADR-025) and `ReplicationConverged` (ADR-008) are for,
   and they remain the place that question is answered.
-- **A frozen pod is still silent in the CR.** The probe removes it from Service
-  endpoints; nothing yet surfaces *why*. Promoting the operator's own
-  bind-timeout observation to a status condition remains open and is independent
-  of this.
+- **A frozen pod now says so on the CR.** The probe removes it from Service
+  endpoints; the `PodsResponsive` condition names *which* pod and what the
+  operator saw. It reuses the readings the 60 s CSN tick already takes, so it
+  costs no extra queries, and it applies the same rule as the probe: an LDAP
+  result code is an answer, only a dial timeout or refusal is silence. A pod
+  unreadable on one database but answering on another stays responsive — that
+  is `ReplicationConverged`'s `CSNQueriesIncomplete`, and duplicating it here
+  would make the condition fire for reasons unrelated to the pod. Because
+  `setCondition` preserves `lastTransitionTime` while the status holds, the
+  condition's own age answers "how long" — the question those 106 consecutive
+  V(1) log lines could not.
 
 ## Validated on a three-site mesh, 2026-09-28
 

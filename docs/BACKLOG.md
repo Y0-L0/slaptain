@@ -748,10 +748,13 @@ Thresholds: startup 300 s, readiness 60 s. The 60 s is reasoned from both ends
 The 300 s is a **guess** — see the big-DIT entry below, whose fourth consumer
 this now is.
 
-**Still open, and independent:** the "free first step" above. The probe removes a
-frozen pod from Service endpoints but nothing yet says *why* — the operator's
-106 consecutive bind timeouts still go to an INFO log and reach nobody.
-Promoting that to a status condition is unchanged by this work.
+**The "free first step" shipped too**, as the `PodsResponsive` condition on
+SlapdCluster. Same readings the 60 s CSN tick already takes, so no extra
+queries; the same answer/silence rule as the probe, so a bind rejection is not
+mistaken for a dead pod; and a pod unreadable on one database but answering on
+another stays responsive, because that case already has a reporter
+(`CSNQueriesIncomplete`). The condition's `lastTransitionTime` is the duration
+the 106 log lines never gave anyone.
 
 ---
 

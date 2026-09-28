@@ -1342,11 +1342,42 @@ func (r *SlapdClusterReconciler) checkLocalCSNConvergence(
 			csns, err := queryContextCSN(host, port, tlsEnabled, db.suffix, db.bindDNs, db.bindPW)
 			if err != nil {
 				log.V(1).Info("local CSN query failed", "pod", host, "suffix", db.suffix, "err", err)
-				readings = append(readings, csnReading{Pod: podName, Suffix: db.suffix, Err: err.Error()})
+				readings = append(readings, csnReading{
+					Pod: podName, Suffix: db.suffix, Err: err.Error(),
+					// Whether the server ANSWERED is a different question from
+					// whether the query succeeded, and PodsResponsive is the
+					// only consumer that needs the distinction.
+					Answered: serverAnswered(err),
+				})
 				continue
 			}
-			readings = append(readings, csnReading{Pod: podName, Suffix: db.suffix, CSNs: csns})
+			readings = append(readings, csnReading{Pod: podName, Suffix: db.suffix, CSNs: csns, Answered: true})
 		}
+	}
+
+	// PodsResponsive — the same readings, asked a cruder and more urgent
+	// question: did the pod answer at all? Set unconditionally, including for a
+	// single-pod cluster that has no convergence to report, because "this pod
+	// stopped answering" matters at every replica count.
+	//
+	// Unlike ReplicationConverged this is pure observability (the ADR-025
+	// DataPresent posture) and never drives reconcile behaviour. setCondition
+	// preserves LastTransitionTime while the status is unchanged, so the
+	// condition's own age answers "how long has it been silent" — the question
+	// the 106 consecutive V(1) log lines could not.
+	pr := evaluatePodsResponsive(readings, sc.Spec.Replicas)
+	setCondition(&sc.Status.Conditions, metav1.Condition{
+		Type:               podsResponsiveCondition,
+		Status:             pr.Status,
+		Reason:             pr.Reason,
+		Message:            pr.Message,
+		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: sc.Generation,
+	})
+	if pr.Status == metav1.ConditionFalse {
+		// The one place this is louder than a V(1) line: a pod that has stopped
+		// answering is worth an operator log at default verbosity.
+		log.Info("pods are not answering LDAP", "detail", pr.Message)
 	}
 
 	verdict := evaluateLocalConvergence(readings, sc.Spec.Replicas)

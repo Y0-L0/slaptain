@@ -1361,7 +1361,9 @@ opening a big one cold. How long slapd takes to answer its first LDAP request on
 a production-sized LMDB is unmeasured, and the consequence of guessing low is
 sharper than for the other three consumers: under `OrderedReady` a pod-0 that
 never reaches Ready means pod-1 is never created, so the cluster does not form
-at all. This lane produces the number.
+at all. Fixture-sized measurement for scale: 3-5 s from container start to Ready
+across all twelve pods of the three-site lab, i.e. ~60-100x headroom on a DIT of
+a few dozen entries. This lane produces the number that matters.
 
 A second finding from the same session, worth more than the budget: the gate
 now **pokes** each pending `SlapdDatabase` with an annotation every 30 s,

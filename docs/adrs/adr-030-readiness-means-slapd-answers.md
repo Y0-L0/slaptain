@@ -133,12 +133,17 @@ stopping traffic at an unready pod is the entire point of the probe.
   as the `LDAP_REPLICAS` removal recorded in `docs/reconcile-loop-fixes.md`:
   **ship the images together.** A `spec.probes.enabled` escape hatch is designed
   and deferred; it would be the right answer if this ever bites someone.
-- **The startup budget is a guess, and is labelled as one.** Nothing in this
-  project has measured how long slapd takes to answer on a production-sized
-  LMDB: every fixture opens a few dozen entries. The big-DIT e2e lane that would
-  produce the number (`docs/BACKLOG.md`) is still unbuilt, and this is now its
-  fourth waiting consumer. 300 s is far beyond any fixture and is chosen to fail
-  safe; raising it later is a pod-template change and therefore a roll.
+- **The startup budget is a guess above fixture size, and is labelled as one.**
+  Measured on the three-site lab, 2026-09-28: every pod reaches Ready **3-5 s**
+  after its container starts — one or two startup-probe periods — across all
+  twelve pods of three sites, read-only replicas included. So the 300 s budget
+  carries roughly 60-100x headroom *on fixture-sized data*, which is the only
+  data anybody has: every fixture opens a few-dozen-entry LMDB, and `E2E_SCALE`
+  seeds into a LIVE mesh rather than opening a big one cold. How that scales to
+  a production LMDB is unmeasured; the big-DIT e2e lane that would produce the
+  number (`docs/BACKLOG.md`) is still unbuilt, and this is now its fourth
+  waiting consumer. 300 s is chosen to fail safe; raising it later is a
+  pod-template change and therefore a roll.
 - **The convergence question stays deferred**, exactly as ADR-013 left it.
   Ready means "answers LDAP", never "has the data". A pod that answers while
   still filling from its peers is Ready and will serve incomplete reads — which

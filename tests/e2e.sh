@@ -266,6 +266,17 @@ Reproducibility and triage:
                          tunables (replication sizelimit cap, map size, search
                          limits) are observable. Volume knobs: E2E_SCALE_ENTRIES
                          (default 1200), E2E_SCALE_CHURN (default 700).
+  E2E_REPLICAS_PER_PEER = Cross-site fan-out for the run: how many remote pods
+                         each local pod opens a syncrepl connection to, per peer
+                         site (spec.replication.replicasPerPeer). Unset renders
+                         nothing and the operator's default of 1 applies, so a
+                         normal run is unchanged. Applied at SETUP, because it
+                         goes into the generated mesh values — a `kubectl edit`
+                         after the fact is lost to the next helm upgrade and
+                         leaves no record of what the run exercised. No spec
+                         expectation moves with it: every stanza assertion is
+                         relative (a scale moves the count by one, and that is
+                         an in-cluster peer) or existence-based.
   E2E_LABEL_FILTER     = Ginkgo label expression selecting which specs run, e.g.
                          "restore-inplace" or "backup && !restore". Lets a single
                          scenario be iterated without paying for the whole suite,
@@ -663,6 +674,25 @@ build_mesh_values() {
 
         local pull_secrets="[]"
         [[ -n "${PULL_SECRET_NAME:-}" ]] && pull_secrets="[{\"name\": \"$PULL_SECRET_NAME\"}]"
+
+        # E2E_REPLICAS_PER_PEER: cross-site fan-out for the whole run
+        # (spec.replication.replicasPerPeer, ADR-028 amendment 2026-09-28).
+        # Unset renders nothing, so the default run is byte-identical to before
+        # and the operator's own default of 1 applies.
+        #
+        # A knob rather than a `kubectl edit` after setup, because the edit is
+        # lost to the next `helm upgrade` and leaves no trace of what a run
+        # actually exercised. Every stanza assertion in the suite is relative
+        # (scale moves the count by one) or existence-based (a stanza carrying
+        # this peer's RID), never absolute, so raising this does not move any
+        # expectation — scaling adds an IN-CLUSTER peer, whose count is
+        # independent of the cross-site fan-out.
+        local repl_extra="{}"
+        if [[ -n "${E2E_REPLICAS_PER_PEER:-}" ]]; then
+            repl_extra="{\"replication\": {\"replicasPerPeer\": ${E2E_REPLICAS_PER_PEER}}}"
+            log "Cross-site fan-out: replicasPerPeer=${E2E_REPLICAS_PER_PEER}"
+        fi
+        MESH_REPL_EXTRA="$repl_extra" \
         MESH_SLAPD_REPO="$REGISTRY/$PROJECT/slapd" \
         MESH_SLAPD_TAG="$SLAPD_TAG" \
         MESH_INIT_REPO="$REGISTRY/$PROJECT/slapd-init" \
@@ -675,7 +705,7 @@ build_mesh_values() {
                         "init":  {"repository": strenv(MESH_INIT_REPO),  "tag": strenv(MESH_INIT_TAG)}
                     },
                     "imagePullSecrets": (strenv(MESH_PULL_SECRETS) | from_json)
-                })}' "$VALUES_FILE"
+                } * (strenv(MESH_REPL_EXTRA) | from_json))}' "$VALUES_FILE"
 
         yq -N ea '[select(.kind == "SlapdDatabase")
                    | {"name": .metadata.name, "spec": (.spec | del(.clusterRef))}]

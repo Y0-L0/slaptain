@@ -207,6 +207,18 @@ yq -r '.sites[] | (.context // .name) + " " + .name' lab.yaml | while read -r ct
     -n slaptain-system --create-namespace --set "siteName=$site"
 done
 
+#    FROM A LOCAL BUILD instead of the published chart — the same step, against
+#    the working tree and whatever images `make push` last pushed:
+#
+#      yq -r '.sites[] | (.context // .name) + " " + .name' lab.yaml |
+#        while read -r ctx site; do
+#          make operator-helm-install CONTEXT="$ctx" SITE_NAME="$site"
+#        done
+#
+#    SITE_NAME exists because `make <target> --set siteName=…` cannot work:
+#    make parses --set as its own option. HELM_ARGS takes anything else.
+#    The make target also applies the CRDs, which `helm upgrade` never does.
+
 # 7. The mesh itself, from the two files written in step 1b. The same two go to
 #    every site, unchanged — that is the whole point.
 yq -r '.sites[].context // .sites[].name' lab.yaml | while read -r ctx; do

@@ -342,11 +342,25 @@ cluster-helm-uninstall:
 ## (see operator-crd-apply), which otherwise leaves a new/changed CRD missing or
 ## stale after an upgrade. This is the t3e iteration-loop command:
 ##   make operator-helm-install CONTEXT=t3e GIT_TAG=<pushed-tag>
+##
+## SITE_NAME sets the operator's own site identity (ADR-028 §4) — the one
+## per-site fact in a whole mesh, and the reason this target needs a knob at
+## all: `make <target> --set foo=bar` cannot work, because make parses --set as
+## its own option. Walking docs/MULTI-SITE.md against locally built images:
+##   yq -r '.sites[] | (.context // .name) + " " + .name' lab.yaml |
+##     while read -r ctx site; do
+##       make operator-helm-install CONTEXT="$$ctx" SITE_NAME="$$site"
+##     done
+##
+## HELM_ARGS is the escape hatch for everything else (-f values.yaml, --set
+## resources..., --wait). Both are empty by default, so nothing changes for
+## callers that pass neither.
 operator-helm-install: operator-crd-apply
 	$(HELM) upgrade --install slaptain ./charts/operator \
 		--namespace $(NAMESPACE) --create-namespace \
 		--set image.repository=$(REGISTRY)/$(PROJECT)/operator \
-		--set image.tag=$(IMAGE_TAG)
+		--set image.tag=$(IMAGE_TAG) \
+		$(if $(SITE_NAME),--set siteName=$(SITE_NAME)) $(HELM_ARGS)
 
 operator-helm-uninstall:
 	$(HELM) uninstall slaptain --namespace $(NAMESPACE)

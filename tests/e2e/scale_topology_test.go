@@ -116,7 +116,14 @@ var _ = Describe("scale topology", Label("scale-topology"), Ordered, func() {
 		}
 		// With useForInCluster the peer is addressed by its Multus IP, so the
 		// pod name is not in the stanza. The count assertions still hold.
-		nameStanzas = !sc.Spec.Replication.Network.UseForInCluster
+		//
+		// spec.replication.network is a POINTER and optional — nil is the
+		// ordinary shape for a mesh-driven cluster, whose network mode the
+		// operator derives from the SlapdMesh and never writes back (ADR-028
+		// §4), and for any single-site cluster that takes the pod-routed
+		// default. Nil therefore means "not multus", i.e. peers are named.
+		nameStanzas = sc.Spec.Replication.Network == nil ||
+			!sc.Spec.Replication.Network.UseForInCluster
 
 		sd := &ldapv1alpha1.SlapdDatabase{}
 		Expect(crdClient.Get(ctx, nsName(namespace, dbCRName), sd)).To(Succeed())

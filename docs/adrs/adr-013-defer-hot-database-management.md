@@ -378,3 +378,33 @@ and the Job.
   Running cluster leaves the StatefulSet revision and every pod's UID untouched
   — the same assertion shape `scale_topology_test.go` already uses for scaling,
   and red against the current code by construction.
+
+### Validated on a three-site mesh, 2026-09-28
+
+Full suite at three sites (scm-s1/s2/s3, pod-routed), 96 passed / 1 failed /
+931 s; the one failure was a nil-pointer panic in `scale_topology_test.go`'s
+own setup — `spec.replication.network` is a pointer and nil is the ordinary
+mesh shape — not a defect in this work. Fixed, then `scale-topology` and
+`database-hotadd` re-run together: 4/4 green, `DataPresent=True` on every
+site's databases afterwards.
+
+Measured cost of an add: ~60 s from CR to Running, ~50 s for the remove. That
+is the Job plus the 10 s requeues it rides, and it replaces a rolling restart
+of every pod at every site.
+
+Three defects were found by running it, none of which a unit test would have
+produced, because all three are *absences* rather than failures:
+
+1. **The Job ran twice per RW pod.** Two steps need the directories — the data
+   DB and the accesslog DB — and both run in the same pass on a fresh database.
+   Reaping from the observed terminal state (R1/R2) meant the second found the
+   Job already gone and made an identical one. Memoised per pod per pass.
+2. **A Job orphaned by a changed path set.** The name is a hash of (pod, paths),
+   so the reap is keyed on the same hash: a path set that changes before the
+   next pass — a second database, a scale across the 1↔2 accesslog boundary, an
+   operator restart — leaves a Job nothing looks up again, and only the TTL
+   removes it. Measured at 5m03s on a live cluster. Each pass now reaps this
+   pod's Jobs from superseded path sets first, whatever their state.
+3. Unrelated but found by the same second database: `slctl inspect` judged
+   syncrepl on the FIRST data database only, including `rid-uniqueness`, whose
+   entire purpose is a collision *between* databases.

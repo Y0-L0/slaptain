@@ -563,6 +563,28 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 		podName = fmt.Sprintf("%s-readonly-%d", sc.Name, ordinal)
 	}
 
+	// One directory pass per pod per reconcile, however many times it is asked
+	// for. Two steps below need the directories — the data DB and the accesslog
+	// DB — and both run in the same pass when a database is added, so without
+	// the memo the second one finds the Job it needs already REAPED (ADR-018
+	// requires reaping from the observed terminal state) and creates an
+	// identical second one. Measured on the demo cluster: every RW pod ran the
+	// same mkdir Job twice per database add, RO pods once, which is the
+	// signature of exactly this. The Job provisions ALL of the pod's
+	// directories, so once it has succeeded in this pass there is nothing left
+	// for a second call to do.
+	dirsEnsured := false
+	ensureDirs := func() error {
+		if dirsEnsured {
+			return nil
+		}
+		if err := r.ensureDatabaseDirs(ctx, sc, podName, readOnly); err != nil {
+			return err
+		}
+		dirsEnsured = true
+		return nil
+	}
+
 	addr := host + ":" + strconv.Itoa(int(ldapContainerPort))
 	conn, err := ldap.DialURL("ldap://"+addr,
 		ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
@@ -606,7 +628,7 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 		// Job makes it (ADR-013 amendment of 2026-09-28, option H) — which is
 		// what lets this happen without rolling the fleet. Returning its
 		// pending error skips this pod for now; the caller already retries.
-		if dirErr := r.ensureDatabaseDirs(ctx, sc, podName, readOnly); dirErr != nil {
+		if dirErr := ensureDirs(); dirErr != nil {
 			return dirErr
 		}
 		log.Info("creating database", "host", host, "suffix", sd.Spec.Suffix,
@@ -799,7 +821,7 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 			}
 		}
 		if wantsAccesslog {
-			if err := r.ensureAccesslogDB(ctx, conn, host, podName, sd, sc); err != nil {
+			if err := r.ensureAccesslogDB(ctx, conn, host, ensureDirs, sd, sc); err != nil {
 				return fmt.Errorf("ensure accesslog DB at %s: %w", host, err)
 			}
 			if err := r.ensureAccesslogOverlay(ctx, conn, host, dataDN, sd); err != nil {
@@ -1602,7 +1624,8 @@ func (r *SlapdDatabaseReconciler) ensureServerIDs(
 func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 	ctx context.Context,
 	conn *ldap.Conn,
-	host, podName string,
+	host string,
+	ensureDirs func() error,
 	sd *ldapv1alpha1.SlapdDatabase,
 	sc *ldapv1alpha1.SlapdCluster,
 ) error {
@@ -1627,11 +1650,12 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 	if len(sr.Entries) > 0 {
 		dbDN = sr.Entries[0].DN
 	} else {
-		// Same reason as the data DB above: /accesslog/<db> must exist before
-		// back-mdb will accept the database. Reached when a database turns
-		// replicated after it was created, where the data DB's own directory
-		// pass has long since run.
-		if dirErr := r.ensureDatabaseDirs(ctx, sc, podName, false); dirErr != nil {
+		// Same reason as the data DB: /accesslog/<db> must exist before back-mdb
+		// will accept the database. Memoised, so on a fresh database — where the
+		// data DB was created moments ago in this same pass — this is free; it
+		// does real work only when a database turns replicated long after it was
+		// created.
+		if dirErr := ensureDirs(); dirErr != nil {
 			return dirErr
 		}
 		log.Info("creating accesslog DB", "host", host, "suffix", logSuffix)

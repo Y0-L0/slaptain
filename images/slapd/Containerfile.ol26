@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # beforehand, cp -r would nest the source inside it (ldap/ldap/back_mdb.so).
 RUN install -d \
       /staging/usr/sbin \
+      /staging/usr/bin \
       /staging/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH) \
       /staging/etc/ldap \
       /staging/ldap-config \
@@ -32,6 +33,22 @@ RUN install -d \
 
 # Binary
 RUN cp /usr/sbin/slapd /staging/usr/sbin/
+
+# ldapwhoami — the readiness probe (ADR-030).
+#
+# The one LDAP client this image carries, and it is here because kubelet offers
+# HTTPGet, TCPSocket or Exec and slapd speaks no HTTP. TCPSocket is proven
+# insufficient: the pod that froze for 874 s accepted connections throughout and
+# answered nothing, holding readyReplicas the whole time.
+#
+# ldapwhoami rather than ldapsearch: WhoAmI is an extended operation that reads
+# no entry, so the probe cannot be broken by a user's ACLs — "does slapd answer
+# at all" stays independent of "may this identity read anything". It comes from
+# the same package build as slapd itself, so client and server can never drift.
+#
+# This is NOT a general-purpose toolkit: debugging belongs in slapd-toolkit
+# (slctl debug attaches it as an ephemeral container). One binary, one purpose.
+RUN cp /usr/bin/ldapwhoami /staging/usr/bin/
 
 # Schema files (referenced by bootstrap-generated config)
 RUN cp -r /etc/ldap/schema /staging/etc/ldap/schema
@@ -46,7 +63,7 @@ RUN cp -r /usr/lib/ldap /staging/usr/lib/ldap
 RUN set -e; arch=$(dpkg-architecture -qDEB_HOST_MULTIARCH); \
     # Collect all .so paths from slapd and every loadable module, then copy
     # both the real file and any SONAME symlink for each dependency.
-    { ldd /usr/sbin/slapd; \
+    { ldd /usr/sbin/slapd; ldd /usr/bin/ldapwhoami; \
       for mod in /usr/lib/ldap/*.so; do ldd "$mod" 2>/dev/null; done; \
     } | awk '/=>/ { print $3 }' | sort -u | \
     while read lib; do \

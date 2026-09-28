@@ -1211,6 +1211,9 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 			"-d", logLevel,
 			"-F", "/config/slapd.d",
 		},
+		StartupProbe:   slapdStartupProbe(),
+		ReadinessProbe: slapdReadinessProbe(),
+		// No livenessProbe, deliberately — see slapdProbeCommand.
 		Ports: []corev1.ContainerPort{
 			{Name: "ldap", ContainerPort: ldapContainerPort, Protocol: corev1.ProtocolTCP},
 			{Name: "ldaps", ContainerPort: ldapsContainerPort, Protocol: corev1.ProtocolTCP},

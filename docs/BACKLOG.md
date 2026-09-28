@@ -655,7 +655,7 @@ below.
 
 ---
 
-## The slapd container has no `readinessProbe` — `readyReplicas` can lie
+## ~~The slapd container has no `readinessProbe` — `readyReplicas` can lie~~ — DONE (2026-09-28, ADR-030)
 
 *Promoted 2026-09-27 out of a subsection of "`kubectl rollout status` returns
 before readiness", where it was easy to miss. The finding itself is 2026-09-16.*
@@ -723,6 +723,35 @@ missing — at zero risk to bootstrap.
 before merging. Specs waiting on `readyReplicas` will start genuinely waiting
 instead of passing spuriously; that is the point, and it will surface latent
 timing assumptions.
+
+### 2026-09-28: shipped as ADR-030, and the hard constraint dissolved
+
+All four constraints survived contact, and constraint 3 — "distroless has no
+exec probe" — turned out to be cheaper than written: the slapd image's build
+stage **already installs `ldap-utils`** from the vendored fork (ADR-021), so a
+version-matched LDAP client was one `cp` away. No Go stage, no repo-root build
+context, no resurrection of ADR-013's option C'.
+
+`ldapwhoami`, not `ldapsearch`, and that turns constraint 4 from a requirement
+into a non-problem: WhoAmI is an extended operation that reads no entry, so the
+probe cannot be broken by a user's ACLs at all. There is nothing to special-case
+about `err=50` / `err=32` because they cannot arise. (`ldapsearch` would also
+have needed exit-code post-processing that a shell-free image cannot do.)
+
+Constraint 1 landed **alone and first**, as this entry insisted, while it was
+still a literal no-op. Constraint 2 is answered by a 300 s `startupProbe`, so a
+slow LMDB open is waited out rather than turned into a cluster that never forms.
+`readinessGates` are ruled out on the record in ADR-030 rather than by omission.
+
+Thresholds: startup 300 s, readiness 60 s. The 60 s is reasoned from both ends
+(well above a routine sub-second `cn=config` pause, far below the 874 s freeze).
+The 300 s is a **guess** — see the big-DIT entry below, whose fourth consumer
+this now is.
+
+**Still open, and independent:** the "free first step" above. The probe removes a
+frozen pod from Service endpoints but nothing yet says *why* — the operator's
+106 consecutive bind timeouts still go to an INFO log and reach nobody.
+Promoting that to a status condition is unchanged by this work.
 
 ---
 
@@ -1323,6 +1352,16 @@ self-heal, so the fuse does end in a failure), and returned to
 that, on a DIT of a few dozen entries. This lane replaces the guess with a
 number; until then, raise the env var rather than trusting the default on a
 fixture that has grown.
+
+**Fourth consumer, 2026-09-28 — a probe threshold now depends on it.** ADR-030
+gives the slapd container a `startupProbe` with a 300 s budget, sized to "far
+beyond any fixture" because that is all the evidence there is: every e2e pod
+opens a few-dozen-entry LMDB, and `E2E_SCALE` seeds into a LIVE mesh rather than
+opening a big one cold. How long slapd takes to answer its first LDAP request on
+a production-sized LMDB is unmeasured, and the consequence of guessing low is
+sharper than for the other three consumers: under `OrderedReady` a pod-0 that
+never reaches Ready means pod-1 is never created, so the cluster does not form
+at all. This lane produces the number.
 
 A second finding from the same session, worth more than the budget: the gate
 now **pokes** each pending `SlapdDatabase` with an annotation every 30 s,

@@ -412,7 +412,7 @@ func TestExternalPeersForSite(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := externalPeersForSite(tc.sites, tc.selector, tc.self)
+			got, err := externalPeersForSite(tc.sites, tc.selector, tc.self, nil)
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("error = %v, want %v", err, tc.wantErr)
 			}
@@ -455,5 +455,75 @@ func TestMeshSiteSecretConventions(t *testing.T) {
 	half := ldapv1alpha1.MeshSite{Name: "site-2", KubeconfigSecret: &ldapv1alpha1.KubeconfigSecretRef{Key: "k"}}
 	if got := half.KubeconfigSecretFor(); got.Name != "site-2-kubeconfig" || got.Key != "k" {
 		t.Errorf("half-specified ref = %+v, want site-2-kubeconfig/k", got)
+	}
+}
+
+// A mesh cluster must be able to ask for cross-site fan-out.
+//
+// It could not: externalPeersForSite never set ReplicasPerPeer, and the
+// per-peer field is unreachable under meshRef because externalPeers as a whole
+// is derived and setting it is refused. So every mesh ran at one connection per
+// local pod per peer site, with no way to say otherwise — missed rather than
+// decided (ADR-028 amendment, 2026-09-28).
+func TestDerivedPeersCarryReplicasPerPeer(t *testing.T) {
+	idx := func(v int32) *int32 { return &v }
+	sites := []ldapv1alpha1.MeshSite{
+		{Name: "site-1", ServerIDIndex: idx(0)},
+		{Name: "site-2", ServerIDIndex: idx(1)},
+		{Name: "site-3", ServerIDIndex: idx(2)},
+	}
+
+	// Unset stays unset rather than becoming an explicit 1: the stanza builder
+	// already reads nil as 1, and writing a value in would make every existing
+	// mesh's derived spec change shape for no behavioural difference.
+	peers, err := externalPeersForSite(sites, nil, "site-1", nil)
+	if err != nil {
+		t.Fatalf("derivation failed: %v", err)
+	}
+	if len(peers) != 2 {
+		t.Fatalf("got %d peers, want 2", len(peers))
+	}
+	for _, p := range peers {
+		if p.ReplicasPerPeer != nil {
+			t.Errorf("peer %s: ReplicasPerPeer = %d, want nil when the cluster asks for nothing",
+				p.Name, *p.ReplicasPerPeer)
+		}
+	}
+
+	// Set, and it reaches EVERY derived peer — a fan-out that applied to one
+	// peer and not another would be a half-connected topology that looks
+	// healthy from both ends of every link that does exist.
+	want := int32(3)
+	peers, err = externalPeersForSite(sites, nil, "site-1", &want)
+	if err != nil {
+		t.Fatalf("derivation failed: %v", err)
+	}
+	for _, p := range peers {
+		if p.ReplicasPerPeer == nil || *p.ReplicasPerPeer != want {
+			t.Errorf("peer %s did not receive the cluster's replicasPerPeer", p.Name)
+		}
+	}
+}
+
+// Narrowest wins, and the cluster default is what a mesh user actually sets.
+func TestResolveReplicasPerPeer(t *testing.T) {
+	p := func(v int32) *int32 { return &v }
+	for _, tc := range []struct {
+		name                     string
+		clusterDefault, override *int32
+		want                     int32
+		because                  string
+	}{
+		{"nothing set", nil, nil, 1, "today's behaviour must survive untouched"},
+		{"cluster default only", p(3), nil, 3, "the mesh path: the per-peer field is unreachable there"},
+		{"peer override only", nil, p(2), 2, "the pre-existing non-mesh knob keeps working"},
+		{"peer overrides cluster", p(4), p(2), 2, "narrowest wins, or the per-peer field would be decorative"},
+		{"zero is treated as unset", p(0), nil, 1, "no connections to a peer is a peer that silently does not replicate"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveReplicasPerPeer(tc.clusterDefault, tc.override); got != tc.want {
+				t.Errorf("= %d, want %d — %s", got, tc.want, tc.because)
+			}
+		})
 	}
 }

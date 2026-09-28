@@ -198,6 +198,21 @@ cluster:
     # -- Syncrepl retry interval, "<interval> <count>" pairs.
     # retry: "10 +"                 # unset → the operator default ("10 +")
 
+    # -- Cross-site fan-out: how many remote pods each local pod opens a
+    # syncrepl connection to, per peer site. Unset → 1.
+    #
+    # This is the one peer-level knob a mesh cluster can reach: externalPeers
+    # is DERIVED from the SlapdMesh and setting it here is refused, so the
+    # per-peer form of this field is out of reach (ADR-028 amendment).
+    #
+    # It buys link REDUNDANCY, not coverage. At 1 each local pod has a single
+    # path to each peer site; losing the remote pod at the far end costs that
+    # pod its cross-site path until discovery repoints — the 130-268s ADR-016
+    # window. The data still arrives through this pod's in-cluster peers. Raise
+    # it to buy a second route, at the price of more connections and more
+    # refresh traffic on every peer. Capped at the peer's pod count.
+    # replicasPerPeer: 2
+
   # -- Client-facing Service. Every key matches the operator's default, so
   # uncomment only what you change. Whatever you set applies at EVERY site —
   # that is the point of the chart, and a per-site Service type means the sites

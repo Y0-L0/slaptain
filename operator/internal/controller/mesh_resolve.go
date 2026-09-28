@@ -119,7 +119,10 @@ func deriveClusterWiring(mesh *ldapv1alpha1.SlapdMeshSpec, spec ldapv1alpha1.Sla
 	if err != nil {
 		return nil, meshDerivationError(spec.MeshRef, err)
 	}
-	peers, err := externalPeersForSite(mesh.Sites, spec.Sites, identity)
+	// spec.replication.replicasPerPeer is an INPUT to the derivation, not an
+	// output of it, so it is not in checkMeshSpecConflicts and stays the user's
+	// to set alongside meshRef.
+	peers, err := externalPeersForSite(mesh.Sites, spec.Sites, identity, spec.Replication.ReplicasPerPeer)
 	if err != nil {
 		return nil, meshDerivationError(spec.MeshRef, err)
 	}

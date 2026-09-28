@@ -108,6 +108,9 @@ spec:
     {{- with $r.retry }}
     retry: {{ . | quote }}
     {{- end }}
+    {{- with $r.replicasPerPeer }}
+    replicasPerPeer: {{ . }}
+    {{- end }}
   {{- end }}
 
   {{- with .Values.cluster.resources }}

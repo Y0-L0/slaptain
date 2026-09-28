@@ -265,7 +265,7 @@ func serverIDBaseForSite(sites []ldapv1alpha1.MeshSite, identity string) (int32,
 //
 // Peer ORDER follows the mesh, not the selector, so the derived list is stable
 // across reconciles and an unchanged mesh produces an unchanged cn=config.
-func externalPeersForSite(sites []ldapv1alpha1.MeshSite, selector []string, identity string) ([]ldapv1alpha1.ExternalPeer, error) {
+func externalPeersForSite(sites []ldapv1alpha1.MeshSite, selector []string, identity string, replicasPerPeer *int32) ([]ldapv1alpha1.ExternalPeer, error) {
 	selfIdx, err := meshSiteIndex(sites, identity)
 	if err != nil {
 		return nil, err
@@ -306,6 +306,13 @@ func externalPeersForSite(sites []ldapv1alpha1.MeshSite, selector []string, iden
 			Name:          normalizeSiteName(s.Name),
 			Port:          externalPeerLDAPSPort,
 			TLSSecretName: s.CASecretNameFor(),
+			// The cluster's fan-out, stamped onto every derived peer. A mesh
+			// cluster cannot reach externalPeers[].replicasPerPeer — the whole
+			// field is derived and setting it is refused — so without this the
+			// mesh path was pinned at 1 with no way to say otherwise
+			// (ADR-028 amendment, 2026-09-28). nil stays nil, which the stanza
+			// builder already reads as 1.
+			ReplicasPerPeer: replicasPerPeer,
 			Discovery: &ldapv1alpha1.ExternalPeerDiscovery{
 				KubeconfigSecret: kubeconfig,
 			},

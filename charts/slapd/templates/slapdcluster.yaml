@@ -134,6 +134,9 @@ spec:
     {{- with $r.retry }}
     retry: {{ . | quote }}
     {{- end }}
+    {{- with $r.replicasPerPeer }}
+    replicasPerPeer: {{ . }}
+    {{- end }}
     {{- with $r.network }}
     network:
       {{- with .mode }}

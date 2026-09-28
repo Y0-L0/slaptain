@@ -163,3 +163,26 @@ type authIdentityState struct {
 func authIdentityReadyForStanzas(s authIdentityState) bool {
 	return s.AllRWPodsConverged
 }
+
+// resolveReplicasPerPeer picks the cross-site fan-out for one peer.
+//
+// Two levels, narrowest wins: the peer's own value, else the cluster-wide
+// default, else 1. The cluster-wide level exists because a mesh cluster cannot
+// reach the per-peer one — externalPeers is derived under meshRef and setting
+// it is refused — so before it was added, every mesh was pinned at 1
+// (ADR-028 amendment, 2026-09-28). Making it the default for hand-declared
+// peers too keeps one field meaning one thing on both paths, instead of a
+// mesh-only concept nobody would find from the other direction.
+//
+// Values below 1 are treated as unset rather than honoured: zero connections to
+// a peer is not a fan-out, it is a peer that silently does not replicate, and
+// the CRD's Minimum=1 already refuses it at admission. This is the belt for a
+// value that predates the validation.
+func resolveReplicasPerPeer(clusterDefault, peerOverride *int32) int32 {
+	for _, v := range []*int32{peerOverride, clusterDefault} {
+		if v != nil && *v > 1 {
+			return *v
+		}
+	}
+	return 1
+}

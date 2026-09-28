@@ -556,12 +556,48 @@ type SlapdReplicationConfig struct {
 	// +optional
 	AccesslogEnabled *bool `json:"accesslogEnabled,omitempty"`
 	// externalPeers lists cross-cluster peers for multi-site replication.
+	//
+	// DERIVED when spec.meshRef is set: the operator computes the peer set from
+	// the SlapdMesh's site list and setting this field alongside meshRef is
+	// REFUSED, not merged (see checkMeshSpecConflicts). If you are looking for
+	// where your peers come from on a mesh, they come from there — and
+	// replicasPerPeer below is the one per-peer knob that survives, because it
+	// is an input to the derivation rather than an output of it.
 	// +optional
 	ExternalPeers []ExternalPeer `json:"externalPeers,omitempty"`
+
+	// replicasPerPeer is the default cross-site fan-out for every external peer
+	// of this cluster: how many remote pods each local pod opens a syncrepl
+	// connection to, per peer. Unset means 1.
+	//
+	// It exists because a mesh cluster could not reach the per-peer field at
+	// all. externalPeers[].replicasPerPeer is refused alongside meshRef (it is
+	// part of a derived field), and the derivation never set one — so every
+	// mesh was pinned at 1 with no way to say otherwise. Missed rather than
+	// decided; see the ADR-028 amendment of 2026-09-28.
+	//
+	// What it buys is cross-site link REDUNDANCY, not coverage. At 1 each local
+	// pod has a single path to each peer site, and losing the remote pod on the
+	// far end of it costs that pod its cross-site path until discovery
+	// repoints — the 130-268 s ADR-016 window. Data still arrives, via this
+	// pod's in-cluster peers; what is gone is the second route. Raising this
+	// buys the second route at the price of more connections and more refresh
+	// traffic on every peer.
+	//
+	// Capped at the peer's discovered address count: asking for 3 against a
+	// two-pod site silently gets 2, because there is no third pod to attach to.
+	// Per-peer externalPeers[].replicasPerPeer still wins where it is set,
+	// which is the non-mesh path only.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	ReplicasPerPeer *int32 `json:"replicasPerPeer,omitempty"`
 	// network configures a dedicated replication network via Multus. When set,
 	// the operator adds Multus annotations to slapd pods and discovers assigned IPs
 	// from pod network-status annotations. See ADR-007.
 	// +optional
+	// DERIVED when spec.meshRef is set and the SlapdMesh declares a network:
+	// the transport is a property of the fabric, so the mesh owns it. Setting
+	// it on both is REFUSED.
 	Network *ReplicationNetworkConfig `json:"network,omitempty"`
 	// keepalive sets the TCP keepalive parameters for syncrepl connections.
 	// Format: "idle:probes:interval" (seconds), e.g. "300:10:60".
@@ -595,6 +631,9 @@ type SlapdReplicationConfig struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=4094
 	// +optional
+	// DERIVED when spec.meshRef is set, from the site's declared serverIDIndex
+	// (ADR-028 §4); setting it alongside meshRef is REFUSED unless it happens
+	// to equal this exact site's decade.
 	ServerIDBase int32 `json:"serverIDBase,omitempty"`
 }
 
@@ -628,6 +667,11 @@ type SlapdClusterSpec struct {
 	// operator's Deployment, the single per-site fact in the system, ADR-028
 	// §4). Those fields then drop out of the user-facing spec, which is what
 	// lets one chart be applied byte-identically to every site.
+	//
+	// The derived fields are spec.replication.serverIDBase, .externalPeers and
+	// .network; each carries a pointer back here. Inputs to the derivation —
+	// spec.replication.replicasPerPeer, for one — are NOT derived and stay
+	// yours to set.
 	//
 	// Setting any of the derived fields explicitly alongside meshRef is
 	// REFUSED rather than silently resolved in either direction: the cluster

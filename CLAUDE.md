@@ -246,6 +246,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 | `externalPeers[].discovery.namespace` | string | Remote SlapdCluster namespace (default: local namespace) |
 | `externalPeers[].discovery.clusterName` | string | Remote SlapdCluster name (default: local name) |
 | `externalPeers[].replicasPerPeer` | `*int32` | Cross-site fan-out (default 1). Local pod `i`, connection `k` → remote pod `(i+k) % N`. Capped at address count. Ignored in `uri` mode |
+| `spec.replication.replicasPerPeer` | `*int32` | Cluster-wide default for the above, and **the only form a mesh cluster can reach** — `externalPeers` is derived under `meshRef` and refused if set. Stamped onto every derived peer; the per-peer field still wins where set. Buys cross-site link redundancy (a second route when the remote pod at the far end goes away), not coverage. Added 2026-09-28; the gap was missed, not decided — ADR-028 amendment |
 
 Database-level config (ACLs, schemas, indices, replication per-DB) is declared on `SlapdDatabase` and `SlapdSchema` CRs. Per-DB tunables (`maxSize` — recreate-only, slapd segfaults on live modify; `sizeLimit`/`timeLimit`/`limits` default unlimited; checkpoint, `noSync`, `envFlags`, `accesslogPurge` default `7+00:00 1+00:00` with `"none"` opt-out, `syncprovCheckpoint`) follow ADR-024's placement classes — see `docs/TUNING.md`.
 

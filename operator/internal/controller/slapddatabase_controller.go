@@ -2515,10 +2515,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 			podAddrs = ep.PodAddresses
 		}
 
-		rpp := int32(1)
-		if ep.ReplicasPerPeer != nil && *ep.ReplicasPerPeer > 1 {
-			rpp = *ep.ReplicasPerPeer
-		}
+		rpp := resolveReplicasPerPeer(sc.Spec.Replication.ReplicasPerPeer, ep.ReplicasPerPeer)
 
 		// Per-database bind identity: derived unless the peer overrides it.
 		bindDN, bindPassword := externalBindIdentity(

@@ -404,3 +404,73 @@ executable spec. cert-manager and External Secrets adoption (§7) likewise.
 - ADR-025: single-creator seed, mesh-wide — becomes `seed.site`
 - ADR-026: R2, no corrective action on unowned state — why parity checking is read-only
 - ADR-027: the Secret is the source of truth — what makes externally-managed secrets viable
+
+---
+
+## Amendment, 2026-09-28: cross-site fan-out was missed, not rejected
+
+`externalPeers[].replicasPerPeer` (ADR-007) controls how many remote pods each
+local pod opens a syncrepl connection to. A mesh cluster could not reach it:
+`externalPeersForSite` never set it, `SlapdMesh` had no field for it, and
+`checkMeshSpecConflicts` refuses a hand-written `externalPeers` alongside
+`meshRef` — so there was not even a workaround. Every mesh ran pinned at 1.
+
+This ADR records what it rejected; fan-out appears nowhere in it, and that
+silence is the evidence. Missed.
+
+**What it cost.** Coverage was never affected — anything reaching one remote pod
+reaches that site's others by its own in-cluster replication. What was missing is
+cross-site link REDUNDANCY: at 1, each local pod has a single path to each peer,
+and losing the remote pod at the far end costs that pod its cross-site path until
+discovery repoints it — the 130-268 s window of ADR-016, which
+`docs/BACKLOG.md` now records as the dominant term in this project's e2e
+wall-clock. The knob that mitigates the most expensive measured behaviour in the
+system was the one a mesh could not turn.
+
+**Decision: `spec.replication.replicasPerPeer` on SlapdCluster**, not on
+SlapdMesh, defaulting to 1 when unset and stamped onto every derived peer.
+
+The first proposal put it on `SlapdMeshSpec`, next to `network`, whose doc
+comment argues that the transport belongs to the mesh because "two clusters on
+one mesh cannot sensibly disagree about whether pod CIDRs are routed". That
+argument does not carry over: one mesh backs SEVERAL clusters (a cluster's
+`sites` subset selector exists precisely so cluster X can span A+B while Y spans
+A+B+C), and two clusters *can* sensibly disagree about fan-out — it follows from
+their pod count and how much a rediscovery window costs them. A mesh-wide value
+would force a small test tree and a critical five-pod directory to share one.
+
+Putting it on the cluster also avoids inventing a mesh-only concept: the same
+field is the default for hand-declared peers, with `externalPeers[].replicasPerPeer`
+still winning where set. One field, one meaning, reachable from both directions.
+
+It is an **input** to the derivation, not an output, which is why it is absent
+from `checkMeshSpecConflicts`: §4's rule is that a *derived* field set alongside
+`meshRef` is refused, and this is not one.
+
+### Asked and answered: should `meshRef` move under `spec.replication`?
+
+Raised at the same time, since `applyMeshWiring` writes only into
+`spec.Replication` today — `ServerIDBase`, `ExternalPeers`, `Network`, and
+nothing else. On current behaviour, nesting would be more honest.
+
+Rejected, for three reasons in descending weight:
+
+1. **The scope is intended to be broader than it is.** `SlapdMeshSpec.trust`
+   already carries an `issuerRef`, because §7 commits to cert-manager and
+   trust-manager for the CA and its distribution. When that lands, the mesh
+   derives TLS material, which is `spec.ldap.tls` — outside replication.
+   `meshRef` is replication-only today only because trust automation is
+   deferred. Nesting now means un-nesting then.
+2. **Layering symmetry.** The chain is `SlapdMesh ← meshRef ← SlapdCluster ←
+   clusterRef ← SlapdDatabase`. `clusterRef` is top-level; nesting only the mesh
+   half would make the two membership pointers asymmetric for no reason.
+3. **It is a membership statement, not a tunable.** "This cluster belongs to that
+   mesh" reads oddly as a sub-field of how replication is configured —
+   especially when the consequence of setting it is that several *other* fields
+   stop being the user's to set.
+
+The real complaint underneath was discoverability: someone reading
+`spec.replication` sees `externalPeers` with no hint that it is derived
+elsewhere. Fixed directly instead — each of the three derived fields now carries
+a pointer back to `meshRef` in its doc comment, which puts the explanation where
+the person who needs it is already looking.

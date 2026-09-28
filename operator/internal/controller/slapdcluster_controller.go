@@ -517,7 +517,21 @@ func (r *SlapdClusterReconciler) reconcileSecret(ctx context.Context, sc *ldapv1
 // reconcileHeadlessService applies the headless Service (clusterIP: None) via SSA.
 // Named <name>-headless so the bare <name> can be used for the ClusterIP service.
 func (r *SlapdClusterReconciler) reconcileHeadlessService(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
-	svc := &corev1.Service{
+	svc := r.headlessService(sc)
+	if err := controllerutil.SetControllerReference(sc, svc, r.Scheme); err != nil {
+		return err
+	}
+	ac, err := applyConfiguration(svc)
+	if err != nil {
+		return err
+	}
+	return r.Apply(ctx, ac, client.ForceOwnership, client.FieldOwner(fieldManager))
+}
+
+// headlessService builds the RW headless Service. Split out from its reconcile
+// so the Service's shape is unit-testable without a client.
+func (r *SlapdClusterReconciler) headlessService(sc *ldapv1alpha1.SlapdCluster) *corev1.Service {
+	return &corev1.Service{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sc.Name + "-headless",
@@ -525,7 +539,26 @@ func (r *SlapdClusterReconciler) reconcileHeadlessService(ctx context.Context, s
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP: corev1.ClusterIPNone,
-			Selector:  selectorLabels(sc.Name),
+			// Publish endpoints for NotReady pods too.
+			//
+			// This Service exists for pod DNS, not for clients: the operator
+			// resolves <name>-<ordinal>.<name>-headless… for every per-pod
+			// cn=config operation (ADR-002), and syncrepl peers address each
+			// other the same way. Default behaviour drops a NotReady pod out of
+			// that DNS, so once slapd has a readiness probe an unhealthy pod
+			// would become an UNREACHABLE one — the operator could not converge
+			// it, and ADR-027's identity gate would then withhold syncrepl for
+			// the whole site. The cluster's answer to one sick pod must not be
+			// to stop configuring all of them.
+			//
+			// The client-facing ClusterIP Service deliberately does NOT set
+			// this: stopping traffic at an unready pod is the point of a probe.
+			//
+			// ADR-013 named this in May 2026 and it never shipped, because the
+			// probe it was written for never shipped. Landed on its own while it
+			// is still a no-op — nothing is ever NotReady today.
+			PublishNotReadyAddresses: true,
+			Selector:                 selectorLabels(sc.Name),
 			Ports: []corev1.ServicePort{
 				{
 					Name:       "ldap",
@@ -542,6 +575,11 @@ func (r *SlapdClusterReconciler) reconcileHeadlessService(ctx context.Context, s
 			},
 		},
 	}
+}
+
+// reconcileClusterIPService applies the ClusterIP Service via SSA.
+func (r *SlapdClusterReconciler) reconcileClusterIPService(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
+	svc := r.clusterIPService(sc)
 	if err := controllerutil.SetControllerReference(sc, svc, r.Scheme); err != nil {
 		return err
 	}
@@ -552,8 +590,8 @@ func (r *SlapdClusterReconciler) reconcileHeadlessService(ctx context.Context, s
 	return r.Apply(ctx, ac, client.ForceOwnership, client.FieldOwner(fieldManager))
 }
 
-// reconcileClusterIPService applies the ClusterIP Service via SSA.
-func (r *SlapdClusterReconciler) reconcileClusterIPService(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
+// clusterIPService builds the client-facing Service.
+func (r *SlapdClusterReconciler) clusterIPService(sc *ldapv1alpha1.SlapdCluster) *corev1.Service {
 	svcType := sc.Spec.Service.Type
 	if svcType == "" {
 		svcType = corev1.ServiceTypeClusterIP
@@ -567,7 +605,7 @@ func (r *SlapdClusterReconciler) reconcileClusterIPService(ctx context.Context, 
 		ldapsPort = 636
 	}
 
-	svc := &corev1.Service{
+	return &corev1.Service{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        sc.Name,
@@ -596,14 +634,6 @@ func (r *SlapdClusterReconciler) reconcileClusterIPService(ctx context.Context, 
 			},
 		},
 	}
-	if err := controllerutil.SetControllerReference(sc, svc, r.Scheme); err != nil {
-		return err
-	}
-	ac, err := applyConfiguration(svc)
-	if err != nil {
-		return err
-	}
-	return r.Apply(ctx, ac, client.ForceOwnership, client.FieldOwner(fieldManager))
 }
 
 // reconcileStatefulSet applies the StatefulSet via SSA.
@@ -674,7 +704,20 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyHeadlessService(ctx context.Co
 	if sc.Spec.ReadReplicas == 0 {
 		return nil
 	}
-	svc := &corev1.Service{
+	svc := r.readOnlyHeadlessService(sc)
+	if err := controllerutil.SetControllerReference(sc, svc, r.Scheme); err != nil {
+		return err
+	}
+	ac, err := applyConfiguration(svc)
+	if err != nil {
+		return err
+	}
+	return r.Apply(ctx, ac, client.ForceOwnership, client.FieldOwner(fieldManager))
+}
+
+// readOnlyHeadlessService builds the read-only headless Service.
+func (r *SlapdClusterReconciler) readOnlyHeadlessService(sc *ldapv1alpha1.SlapdCluster) *corev1.Service {
+	return &corev1.Service{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sc.Name + "-readonly-headless",
@@ -682,7 +725,26 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyHeadlessService(ctx context.Co
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP: corev1.ClusterIPNone,
-			Selector:  readOnlySelectorLabels(sc.Name),
+			// Publish endpoints for NotReady pods too.
+			//
+			// This Service exists for pod DNS, not for clients: the operator
+			// resolves <name>-<ordinal>.<name>-headless… for every per-pod
+			// cn=config operation (ADR-002), and syncrepl peers address each
+			// other the same way. Default behaviour drops a NotReady pod out of
+			// that DNS, so once slapd has a readiness probe an unhealthy pod
+			// would become an UNREACHABLE one — the operator could not converge
+			// it, and ADR-027's identity gate would then withhold syncrepl for
+			// the whole site. The cluster's answer to one sick pod must not be
+			// to stop configuring all of them.
+			//
+			// The client-facing ClusterIP Service deliberately does NOT set
+			// this: stopping traffic at an unready pod is the point of a probe.
+			//
+			// ADR-013 named this in May 2026 and it never shipped, because the
+			// probe it was written for never shipped. Landed on its own while it
+			// is still a no-op — nothing is ever NotReady today.
+			PublishNotReadyAddresses: true,
+			Selector:                 readOnlySelectorLabels(sc.Name),
 			Ports: []corev1.ServicePort{
 				{
 					Name:       "ldap",
@@ -699,6 +761,15 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyHeadlessService(ctx context.Co
 			},
 		},
 	}
+}
+
+// reconcileReadOnlyService applies the read-only ClusterIP Service via SSA.
+// Skipped when spec.readReplicas == 0.
+func (r *SlapdClusterReconciler) reconcileReadOnlyService(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
+	if sc.Spec.ReadReplicas == 0 {
+		return nil
+	}
+	svc := r.readOnlyService(sc)
 	if err := controllerutil.SetControllerReference(sc, svc, r.Scheme); err != nil {
 		return err
 	}
@@ -709,12 +780,8 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyHeadlessService(ctx context.Co
 	return r.Apply(ctx, ac, client.ForceOwnership, client.FieldOwner(fieldManager))
 }
 
-// reconcileReadOnlyService applies the read-only ClusterIP Service via SSA.
-// Skipped when spec.readReplicas == 0.
-func (r *SlapdClusterReconciler) reconcileReadOnlyService(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
-	if sc.Spec.ReadReplicas == 0 {
-		return nil
-	}
+// readOnlyService builds the client-facing read-only Service.
+func (r *SlapdClusterReconciler) readOnlyService(sc *ldapv1alpha1.SlapdCluster) *corev1.Service {
 	svcType := sc.Spec.Service.Type
 	if svcType == "" {
 		svcType = corev1.ServiceTypeClusterIP
@@ -728,7 +795,7 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyService(ctx context.Context, s
 		ldapsPort = 636
 	}
 
-	svc := &corev1.Service{
+	return &corev1.Service{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sc.Name + "-readonly",
@@ -753,14 +820,6 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyService(ctx context.Context, s
 			},
 		},
 	}
-	if err := controllerutil.SetControllerReference(sc, svc, r.Scheme); err != nil {
-		return err
-	}
-	ac, err := applyConfiguration(svc)
-	if err != nil {
-		return err
-	}
-	return r.Apply(ctx, ac, client.ForceOwnership, client.FieldOwner(fieldManager))
 }
 
 // reconcileReadOnlyStatefulSet applies the read-only StatefulSet via SSA.

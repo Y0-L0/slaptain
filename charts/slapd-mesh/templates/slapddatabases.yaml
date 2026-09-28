@@ -12,6 +12,7 @@ slapd-mesh.validate.
 */ -}}
 {{- $clusterName := .Values.cluster.name -}}
 {{- $labels := include "slapd-mesh.labels" . -}}
+{{- $retain := include "slapd-mesh.retainAnnotations" . -}}
 {{- range .Values.databases }}
 ---
 apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
@@ -20,6 +21,10 @@ metadata:
   name: {{ .name }}
   labels:
     {{- $labels | nindent 4 }}
+  {{- with $retain }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
 spec:
   {{- include "slapd-mesh.childSpec" (dict "spec" .spec "clusterName" $clusterName) | nindent 2 }}
 {{- end }}

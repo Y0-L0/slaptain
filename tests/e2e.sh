@@ -703,8 +703,16 @@ setup_mesh_bundle() {
     local ctx
     for ctx in "${CONTEXTS[@]}"; do
         log "[$ctx] Installing the mesh bundle (site ${SITE_NAMES[$ctx]}, identical values)..."
+        # retainOnUninstall=false: the chart defaults to keeping SlapdDatabase
+        # and SlapdSchema objects across a `helm uninstall`, because a database
+        # holds data and an uninstall should not be the thing that decides its
+        # cleanupPolicy. This fixture is the exception the default is written
+        # for — it is disposable by construction, and teardown wants helm to
+        # take its own objects with it rather than leaning on the explicit CR
+        # sweep in delete_slapd_owners to catch what helm deliberately left.
         hctl "$ctx" upgrade --install slapd "$PROJECT_ROOT/charts/slapd-mesh" \
             --namespace "$NAMESPACE_TESTING" --create-namespace \
+            --set retainOnUninstall=false \
             -f "$MESH_VALUES_FILE"
     done
 }

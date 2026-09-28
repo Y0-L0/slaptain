@@ -220,6 +220,20 @@ cluster:
   imagePullSecrets: []
   #  - name: ghcr-pull-secret
 
+# -- Keep the SlapdDatabase and SlapdSchema objects when the release is removed
+# (`helm.sh/resource-policy: keep`). On by default: a database is the
+# declaration of a directory that holds data, and how much a `helm uninstall`
+# costs otherwise depends on each database's cleanupPolicy — Retain leaves it
+# serving but unmanaged, Delete tears it off every pod (ADR-005). On a mesh the
+# peers keep replicating meanwhile, so an uninstall that looked local shows up
+# as a parity divergence (ADR-028).
+#
+# Set false only for an install that is genuinely disposable. Note the Helm
+# consequence of true: kept objects are orphaned from the release, so a later
+# install adopts them (meta.helm.sh/release-name + -namespace) rather than
+# creating them.
+retainOnUninstall: true
+
 # -- SlapdDatabases. Each entry is {name, spec}; spec is passed through to the
 # CR verbatim, so anything valid on a SlapdDatabase is valid here. clusterRef is
 # pinned by the chart to cluster.name and must not be set.

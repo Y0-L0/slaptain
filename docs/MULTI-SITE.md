@@ -228,6 +228,14 @@ yq -r '.sites[].context // .sites[].name' lab.yaml | while read -r ctx; do
     -f values.topology.yaml -f values.directory.yaml
 done
 
+#    NOTE the chart keeps its SlapdDatabase and SlapdSchema objects when the
+#    release is removed (helm.sh/resource-policy: keep). `helm uninstall ldap`
+#    therefore takes the SlapdCluster and leaves your directories alone — the
+#    PVCs were never Helm's either. Removing a database is a deliberate
+#    `kubectl delete slapddatabase`, which is the point at which its
+#    cleanupPolicy (ADR-005) is your decision rather than a side effect of an
+#    uninstall. Set retainOnUninstall: false for a disposable install.
+#
 #    FROM A LOCAL BUILD, the counterpart of step 6's local variant:
 #
 #      yq -r '.sites[].context // .sites[].name' lab.yaml |

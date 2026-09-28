@@ -133,3 +133,35 @@ Call with a dict: (dict "spec" $db.spec "clusterName" $name).
 {{- $spec := omit (default (dict) .spec) "clusterRef" -}}
 {{- toYaml (merge (dict "clusterRef" .clusterName) $spec) -}}
 {{- end -}}
+
+{{/*
+Survive `helm uninstall`.
+
+A SlapdDatabase is not a deployment artifact — it is the declaration of a
+directory that holds data. Helm's default lifecycle would delete these CRs when
+the release goes away, and what that costs depends on a field the chart does not
+own: with cleanupPolicy Retain (the default, ADR-005) the database keeps serving
+on every pod, merely unmanaged; with Delete the operator tears it, its overlays
+and its accesslog DB off every pod. One `helm uninstall` therefore ranges from
+"harmless orphan" to "the directory is deregistered on every pod of this site",
+decided by a value someone set months earlier.
+
+On a mesh it is worse than on a single site, because the other sites keep
+replicating: this site's databases go unmanaged while its peers carry on, and
+ADR-028's parity check starts reporting a site missing a database — a divergence
+produced by an uninstall that looked local.
+
+So the objects are annotated keep, and removing a database means deleting its CR
+deliberately, which is the point at which cleanupPolicy is the user's decision
+rather than a side effect. Set retainOnUninstall: false for an install that is
+genuinely disposable — the e2e fixture is exactly that user.
+
+The cost is Helm's, and it is the familiar one: a kept object is orphaned from
+the release, so a later install must adopt it (the meta.helm.sh/release-name +
+release-namespace annotations) instead of creating it.
+*/}}
+{{- define "slapd-mesh.retainAnnotations" -}}
+{{- if .Values.retainOnUninstall -}}
+helm.sh/resource-policy: keep
+{{- end -}}
+{{- end -}}

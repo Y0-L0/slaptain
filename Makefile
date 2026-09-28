@@ -159,7 +159,7 @@ define import-if-needed
 	fi
 endef
 
-.PHONY: all build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-toolkit build-operator build-slctl install-slctl push gencert helm-deploy cluster-helm-install cluster-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag
+.PHONY: all build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-toolkit build-operator build-slctl install-slctl push gencert helm-deploy cluster-helm-install cluster-helm-uninstall mesh-helm-install mesh-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag
 
 ## all: the six pushable images plus slctl. build-ol26 is included so a
 ## release build carries the legacy OpenLDAP 2.6 pair too (ADR-021).
@@ -336,6 +336,33 @@ cluster-helm-install:
 
 cluster-helm-uninstall:
 	$(HELM) uninstall slapd --namespace $(NAMESPACE_TESTING)
+
+## mesh-helm-install: the slapd-mesh chart at ONE site, from the working tree
+## instead of the published OCI chart — the local-build counterpart of step 7 in
+## docs/MULTI-SITE.md. Loop it over the sites the same way:
+##   yq -r '.sites[].context // .sites[].name' lab.yaml |
+##     while read -r ctx; do make mesh-helm-install CONTEXT="$$ctx"; done
+##
+## NOTE there is no image pinning here, and that is deliberate rather than an
+## omission: the mesh chart leaves cluster.images empty so the OPERATOR defaults
+## both data-plane images to its own registry and tag. Installing the operator
+## from a local build is therefore the whole of "run local images" — pinning
+## them here as well would break that coupling and is how a site ends up running
+## a slapd that does not match the operator managing it.
+##
+## The values files are the two written in step 1b, and they are per-lab rather
+## than per-site: every site gets the same bytes (ADR-028 §3).
+MESH_RELEASE   ?= ldap
+MESH_NAMESPACE ?= slaptain
+MESH_VALUES    ?= values.topology.yaml values.directory.yaml
+
+mesh-helm-install:
+	$(HELM) upgrade --install $(MESH_RELEASE) ./charts/slapd-mesh \
+		--namespace $(MESH_NAMESPACE) --create-namespace \
+		$(foreach f,$(MESH_VALUES),-f $(f)) $(HELM_ARGS)
+
+mesh-helm-uninstall:
+	$(HELM) uninstall $(MESH_RELEASE) --namespace $(MESH_NAMESPACE)
 
 ## operator-helm-install: deploy/upgrade the operator. Depends on
 ## operator-crd-apply so CRDs are always current — `helm upgrade` won't do it

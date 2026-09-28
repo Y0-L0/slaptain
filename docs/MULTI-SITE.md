@@ -227,6 +227,16 @@ yq -r '.sites[].context // .sites[].name' lab.yaml | while read -r ctx; do
     -n slaptain --create-namespace \
     -f values.topology.yaml -f values.directory.yaml
 done
+
+#    FROM A LOCAL BUILD, the counterpart of step 6's local variant:
+#
+#      yq -r '.sites[].context // .sites[].name' lab.yaml |
+#        while read -r ctx; do make mesh-helm-install CONTEXT="$ctx"; done
+#
+#    Note there is no image tag anywhere in step 7, in either variant. The
+#    chart leaves cluster.images empty so the OPERATOR defaults both data-plane
+#    images to its own registry and tag — so step 6 already decided which slapd
+#    runs here, and pinning images now would break that coupling.
 ```
 
 Then `slctl inspect -n slaptain slapd` at each site. `MeshResolved=True` means the

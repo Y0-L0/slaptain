@@ -391,6 +391,8 @@ runs without readpw configuration but skips those test cases.
 | `make gencert` | Generate self-signed TLS cert via `tests/gencert.sh` |
 | `make helm-deploy` | Full pipeline: `deliver` + `gencert` + `cluster-helm-install` |
 | `make cluster-helm-install` | `helm upgrade --install slapd ./charts/slapd` |
+| `make mesh-helm-install` | `helm upgrade --install ldap ./charts/slapd-mesh` at one site, from the working tree — the local-build counterpart of `docs/MULTI-SITE.md` step 7. `MESH_RELEASE`/`MESH_NAMESPACE`/`MESH_VALUES` override the release, namespace and values files; loop it over `CONTEXT` for the whole mesh. Pins no image on purpose: the chart leaves `cluster.images` empty so the operator defaults both data-plane images to its own tag |
+| `make mesh-helm-uninstall` | Uninstall that release |
 | `make cluster-helm-uninstall` | Uninstall the slapd Helm release |
 | `make testing-apply` | `kubectl apply` test resources (SlapdDatabase, SlapdSchema, Secrets) |
 | `make testing-delete` | `kubectl delete` test resources |

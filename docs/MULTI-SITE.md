@@ -60,6 +60,16 @@ seed:
 Every site reads that same value, and every site but `site-a` finds it is not
 itself and withholds.
 
+**Where the per-site knowledge lives**, since it has to live somewhere: in the
+**operator**, and nowhere else. Each site's operator is installed with its own
+`siteName`, and that single fact is what lets it derive its `serverIDBase`, its
+peer set, its network mode and its trust wiring from a `SlapdMesh` every site
+holds identically (ADR-028 §4). No tool that renders or applies these objects
+ever needs to know which site it is aimed at — which is why "apply the same
+bytes everywhere" is a complete instruction, and why the Helm chart is packaging
+rather than mechanism (see [The chart is packaging, not
+mechanism](#the-chart-is-packaging-not-mechanism)).
+
 The one genuinely per-site fact in the system is **"which of these sites am
 I?"**, and it lives outside every CR — in the operator's own installation
 config. See [Site identity](#site-identity-the-one-per-site-fact).
@@ -250,6 +260,68 @@ done
 Then `slctl inspect -n slaptain slapd` at each site. `MeshResolved=True` means the
 operator found its mesh and derived its wiring; `ReplicationConverged=True` means
 the databases agree.
+
+### The chart is packaging, not mechanism
+
+Worth being precise about, because it is easy to assume the Helm chart is what
+makes a mesh coherent. It is not. **Nothing in `charts/slapd-mesh` renders
+site-specifically** — the objects deliberately use no `.Release.Name` and no
+`.Release.Namespace`, so three different release names produce a byte-identical
+manifest:
+
+```console
+$ for n in slapd ldap prod; do helm template $n ./charts/slapd-mesh -f ... | sha256sum; done
+f07435a697ecf46e557968a8acd9621a9d04b5099195d834f4f097bf4bc41be4  -
+f07435a697ecf46e557968a8acd9621a9d04b5099195d834f4f097bf4bc41be4  -
+f07435a697ecf46e557968a8acd9621a9d04b5099195d834f4f097bf4bc41be4  -
+```
+
+Every per-site fact is derived by the **operator**, from the `SlapdMesh` plus its
+own `siteName` — `serverIDBase`, the peer set, the network mode, the trust
+wiring (ADR-028 §4). Helm never knows which site it is rendering for, and cannot:
+the site name is not in these values at all, it is on the operator's chart.
+
+So what the chart buys is **packaging and the separation of values from
+manifests**: a versioned OCI artifact you can pin and pull, one values file
+instead of four documents, and the render-time checks that refuse a duplicated
+`serverIDIndex` or a seeded database without `seed.site`. Real value, none of it
+load-bearing. **A byte-identical plain manifest applied at every site would do
+exactly as well**, and ADR-028 says as much about coherence:
+
+> With a chart, coherence is established at apply time and verified afterwards.
+
+Verified afterwards means the operator's parity condition and `slctl mesh verify`
+(§6) — not Helm.
+
+### Rendering once is the stronger option
+
+Following from the above: if the render is identical by construction, then
+rendering **once** and applying the same bytes everywhere is a better guarantee
+than running `helm upgrade` three times, because three invocations can diverge
+through a single stray `--set` at one site, and a divergence there is precisely
+what the parity check exists to catch after the fact.
+
+```bash
+# Render once. This file IS the mesh-scoped artifact; hash it, commit it, review it.
+helm template ldap oci://ghcr.io/chuck-chuck-chuck-net/charts/slapd-mesh   -n slaptain -f values.topology.yaml -f values.directory.yaml > mesh.yaml
+sha256sum mesh.yaml
+
+# Apply the same bytes at every site.
+yq -r '.sites[].context // .sites[].name' lab.yaml | while read -r ctx; do
+  kubectl --context "$ctx" apply -n slaptain -f mesh.yaml
+done
+```
+
+The render-time checks still run (they are render-time), and there is no release
+to `helm uninstall`, so the hazard the `resource-policy: keep` annotation exists
+for does not arise at all. What you give up is `helm upgrade`'s diffing and
+release history. This is also the shape a GitOps tool wants — note that under
+Argo CD with `prune` enabled, removing a database from the values deletes its CR
+just as an uninstall would, so mark the ones holding data non-prunable.
+
+Both paths are supported. `helm upgrade --install` is the convenient one; this
+one is the one whose artifact you can point at and say "these exact bytes went to
+all three sites".
 
 **Why the order.** Steps 2-5 are the imperative bootstrap: material the operator
 needs to already exist. Step 7 is the declarative steady state. Within the

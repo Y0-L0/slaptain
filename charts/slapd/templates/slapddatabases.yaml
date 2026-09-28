@@ -1,0 +1,44 @@
+{{- /*
+The chart's SlapdDatabases.
+
+spec is passed through verbatim (minus clusterRef, which the chart pins) rather
+than re-declared field by field. SlapdDatabase has some forty spec fields across
+five ADRs' worth of tunables; enumerating them here would silently narrow what
+the chart can express and would go stale on the next CRD change. The values file
+therefore mirrors the CR, and anything valid on a SlapdDatabase is valid here.
+
+WHY THIS EXISTS AT ALL, since ADR-004 separates infrastructure (SlapdCluster)
+from content (SlapdDatabase/SlapdSchema) and this chart is the infrastructure
+one: the separation is a data-model property, not a packaging one. charts/
+slapd-mesh has rendered all four kinds since ADR-028 §5, and having the
+single-site chart render only the cluster meant the documented way to declare a
+database CHANGED when a user moved from one site to a mesh — hand-written CRs
+becoming values entries. The trajectory single-site → mesh is the common one
+(it is what the demo walks), so the move should be "add a mesh: block", not
+"rewrite how you declare your objects".
+
+The mesh chart's reason for bundling is stronger and still stands: there,
+byte-identical databases across sites ARE an invariant, and one values file is
+what makes divergence require actively doing something else (ADR-028). Here
+there is no parity to enforce — N=1 — so this is convenience and consistency
+only, and it stays opt-in: databases defaults to [].
+*/ -}}
+{{- $clusterName := include "slapd.fullname" . -}}
+{{- $labels := include "slapd.labels" . -}}
+{{- $retain := include "slapd.retainAnnotations" . -}}
+{{- include "slapd.validateDatabases" . -}}
+{{- range .Values.databases }}
+---
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdDatabase
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- $labels | nindent 4 }}
+  {{- with $retain }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- include "slapd.childSpec" (dict "spec" .spec "clusterName" $clusterName) | nindent 2 }}
+{{- end }}

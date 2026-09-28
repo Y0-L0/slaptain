@@ -91,7 +91,8 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── operator/                   # Helm chart for deploying the operator itself
 │   │   ├── crds/                   # CRD YAML (synced from operator/config/crd/bases/ via make operator-manifests)
 │   │   └── templates/              # deployment, RBAC, serviceaccount, metrics, networkpolicy
-│   ├── slapd/                      # Helm chart deploying a SlapdCluster CR (operator required)
+│   ├── slapd/                      # Helm chart deploying a SlapdCluster CR (operator required),
+│   │                               # plus optional `databases:`/`schemas:` (empty by default)
 │   ├── slapd-mesh/                 # Helm chart deploying a whole multi-site mesh: SlapdMesh + SlapdCluster
 │   │                               # + databases + schemas, applied IDENTICALLY at every site (ADR-028)
 │   └── slapd-toolkit/              # Persistent debug pod (ldap-utils, python3, ldap3) wired to operator-managed Secrets

@@ -1,0 +1,28 @@
+{{- /*
+The chart's SlapdSchemas. Same passthrough rule as the databases, and the same
+opt-in default of [].
+
+Schemas are additive and desired-minimum (ADR-006), so declaring them here is
+purely a matter of where the YAML lives; nothing about the single-site case
+makes it load-bearing the way schema parity is on a mesh, where a site missing
+a schema still replicates but silently fails to add every entry carrying an
+objectClass it does not know.
+*/ -}}
+{{- $clusterName := include "slapd.fullname" . -}}
+{{- $labels := include "slapd.labels" . -}}
+{{- $retain := include "slapd.retainAnnotations" . -}}
+{{- range .Values.schemas }}
+---
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdSchema
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- $labels | nindent 4 }}
+  {{- with $retain }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- include "slapd.childSpec" (dict "spec" .spec "clusterName" $clusterName) | nindent 2 }}
+{{- end }}

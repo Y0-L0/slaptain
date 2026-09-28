@@ -343,6 +343,14 @@ func collectLDAPArtifacts(ctx context.Context, coreClient kubernetes.Interface, 
 					"(objectClass=olcMdbConfig)", []string{"olcSuffix", "olcSyncRepl", "olcMultiProvider", "olcAccess"}, nil,
 				))
 				if err == nil {
+					// EVERY data database, not the first one. A bundle is
+					// handed to someone who cannot re-run the query, so a dump
+					// that silently covers db1 and omits db2 sends them looking
+					// in the wrong place — the same first-data-DB blind spot
+					// `inspect` carried until 2026-09-28. os.WriteFile
+					// truncates, so the entries are concatenated into one file
+					// per pod rather than written per database.
+					var dump strings.Builder
 					for _, entry := range dbResult.Entries {
 						suffix := ""
 						if vals := entry.GetEqualFoldAttributeValues("olcSuffix"); len(vals) > 0 {
@@ -351,12 +359,16 @@ func collectLDAPArtifacts(ctx context.Context, coreClient kubernetes.Interface, 
 						if strings.HasPrefix(suffix, "cn=") {
 							continue
 						}
-						// syncrepl + multiProvider
-						write(fmt.Sprintf("syncrepl-%s.txt", podName), formatLDAPEntry(entry))
-						// ACLs
-						write(fmt.Sprintf("acls-%s.txt", podName), formatLDAPEntry(entry))
-						break
+						if dump.Len() > 0 {
+							dump.WriteString("\n")
+						}
+						dump.WriteString(formatLDAPEntry(entry))
 					}
+					// One entry carries both olcSyncRepl and olcAccess, so the
+					// two files are the same dump under the two names a reader
+					// would look for.
+					write(fmt.Sprintf("syncrepl-%s.txt", podName), dump.String())
+					write(fmt.Sprintf("acls-%s.txt", podName), dump.String())
 				}
 			}
 			configConn.Close()

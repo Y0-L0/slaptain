@@ -72,6 +72,11 @@ type dbIdentity struct {
 	// external-peer stanzas (ADR-019 R9) — the peer's log suffix, possibly
 	// overridden via spec.replication.externalAccesslogSuffix.
 	ExternalLogBase string
+	// Replicated is true when the operator writes syncrepl stanzas for this
+	// database: the cluster has replication on and so does the database. The
+	// syncrepl checks scope to these, because a non-replicated database
+	// legitimately carries no stanzas and no olcMultiProvider.
+	Replicated bool
 }
 
 // observedDB is one olcMdbConfig child of cn=config as read off a pod.
@@ -87,6 +92,10 @@ type observedDB struct {
 	AccessLogDB string
 	// SyncRepl holds the raw olcSyncRepl stanza values.
 	SyncRepl []string
+	// MultiProvider is olcMultiProvider on this database, "" when absent. Per
+	// database, like everything else here — a cluster can carry one database
+	// that accepts writes on every pod and another that silently does not.
+	MultiProvider string
 }
 
 // podAccesslogState is what one pod showed. Skip marks a pod that could not be

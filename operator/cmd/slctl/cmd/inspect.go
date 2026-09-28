@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -68,8 +67,12 @@ type podJSON struct {
 	// to ONE database (ADR-008 amendment 2026-09-14). Replaces the former flat
 	// "contextCSN" array, which only ever carried the first suffix's vector.
 	ContextCSNBySuffix map[string][]string `json:"contextCSNBySuffix,omitempty"`
-	SyncRepl           []string            `json:"syncRepl,omitempty"`
-	MultiProvider      string              `json:"multiProvider,omitempty"`
+	// SyncReplBySuffix and MultiProviderBySuffix are keyed by data suffix:
+	// olcSyncRepl and olcMultiProvider live on ONE olcDatabase={N}mdb entry, so
+	// a pod serving two databases has two of each. They replace the former flat
+	// "syncRepl"/"multiProvider", which only ever carried the first data DB's.
+	SyncReplBySuffix      map[string][]string `json:"syncReplBySuffix,omitempty"`
+	MultiProviderBySuffix map[string]string   `json:"multiProviderBySuffix,omitempty"`
 	ConfigQueryError   string              `json:"configQueryError,omitempty"`
 	Error              string              `json:"error,omitempty"`
 }
@@ -89,14 +92,14 @@ type podState struct {
 	namingContexts []string
 	// contextCSN is keyed by data suffix. A key present with an empty vector
 	// means the pod serves that database but no contextCSN could be read.
-	contextCSN    map[string][]string
-	syncRepl      []string
-	multiProvider string
+	contextCSN map[string][]string
 	// dbs is every olcMdbConfig entry this pod serves — data and accesslog
-	// alike — with each data DB's accesslog overlay resolved onto it. The
-	// per-database accesslog checks need the whole set (ADR-019); syncRepl and
-	// multiProvider above stay as they are, the first data DB's values, because
-	// the per-pod display is written against them.
+	// alike — with each data DB's accesslog overlay, syncrepl stanzas and
+	// olcMultiProvider resolved onto it. It is the ONLY source for those: the
+	// scalar syncRepl/multiProvider fields that used to sit here carried the
+	// FIRST data DB's values, so every check and the whole display silently
+	// reported on one database of however many the pod served (fixed
+	// 2026-09-28, the counterpart of the ADR-008 CSN amendment).
 	dbs []observedDB
 	// suffixEntries is each data suffix's base entry as this pod shows it —
 	// ordinary visibility, glue verdict (ManageDSAIT), entryUUID (ADR-025).
@@ -112,9 +115,20 @@ func (ps podState) toJSON() podJSON {
 		Phase:              ps.phase,
 		NamingContexts:     ps.namingContexts,
 		ContextCSNBySuffix: ps.contextCSN,
-		SyncRepl:           ps.syncRepl,
-		MultiProvider:      ps.multiProvider,
-		ConfigQueryError:   ps.configError,
+		SyncReplBySuffix:   ps.syncReplBySuffix(),
+		MultiProviderBySuffix: func() map[string]string {
+			out := map[string]string{}
+			for _, db := range ps.dataDBs() {
+				if db.MultiProvider != "" {
+					out[db.Suffix] = db.MultiProvider
+				}
+			}
+			if len(out) == 0 {
+				return nil
+			}
+			return out
+		}(),
+		ConfigQueryError: ps.configError,
 		Error:              ps.err,
 	}
 }
@@ -474,30 +488,18 @@ func gatherPodState(ctx context.Context, coreClient kubernetes.Interface, config
 				if err != nil {
 					ps.configError = fmt.Sprintf("cn=config search: %v", err)
 				} else {
-					multiProvider := make(map[string]string, len(dbResult.Entries))
 					for _, entry := range dbResult.Entries {
 						suffix := ""
 						if vals := entry.GetEqualFoldAttributeValues("olcSuffix"); len(vals) > 0 {
 							suffix = vals[0]
 						}
 						ps.dbs = append(ps.dbs, observedDB{
-							DN:       entry.DN,
-							Suffix:   suffix,
-							Dir:      entry.GetEqualFoldAttributeValue("olcDbDirectory"),
-							SyncRepl: redactCredentialsAll(entry.GetEqualFoldAttributeValues("olcSyncRepl")),
+							DN:            entry.DN,
+							Suffix:        suffix,
+							Dir:           entry.GetEqualFoldAttributeValue("olcDbDirectory"),
+							SyncRepl:      redactCredentialsAll(entry.GetEqualFoldAttributeValues("olcSyncRepl")),
+							MultiProvider: entry.GetEqualFoldAttributeValue("olcMultiProvider"),
 						})
-						multiProvider[entry.DN] = entry.GetEqualFoldAttributeValue("olcMultiProvider")
-					}
-					// The per-pod display shows one data DB's stanzas and
-					// multiProvider; the accesslog DBs (and any other cn=…
-					// internal database) are not it.
-					for _, od := range ps.dbs {
-						if strings.HasPrefix(od.Suffix, "cn=") {
-							continue
-						}
-						ps.syncRepl = od.SyncRepl
-						ps.multiProvider = multiProvider[od.DN]
-						break
 					}
 					// Resolve each data DB's accesslog overlay onto it. The
 					// overlay hangs under the database it logs, and slapd's {N}
@@ -651,115 +653,18 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 	expectedRW := int(sc.Spec.Replicas-1) + externalStanzaCount
 	expectedRO := int(sc.Spec.Replicas)
 
-	stanzaOK := true
-	var stanzaIssues []string
-	for _, ps := range rwPods {
-		if ps.err != "" {
-			continue
-		}
-		if len(ps.syncRepl) != expectedRW {
-			stanzaOK = false
-			stanzaIssues = append(stanzaIssues,
-				fmt.Sprintf("%s: %d stanzas (want %d)", ps.name, len(ps.syncRepl), expectedRW))
-		}
-	}
-	for _, ps := range roPods {
-		if ps.err != "" {
-			continue
-		}
-		if len(ps.syncRepl) != expectedRO {
-			stanzaOK = false
-			stanzaIssues = append(stanzaIssues,
-				fmt.Sprintf("%s: %d stanzas (want %d)", ps.name, len(ps.syncRepl), expectedRO))
-		}
-	}
-	if stanzaOK {
-		check("syncrepl-stanza-count", "pass",
-			fmt.Sprintf("RW: %d each, RO: %d each", expectedRW, expectedRO))
-	} else {
-		check("syncrepl-stanza-count", "fail", strings.Join(stanzaIssues, "; "))
-	}
-
-	// ── syncRepl skip-self ──
-	selfOK := true
-	var selfIssues []string
-	headlessSvc := sc.Name + "-headless"
-	for _, ps := range rwPods {
-		if ps.err != "" {
-			continue
-		}
-		selfURI := fmt.Sprintf("%s.%s.", ps.name, headlessSvc)
-		for _, sr := range ps.syncRepl {
-			if strings.Contains(sr, selfURI) {
-				selfOK = false
-				selfIssues = append(selfIssues, fmt.Sprintf("%s replicates from itself", ps.name))
-			}
-		}
-	}
-	if selfOK {
-		check("syncrepl-skip-self", "pass", "no RW pod replicates from itself")
-	} else {
-		check("syncrepl-skip-self", "fail", strings.Join(selfIssues, "; "))
-	}
-
-	// ── multiProvider on RW, absent on RO ──
+	// The four checks below judge PER DATABASE (syncreplcheck.go). They used to
+	// read whichever data DB came first out of cn=config and report its verdict
+	// as the pod's — so on a two-database cluster they covered db1 and were
+	// blind to db2, rid-uniqueness most damagingly of all, since a RID
+	// collision is BETWEEN databases by nature.
+	readings := syncreplReadings(rwPods, roPods)
+	checks = append(checks, checkSyncreplStanzaCount(dbs, readings, expectedRW, expectedRO))
+	checks = append(checks, checkSyncreplSkipSelf(readings, sc.Name+"-headless"))
 	if sc.Spec.Replicas > 1 {
-		mpOK := true
-		var mpIssues []string
-		for _, ps := range rwPods {
-			if ps.err != "" {
-				continue
-			}
-			if !strings.EqualFold(ps.multiProvider, "TRUE") {
-				mpOK = false
-				mpIssues = append(mpIssues,
-					fmt.Sprintf("%s: multiProvider=%q (want TRUE)", ps.name, ps.multiProvider))
-			}
-		}
-		for _, ps := range roPods {
-			if ps.err != "" {
-				continue
-			}
-			if ps.multiProvider != "" && !strings.EqualFold(ps.multiProvider, "FALSE") {
-				mpOK = false
-				mpIssues = append(mpIssues,
-					fmt.Sprintf("%s: RO pod has multiProvider=%q", ps.name, ps.multiProvider))
-			}
-		}
-		if mpOK {
-			check("multi-provider", "pass", "TRUE on RW, absent on RO")
-		} else {
-			check("multi-provider", "fail", strings.Join(mpIssues, "; "))
-		}
+		checks = append(checks, checkMultiProviderPerDB(dbs, readings))
 	}
-
-	// ── RID uniqueness ──
-	ridOK := true
-	var ridIssues []string
-	ridRe := regexp.MustCompile(`rid=(\d+)`)
-	for _, ps := range append(rwPods, roPods...) {
-		if ps.err != "" {
-			continue
-		}
-		seen := make(map[string]bool)
-		for _, sr := range ps.syncRepl {
-			m := ridRe.FindStringSubmatch(sr)
-			if len(m) < 2 {
-				continue
-			}
-			rid := m[1]
-			if seen[rid] {
-				ridOK = false
-				ridIssues = append(ridIssues, fmt.Sprintf("%s: duplicate RID %s", ps.name, rid))
-			}
-			seen[rid] = true
-		}
-	}
-	if ridOK {
-		check("rid-uniqueness", "pass", "all RIDs unique within each pod")
-	} else {
-		check("rid-uniqueness", "fail", strings.Join(ridIssues, "; "))
-	}
+	checks = append(checks, checkRIDUniqueness(readings))
 
 	// ── External peer connectivity ──
 	if len(sc.Spec.Replication.ExternalPeers) > 0 {
@@ -858,32 +763,41 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 				needles = []string{ep.URI}
 			}
 
+			// Per database: a peer is reached from EVERY replicated database,
+			// each with its own stanza (its own ridBase, its own logbase —
+			// ADR-003, ADR-019 R9). Reading one database's stanzas here meant a
+			// database whose cross-site wiring was missing entirely reported
+			// clean as long as another database's was present.
 			for _, ps := range rwPods {
 				if ps.err != "" {
 					continue
 				}
-				found := false
-				for _, sr := range ps.syncRepl {
-					for _, needle := range needles {
-						if strings.Contains(sr, needle) {
-							found = true
+				bySuffix := ps.syncReplBySuffix()
+				for _, db := range replicatedDBs(dbs) {
+					found := false
+					for _, sr := range bySuffix[db.Suffix] {
+						for _, needle := range needles {
+							if strings.Contains(sr, needle) {
+								found = true
+								break
+							}
+						}
+						if found {
 							break
 						}
 					}
-					if found {
-						break
+					if !found {
+						epStanzaOK = false
+						epStanzaIssues = append(epStanzaIssues,
+							fmt.Sprintf("%s/%s: missing stanza for %s", ps.name, db.Suffix, ep.Name))
 					}
-				}
-				if !found {
-					epStanzaOK = false
-					epStanzaIssues = append(epStanzaIssues,
-						fmt.Sprintf("%s: missing stanza for %s", ps.name, ep.Name))
 				}
 			}
 		}
 		if epStanzaOK {
 			check("external-syncrepl", "pass",
-				fmt.Sprintf("all RW pods have stanzas for all %d external peers", len(sc.Spec.Replication.ExternalPeers)))
+				fmt.Sprintf("every replicated database on every RW pod has stanzas for all %d external peers",
+					len(sc.Spec.Replication.ExternalPeers)))
 		} else {
 			check("external-syncrepl", "fail", strings.Join(epStanzaIssues, "; "))
 		}
@@ -998,12 +912,16 @@ func printInspectResult(result inspectJSON) {
 				}
 			}
 
-			if len(pod.SyncRepl) > 0 {
+			// Per data suffix, matching the contextCSN block above:
+			// olcSyncRepl lives on one olcDatabase={N}mdb entry, so a pod
+			// serving two databases has two independent stanza sets. This used
+			// to print the first one and label it as the pod's.
+			for _, suffix := range sortedKeysOf(pod.SyncReplBySuffix) {
 				// Classify stanzas into in-cluster and cross-site.
 				// Match against URI (NodePort), podAddresses (static Multus),
 				// or DiscoveredAddresses (discovery mode).
 				var inCluster, crossSite []string
-				for _, sr := range pod.SyncRepl {
+				for _, sr := range pod.SyncReplBySuffix[suffix] {
 					matched := false
 					for _, ep := range result.ExternalPeers {
 						var needles []string
@@ -1037,20 +955,20 @@ func printInspectResult(result inspectJSON) {
 					}
 				}
 				if len(inCluster) > 0 {
-					fmt.Println("    syncRepl (in-cluster):")
+					fmt.Printf("    syncRepl (%s, in-cluster):\n", suffix)
 					for _, sr := range inCluster {
 						fmt.Printf("      %s\n", sr)
 					}
 				}
 				if len(crossSite) > 0 {
-					fmt.Println("    syncRepl (cross-site):")
+					fmt.Printf("    syncRepl (%s, cross-site):\n", suffix)
 					for _, sr := range crossSite {
 						fmt.Printf("      %s\n", sr)
 					}
 				}
 			}
-			if pod.MultiProvider != "" {
-				fmt.Printf("    multiProvider: %s\n", pod.MultiProvider)
+			for _, suffix := range sortedKeysOfString(pod.MultiProviderBySuffix) {
+				fmt.Printf("    multiProvider (%s): %s\n", suffix, pod.MultiProviderBySuffix[suffix])
 			}
 			if pod.ConfigQueryError != "" {
 				fmt.Printf("    cn=config:    %s\n", pod.ConfigQueryError)
@@ -1215,6 +1133,9 @@ func clusterDatabases(ctx context.Context, k8sClient client.Client, sc *ldapv1al
 			Suffix:          sd.Spec.Suffix,
 			WantLog:         sc.NeedsAccesslog() && sd.DeltaSyncEnabled(),
 			ExternalLogBase: ldapv1alpha1.ExternalLogBase(sd),
+			// Mirrors the operator's own gate on writing stanzas at all
+			// (slapddatabase_controller.go step 10).
+			Replicated: sc.Spec.Replication.Enabled && sd.ReplicationEnabled(),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -1291,4 +1212,79 @@ func dnHasParent(child, parent string) bool {
 	return len(child) > len(parent)+1 &&
 		strings.EqualFold(child[len(child)-len(parent):], parent) &&
 		child[len(child)-len(parent)-1] == ','
+}
+
+// dataDBs is the pod's DATA databases — every olcMdbConfig entry whose suffix
+// is not a cn=… internal one (the accesslog databases, and the node-local auth
+// database of ADR-027). Sorted by suffix so output is stable between runs.
+func (ps podState) dataDBs() []observedDB {
+	var out []observedDB
+	for _, db := range ps.dbs {
+		if strings.HasPrefix(db.Suffix, "cn=") {
+			continue
+		}
+		out = append(out, db)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Suffix < out[j].Suffix })
+	return out
+}
+
+// syncReplBySuffix projects the pod's data databases onto the per-suffix map
+// the checks and the JSON output consume.
+func (ps podState) syncReplBySuffix() map[string][]string {
+	out := map[string][]string{}
+	for _, db := range ps.dataDBs() {
+		if len(db.SyncRepl) > 0 {
+			out[db.Suffix] = db.SyncRepl
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// syncreplReadings projects gathered pod state onto the pure checks' input.
+// Unreachable pods are dropped: pod-readiness reports them, and a pod that
+// could not be queried must not become a config verdict.
+func syncreplReadings(rwPods, roPods []podState) []syncreplPodReading {
+	var out []syncreplPodReading
+	add := func(pods []podState, ro bool) {
+		for _, ps := range pods {
+			if ps.err != "" {
+				continue
+			}
+			bySuffix := map[string]syncreplDBReading{}
+			for _, db := range ps.dataDBs() {
+				bySuffix[db.Suffix] = syncreplDBReading{
+					Stanzas:       db.SyncRepl,
+					MultiProvider: db.MultiProvider,
+				}
+			}
+			out = append(out, syncreplPodReading{Pod: ps.name, RO: ro, BySuffix: bySuffix})
+		}
+	}
+	add(rwPods, false)
+	add(roPods, true)
+	return out
+}
+
+// sortedKeysOf and sortedKeysOfString keep per-database output in a stable
+// order, so two runs differ only where the cluster does.
+func sortedKeysOf(m map[string][]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func sortedKeysOfString(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

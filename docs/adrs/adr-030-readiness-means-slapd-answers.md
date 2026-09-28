@@ -154,6 +154,36 @@ stopping traffic at an unready pod is the entire point of the probe.
   bind-timeout observation to a status condition remains open and is independent
   of this.
 
+## Validated on a three-site mesh, 2026-09-28
+
+Full suite at scm-s1/s2/s3 (pod-routed, `E2E_RESILIENCE` / `E2E_SCALEUP` /
+`E2E_BACKUP` / `E2E_SCALE` on): **98 passed, 0 failed, 1 skipped**, 953 s,
+`DataPresent=True` at every site afterwards. The comparable run immediately
+before this work was 96/1/2 — the difference is `scale-topology`'s two specs,
+which had been failing on an unrelated nil pointer.
+
+The result worth stating is the negative one: **nothing turned red.** The
+specs that wait on `readyReplicas` — resilience restarts, the restore machine's
+scale-to-0-and-back, the standalone-to-HA scale-up — were previously waiting on
+a metric that could not fail, and now wait on one that can. They still pass, and
+the suite cost ~22 s more than before (953 s vs 931 s, ~2 %): the waits were
+real, they were just already being satisfied.
+
+Two behaviours observed live rather than argued:
+
+- Every pod reaches Ready 3-5 s after container start, across all twelve pods of
+  three sites, read-only replicas included.
+- A pod mid-restart read `Ready=False` and returned to `Ready=True` 5 s later —
+  the first time a slaptain pod has been *able* to be NotReady. Because decision
+  3 shipped first, the operator never lost its DNS path to it, so nothing
+  cascaded into the ADR-027 gate.
+
+What this did NOT exercise: a genuinely frozen slapd. The 874 s incident has
+never been reproduced on demand (`docs/BACKLOG.md`, "The `cn=config` pause
+freeze"), so the probe is verified to pass when it should and to fail while a
+pod is restarting, but its behaviour in the incident it was built for remains
+reasoned, not measured.
+
 ## Related
 
 - ADR-013 — deferred the convergence probe and named `publishNotReadyAddresses`;

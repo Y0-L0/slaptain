@@ -1,6 +1,11 @@
 # Bug analysis: `DATABASE_DIRS` env var triggers STS rolling restart on SlapdDatabase add
 
-**Status:** Confirmed bug, fix design pending
+**Status:** RESOLVED 2026-09-28 — see the second amendment to ADR-013. The fix is
+this document's option E (ConfigMap-mounted list, so the pod template stops moving)
+plus a mechanism that did not exist when the options below were written: ADR-018's
+co-located Job, which creates the directory on an already-running pod. The analysis
+is kept as written, because the options it rejects are still rejected for the reasons
+it gives.
 **Discovered:** 2026-05-14, by the v0.0.14 ephemeral e2e fixture
 **Severity:** Catastrophic on ephemeral storage (total data loss). Invisible-but-real on persistent storage.
 

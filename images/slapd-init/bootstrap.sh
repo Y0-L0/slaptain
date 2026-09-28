@@ -10,9 +10,35 @@ ACCESSLOG_DIR="${ACCESSLOG_DIR:-/accesslog}"
 LDAP_REPLICATION_ENABLED="${LDAP_REPLICATION_ENABLED:-false}"
 LDAP_READONLY_REPLICA="${LDAP_READONLY_REPLICA:-false}"
 
-# DATABASE_DIRS: comma-separated list of SlapdDatabase CR names.
-# The init container creates /data/<name>/ and /accesslog/<name>/ for each.
+# The per-database LMDB directories to create, as two newline-separated files
+# under DATABASE_DIRS_PATH: `data-dirs` (subdirectories of /data) and
+# `accesslog-dirs` (subdirectories of /accesslog).
+#
+# A MOUNTED CONFIGMAP, not an env var, and that is the whole point: an env var
+# is part of the pod template, so adding or removing a database re-rendered the
+# template and the StatefulSet replaced every pod — for an operation slapd
+# performs live (ADR-013 amendment of 2026-09-28). The ConfigMap is referenced
+# by name, so the template never moves. Already-running pods get their
+# directories from the operator's mkdir Job, not from here.
+#
+# The two lists are separate because the names are not the same names: a data
+# directory is spec.dataDirectory when set and the CR name otherwise, while an
+# accesslog directory is always keyed on the CR name (ADR-019 R1).
+#
+# DATABASE_DIRS is the pre-2026-09-28 env var, kept only as a fallback so a new
+# image under an old operator still provisions its directories. It is not
+# written by any current operator version.
+DATABASE_DIRS_PATH="${DATABASE_DIRS_PATH:-/etc/slaptain/database-dirs}"
 DATABASE_DIRS="${DATABASE_DIRS:-}"
+
+# read_dir_list <file> — emit one directory name per line, ignoring blanks.
+read_dir_list() {
+    [[ -r "$1" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line//[[:space:]]/}"
+        [[ -n "$line" ]] && echo "$line"
+    done < "$1"
+}
 
 # AUTH_DIR: the node-local authentication database's LMDB directory (ADR-027).
 # Mirrors the AuthDir constant in operator/api/v1alpha1/authdb.go; the two must
@@ -77,21 +103,33 @@ mkdir -p "$AUTH_DIR"
 # accesslog PVC — not a volume per database). back-mdb does NOT create
 # olcDbDirectory, so the directory must exist before the operator adds the DB.
 # The accesslog side is gated on the mount existing: read-only replicas never
-# get that volume (they produce no changes). ADR-013's rolling restart on DB
-# add/remove is what guarantees this loop sees the current set.
-# The SlapdCluster controller passes the list of database CR names.
-if [[ -n "$DATABASE_DIRS" ]]; then
-    IFS=',' read -ra DIRS <<< "$DATABASE_DIRS"
-    for dir in "${DIRS[@]}"; do
-        dir=$(echo "$dir" | xargs)  # trim whitespace
-        if [[ -n "$dir" ]]; then
-            echo "Ensuring data directory: $DATA_DIR/$dir"
-            mkdir -p "$DATA_DIR/$dir"
-            if [[ -d "$ACCESSLOG_DIR" ]]; then
-                echo "Ensuring accesslog directory: $ACCESSLOG_DIR/$dir"
-                mkdir -p "$ACCESSLOG_DIR/$dir"
-            fi
-        fi
+# get that volume (they produce no changes).
+#
+# This loop runs at pod START, so it sees whatever the ConfigMap held when the
+# pod was created. That is deliberate and sufficient: a database added while
+# this pod is running is provisioned by the operator's mkdir Job (ADR-013
+# amendment of 2026-09-28), and the next start picks the list up for free.
+# Until that amendment it was a rolling restart that kept the list current.
+DATA_DIRS=$(read_dir_list "$DATABASE_DIRS_PATH/data-dirs")
+LOG_DIRS=$(read_dir_list "$DATABASE_DIRS_PATH/accesslog-dirs")
+
+# Fallback for a new image under a pre-2026-09-28 operator, which sends one
+# comma-separated list used for both roots.
+if [[ -z "$DATA_DIRS$LOG_DIRS" && -n "$DATABASE_DIRS" ]]; then
+    echo "No $DATABASE_DIRS_PATH; falling back to the DATABASE_DIRS env var"
+    DATA_DIRS=$(echo "$DATABASE_DIRS" | tr ',' '\n' | tr -d '[:space:]')
+    LOG_DIRS="$DATA_DIRS"
+fi
+
+for dir in $DATA_DIRS; do
+    echo "Ensuring data directory: $DATA_DIR/$dir"
+    mkdir -p "$DATA_DIR/$dir"
+done
+# Gated on the mount existing: read-only replicas never get that volume.
+if [[ -d "$ACCESSLOG_DIR" ]]; then
+    for dir in $LOG_DIRS; do
+        echo "Ensuring accesslog directory: $ACCESSLOG_DIR/$dir"
+        mkdir -p "$ACCESSLOG_DIR/$dir"
     done
 fi
 

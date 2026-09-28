@@ -254,9 +254,12 @@ throwaway `SlapdDatabase`s and had nowhere to put them, so it creates them on
 the **shared** `slapd` fixture. Two concrete taxes followed, both of which a
 fixture helper would have removed:
 
-- **Cost:** every create and delete changes the StatefulSet's `DATABASE_DIRS`
-  and rolls the cluster (ADR-013's accepted wart). The container pays that four
-  times — ~8-10 minutes of a suite that otherwise runs in ~13.
+- **Cost:** every create and delete changed the StatefulSet's `DATABASE_DIRS`
+  and rolled the cluster (ADR-013's accepted wart). The container paid that four
+  times — ~8-10 minutes of a suite that otherwise runs in ~13. *Removed
+  2026-09-28: the list moved off the pod template (ADR-013's second amendment
+  that day), so the container now rolls nothing. The argument for the fixture
+  helper stands on its other leg — the shared cluster is still shared.*
 - **A wrong-tree failure that only a live run could catch:** the fixtures were
   first written with suffixes *under* the shared fixture's own suffix
   (`dc=cleanupdel,dc=example,dc=org` under `dc=example,dc=org`). slapd refuses a

@@ -10,7 +10,6 @@ import (
 	. "github.com/onsi/gomega"
 
 	ldap "github.com/go-ldap/ldap/v3"
-	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -29,11 +28,12 @@ import (
 // on every pod with no CR to manage it. The accesslog DB was never reaped at
 // all.
 //
-// COST: creating or deleting a SlapdDatabase changes the StatefulSet's
-// DATABASE_DIRS, which rolls the cluster (ADR-013's accepted UX wart). This
-// container pays that four times, so it is deliberately ONE Ordered container
-// with all three policies exercised on one set of fixtures. Run it alone with
-// E2E_LABEL_FILTER=cleanup-policy.
+// Creating or deleting a SlapdDatabase used to roll the whole cluster — the
+// directory list rode in the pod template as DATABASE_DIRS — and this container
+// paid that four times, which is why all three policies share one Ordered
+// container and one set of fixtures. Since the ADR-013 amendment of 2026-09-28
+// nothing rolls, so the shape is now thrift rather than necessity; keep it.
+// Run it alone with E2E_LABEL_FILTER=cleanup-policy.
 //
 // MULTI-SITE CAVEAT: these databases exist at this site only. On a mesh, the
 // local cluster's external-peer CSN query asks every peer about every LOCAL
@@ -213,21 +213,32 @@ func waitCRGone(ctx context.Context, name string) {
 		"SlapdDatabase %s still exists — its finalizer was never released", name)
 }
 
-// waitClusterSettled waits out the rolling restart that a DATABASE_DIRS change
-// triggers (ADR-013), so the per-pod assertions dial pods that are actually up.
+// waitClusterSettled waits for the operator to have published the current
+// database set, so the per-pod assertions run against a cluster that has caught
+// up with the CR change.
 //
-// Readiness alone is not a settled cluster: right after a CR is deleted the
-// operator has not yet rewritten DATABASE_DIRS, so every pod is still ready
-// from BEFORE the roll. The wait is therefore keyed on the change itself —
-// each named database absent from both StatefulSets' DATABASE_DIRS, the
-// StatefulSet controller caught up with that generation, and every pod updated
-// and ready.
+// It used to wait out a rolling restart: the directory list rode in the pod
+// template as DATABASE_DIRS, so every add and remove replaced every pod. Since
+// the ADR-013 amendment of 2026-09-28 the list lives in a ConfigMap and NOTHING
+// rolls — the wait is now keyed on that ConfigMap alone, and the pods it checks
+// are the same pods as before the change. Deliberately still a wait: the
+// ConfigMap is written by a different controller than the one that tore the
+// database off the pods, so "the CR is gone" does not imply "the list is
+// current".
 // Takes a SpecContext rather than a context.Context because it ends in a
 // cross-site probe, which is a Ginkgo node. Every caller is inside a spec, so
 // they already have one.
 func waitClusterSettled(ctx SpecContext, absent ...string) {
-	By("waiting for the cluster to settle after the DATABASE_DIRS roll")
+	By("waiting for the operator to publish the current database set")
 	Eventually(ctx, func() bool {
+		dirs := databaseDirsOf(ctx)
+		for _, name := range absent {
+			for _, d := range dirs {
+				if d == name {
+					return false
+				}
+			}
+		}
 		for _, sts := range []string{"slapd", "slapd-readonly"} {
 			s, err := k8sClient.AppsV1().StatefulSets(namespace).Get(ctx, sts, metav1.GetOptions{})
 			if err != nil {
@@ -236,14 +247,6 @@ func waitClusterSettled(ctx SpecContext, absent ...string) {
 					continue
 				}
 				return false
-			}
-			dirs := databaseDirsOf(s)
-			for _, name := range absent {
-				for _, d := range dirs {
-					if d == name {
-						return false
-					}
-				}
 			}
 			desired := int32(1)
 			if s.Spec.Replicas != nil {
@@ -257,30 +260,25 @@ func waitClusterSettled(ctx SpecContext, absent ...string) {
 		}
 		return true
 	}).WithTimeout(10*time.Minute).WithPolling(5*time.Second).Should(BeTrue(),
-		"cluster did not settle (databases still in DATABASE_DIRS, or pods not rolled)")
-
-	// The roll gave every pod a new IP, which every PEER site still has baked
-	// into its syncrepl stanzas (ADR-016). Local settling says nothing about
-	// that, and the next spec to write across sites would pay for it — the
-	// cascade waitForCrossSiteReplication was written for. No-op on a
-	// single-site run.
-	waitForCrossSiteReplication(ctx, "the cleanupPolicy DATABASE_DIRS roll")
+		"cluster did not settle (databases still listed, or pods not ready)")
 }
 
-// databaseDirsOf reads the init container's DATABASE_DIRS list off a
-// StatefulSet's pod template.
-func databaseDirsOf(sts *appsv1.StatefulSet) []string {
-	for _, c := range sts.Spec.Template.Spec.InitContainers {
-		for _, e := range c.Env {
-			if e.Name == "DATABASE_DIRS" {
-				if e.Value == "" {
-					return nil
-				}
-				return strings.Split(e.Value, ",")
+// databaseDirsOf reads the union of the directory lists the operator publishes
+// for the cluster — the ConfigMap that replaced the DATABASE_DIRS env var.
+func databaseDirsOf(ctx SpecContext) []string {
+	cm, err := k8sClient.CoreV1().ConfigMaps(namespace).Get(ctx, "slapd-database-dirs", metav1.GetOptions{})
+	if err != nil {
+		return nil // not written yet — the caller polls
+	}
+	var out []string
+	for _, key := range []string{"data-dirs", "accesslog-dirs"} {
+		for _, line := range strings.Split(cm.Data[key], "\n") {
+			if line = strings.TrimSpace(line); line != "" {
+				out = append(out, line)
 			}
 		}
 	}
-	return nil
+	return out
 }
 
 // forEachPodConfigConn runs fn against cn=config on every pod that carries the

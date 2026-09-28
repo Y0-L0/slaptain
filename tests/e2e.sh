@@ -1582,10 +1582,11 @@ do_setup() {
     setup_remote_kubeconfigs
     # The fixture's non-CR manifests (the readpw Secret). The SlapdDatabases and
     # SlapdSchemas themselves come out of charts/slapd-mesh below, in the same
-    # release as the SlapdCluster — so the operator's first StatefulSet reconcile
-    # already sees the full database list and bakes the right DATABASE_DIRS into
-    # the initial pod template, which is what the pre-chart ordering here was
-    # for (BUG-ANALYSIS-database-dirs-rolling-restart.md, option A).
+    # release as the SlapdCluster. That ordering was load-bearing while the
+    # database list lived in the pod template (BUG-ANALYSIS-database-dirs-
+    # rolling-restart.md, option A); since the ADR-013 amendment of 2026-09-28
+    # the list is a ConfigMap and a late database rolls nothing, so this is now
+    # just the natural order rather than a workaround.
     apply_test_resources
     setup_mesh_bundle
     # A cluster whose meshRef does not resolve reconciles NOTHING, so the

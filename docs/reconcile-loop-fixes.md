@@ -1940,3 +1940,66 @@ only for its presence is a latent full-fleet roll — the grep that matters is n
 "who sets this?" but "who reads the *value*?". And the generalisation worth
 keeping: anything that varies with `spec.Replicas` belongs on the StatefulSet,
 never inside its pod template.
+
+---
+
+## 2026-09-28: and the last one — adding a database rolled the fleet for a `mkdir`
+
+**Symptom:** applying a `SlapdDatabase` to a Running cluster replaced every pod,
+same signature as the entry above. Unlike that one it was *known* — ADR-013
+accepted it in May 2026 — so this is a deferral coming due, not a discovery.
+
+**Root cause:** the same shape. `DATABASE_DIRS` carried the database list into
+the init container's env, a pod-template field, so the template hash moved with
+the database set. The list existed for one reason: back-mdb does not create
+`olcDbDirectory`, and the init container was the only thing able to create a
+directory on a pod's PVC. slapd itself needs no restart to gain or lose a
+database — it is a live `ldap-add` against `cn=config`.
+
+**Why the deferral was right then and wrong now.** ADR-013 costed three fixes
+(a helper binary + `pods/exec`, an mTLS sidecar, a ConfigMap + sidecar) and
+declined all three: each bought a permanent cost — a new RBAC verb, a container
+in every pod — to remove a wart exercised maybe once per cluster lifetime. It
+also named its own reconsider trigger: *if the operator gains a sidecar for
+other reasons, adding mkdir to it is nearly free.* It never gained a sidecar. It
+gained something better, in August: ADR-018's co-located Job, which mounts a
+**running** pod's RWO PVCs by pinning itself to that pod's node.
+
+**Fix, in two halves that are worth keeping separate:**
+
+1. The list moves to a `<cluster>-database-dirs` ConfigMap, mounted into the
+   init container **by name**. The pod template stops depending on the database
+   set, so *deletes* stop rolling outright — a removed database leaves an
+   orphaned directory, which is disk, not a defect.
+2. Adds also need the directory to appear on pods that are already running. The
+   `SlapdDatabase` controller runs a Job pinned to the target pod's node, mounts
+   that pod's data and accesslog PVCs, `mkdir -p`s, and exits. Gated on the
+   database being **absent** from that pod, so in steady state it never runs;
+   named deterministically from (pod, path set), so concurrent reconciles
+   collapse onto one Job; reaped from an observed terminal state per ADR-018,
+   because the Job's pod is a lease on the PVCs it names.
+
+Waiting costs a requeue, not a blocked worker: the per-pod caller already treats
+an error as "skip this pod, retry", so the pending state rides that path.
+
+**Latent defect found while doing it:** the list was built from `db.Name`, but a
+database's data directory is `spec.dataDirectory` when set. A CR using that
+field had the wrong directory created and its `ldap-add` failed with LDAP 80.
+`dataDirName` is now the one definition, and the data and accesslog lists are
+kept separate — they were never the same list, since an accesslog directory is
+always keyed on the CR name (ADR-019 R1).
+
+**Coverage:** `internal/controller/statefulset_database_churn_test.go` was red
+first, naming the env var; it now guards the way back in (a re-added env var, or
+a ConfigMap projected by content instead of by name). `database_dirs_test.go`
+covers the `dataDirectory` divergence. `tests/e2e/database_hotadd_test.go`
+asserts on a live cluster that adding and removing a database leaves the
+StatefulSet revision and every pod's UID untouched — the same assertion shape
+`scale_topology_test.go` uses for scaling.
+
+**Lesson:** a deferral records a cost, and a cost has a date on it. ADR-013's
+reasoning was sound and its arithmetic was right; what changed is that a
+capability built for something else made one of its rejected options cheap. The
+reconsider trigger it wrote down is what made that visible — so write the
+trigger, and check the deferrals when a new mechanism lands, not only when the
+symptom hurts.

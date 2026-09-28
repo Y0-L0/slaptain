@@ -39,6 +39,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -163,7 +164,7 @@ func stripImageTag(imageRef string) string {
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapdclusters/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapdclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=services;secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=services;secrets;configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapddatabases,verbs=get;list;watch
@@ -251,11 +252,13 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, fmt.Errorf("reconcileClusterIPService: %w", err)
 	}
 
-	// Query SlapdDatabase CRs referencing this cluster. Their names are passed
-	// to the init container so it can create per-database data directories.
-	databaseNames, err := r.listDatabaseNames(ctx, sc)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("listDatabaseNames: %w", err)
+	// 4a. Publish the per-database directory lists the init container reads.
+	//     A ConfigMap rather than pod-template env: the StatefulSet must not
+	//     roll when a database is added or removed (ADR-013 amendment,
+	//     2026-09-28). Written before the StatefulSet so a pod that starts as
+	//     a result of this pass already finds the current list.
+	if err := r.reconcileDatabaseDirsConfigMap(ctx, sc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcileDatabaseDirsConfigMap: %w", err)
 	}
 
 	// 5. Reconcile StatefulSet — unless the certificate gate is holding it.
@@ -267,7 +270,7 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
-	if err := r.reconcileStatefulSet(ctx, sc, databaseNames); err != nil {
+	if err := r.reconcileStatefulSet(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileStatefulSet: %w", err)
 	}
 
@@ -282,7 +285,7 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// 5c. Reconcile read-only StatefulSet.
-	if err := r.reconcileReadOnlyStatefulSet(ctx, sc, databaseNames); err != nil {
+	if err := r.reconcileReadOnlyStatefulSet(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileReadOnlyStatefulSet: %w", err)
 	}
 
@@ -604,14 +607,14 @@ func (r *SlapdClusterReconciler) reconcileClusterIPService(ctx context.Context, 
 }
 
 // reconcileStatefulSet applies the StatefulSet via SSA.
-func (r *SlapdClusterReconciler) reconcileStatefulSet(ctx context.Context, sc *ldapv1alpha1.SlapdCluster, databaseNames []string) error {
+func (r *SlapdClusterReconciler) reconcileStatefulSet(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
 	sts := &appsv1.StatefulSet{
 		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "StatefulSet"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sc.Name,
 			Namespace: sc.Namespace,
 		},
-		Spec: r.buildStatefulSetSpec(sc, false, databaseNames),
+		Spec: r.buildStatefulSetSpec(sc, false),
 	}
 	if err := controllerutil.SetControllerReference(sc, sts, r.Scheme); err != nil {
 		return err
@@ -762,7 +765,7 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyService(ctx context.Context, s
 
 // reconcileReadOnlyStatefulSet applies the read-only StatefulSet via SSA.
 // Skipped when spec.readReplicas == 0.
-func (r *SlapdClusterReconciler) reconcileReadOnlyStatefulSet(ctx context.Context, sc *ldapv1alpha1.SlapdCluster, databaseNames []string) error {
+func (r *SlapdClusterReconciler) reconcileReadOnlyStatefulSet(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
 	if sc.Spec.ReadReplicas == 0 {
 		return nil
 	}
@@ -772,7 +775,7 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyStatefulSet(ctx context.Contex
 			Name:      sc.Name + "-readonly",
 			Namespace: sc.Namespace,
 		},
-		Spec: r.buildStatefulSetSpec(sc, true, databaseNames),
+		Spec: r.buildStatefulSetSpec(sc, true),
 	}
 	if err := controllerutil.SetControllerReference(sc, sts, r.Scheme); err != nil {
 		return err
@@ -791,7 +794,7 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyStatefulSet(ctx context.Contex
 // With the multi-resource architecture (ADR-004), the init container only sets up
 // cn=config infrastructure (modules, TLS). Data databases, schemas, ACLs, and
 // replication are managed by SlapdDatabase and SlapdSchema controllers.
-func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdCluster, readOnly bool, databaseNames []string) appsv1.StatefulSetSpec {
+func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdCluster, readOnly bool) appsv1.StatefulSetSpec {
 	var labels map[string]string
 	var replicas int32
 	var serviceName string
@@ -878,6 +881,25 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 			Name:         "tmp",
 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 		},
+		{
+			// The per-database directory lists (ADR-013 amendment, option H).
+			// Referenced by NAME, so the pod template is invariant under the
+			// database set — which is the whole point: the list used to be an
+			// env var, and every database add or remove therefore rolled the
+			// fleet for an operation slapd performs live.
+			Name: databaseDirsVolume,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: databaseDirsConfigMapName(sc.Name),
+					},
+					// Tolerate its absence: a pod must still start when the
+					// cluster has no databases yet and the ConfigMap has not
+					// been written, exactly as an empty DATABASE_DIRS did.
+					Optional: ptr.To(true),
+				},
+			},
+		},
 	}
 
 	// PVC size/access-mode fallbacks. The CRD's +kubebuilder:default="1Gi" on
@@ -959,7 +981,10 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		{Name: "CONFIG_DIR", Value: "/config"},
 		{Name: "DATA_DIR", Value: "/data"},
 		{Name: "ACCESSLOG_DIR", Value: ldapv1alpha1.AccesslogRoot},
-		{Name: "DATABASE_DIRS", Value: strings.Join(databaseNames, ",")},
+		// DATABASE_DIRS is deliberately absent: the directory lists arrive as
+		// files under DATABASE_DIRS_PATH, off the pod template (ADR-013
+		// amendment of 2026-09-28). Re-adding it here re-adds the fleet roll.
+		{Name: "DATABASE_DIRS_PATH", Value: databaseDirsMountPath},
 	}
 
 	// back-mdb BACKEND configuration (olcBackend={0}mdb) — bootstrap-time by
@@ -1028,6 +1053,11 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		{Name: "config", MountPath: "/config"},
 		{Name: "data", MountPath: "/data"},
 		{Name: "tmp", MountPath: "/tmp"},
+		// Not subPath-mounted: a subPath projection is frozen at pod start and
+		// never updated, and while the init container reads it only at start
+		// anyway, the whole-directory mount keeps the file honest for anything
+		// that looks at it later.
+		{Name: databaseDirsVolume, MountPath: databaseDirsMountPath, ReadOnly: true},
 	}
 	if accesslogMountNeeded && !readOnly {
 		initMounts = append(initMounts, corev1.VolumeMount{
@@ -1173,23 +1203,6 @@ func (r *SlapdClusterReconciler) getConfigPassword(ctx context.Context, sc *ldap
 		return "", fmt.Errorf("secret %s is missing root-password key", secretName)
 	}
 	return pw, nil
-}
-
-// listDatabaseNames returns the names of all SlapdDatabase CRs that reference
-// this cluster. These names become data subdirectories under /data/.
-func (r *SlapdClusterReconciler) listDatabaseNames(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) ([]string, error) {
-	var dbList ldapv1alpha1.SlapdDatabaseList
-	if err := r.List(ctx, &dbList, client.InNamespace(sc.Namespace)); err != nil {
-		return nil, err
-	}
-	var names []string
-	for _, db := range dbList.Items {
-		if db.Spec.ClusterRef == sc.Name {
-			names = append(names, db.Name)
-		}
-	}
-	sort.Strings(names)
-	return names, nil
 }
 
 // databaseCSNInfo holds the suffix and replication credentials for CSN queries.
@@ -1375,9 +1388,11 @@ func (r *SlapdClusterReconciler) checkPeerCSNConvergence(
 }
 
 // SetupWithManager sets up the controller with the Manager.
-// Watches SlapdDatabase CRs to trigger reconciliation when databases are
-// added or removed — the StatefulSet's init container env (DATABASE_DIRS)
-// must be updated so the init container creates per-database data directories.
+// Watches SlapdDatabase CRs to trigger reconciliation when databases are added
+// or removed — the directory-list ConfigMap must be updated so a pod starting
+// later creates the per-database LMDB directories. It is a ConfigMap rather
+// than pod-template env precisely so this watch cannot roll the fleet (ADR-013
+// amendment of 2026-09-28); already-running pods are served by the mkdir Job.
 func (r *SlapdClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&ldapv1alpha1.SlapdCluster{}).

@@ -220,10 +220,12 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.SlapdDatabaseReconciler{
-		Client:        mgr.GetClient(),
-		Scheme:        mgr.GetScheme(),
-		ClusterDomain: clusterDomain,
-		SiteName:      siteName,
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		ClusterDomain:   clusterDomain,
+		SiteName:        siteName,
+		DefaultImageTag: os.Getenv("OPERATOR_IMAGE_TAG"),
+		OperatorImage:   os.Getenv("OPERATOR_IMAGE"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SlapdDatabase")
 		os.Exit(1)

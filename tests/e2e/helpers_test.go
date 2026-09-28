@@ -482,8 +482,9 @@ const crossSiteRecoveryBudget = 8 * time.Minute
 // (60 s budget) raced a recovery measured at 146-432 s. So the rule is: ANY
 // pod-IP change must be followed by this wait, including one that happens
 // before the suite starts. BeforeSuite now calls it unconditionally, and
-// cleanup_policy_test does too, because its DATABASE_DIRS churn rolls the
-// SHARED fixture cluster (ADR-013).
+// cleanup_policy_test used to too, because its DATABASE_DIRS churn rolled the
+// SHARED fixture cluster; since the ADR-013 amendment of 2026-09-28 it rolls
+// nothing and no longer needs the wait.
 //
 // No-op unless E2E_EXTERNAL_REPL=1, so single-site runs pay nothing.
 func waitForCrossSiteReplication(ctx SpecContext, why string) {

@@ -64,6 +64,16 @@ type SlapdDatabaseReconciler struct {
 	// is configured, which disables mesh features. Nothing consumes it yet; the
 	// seed site selector is the first reader. See ADR-028 §4.
 	SiteName string
+	// DefaultImageTag and OperatorImage resolve the slapd-init image for the
+	// mkdir Job (ADR-013 amendment, option H), exactly as the backup controller
+	// resolves it for its own co-located Job.
+	DefaultImageTag string
+	OperatorImage   string
+}
+
+// imageRef resolves a data-plane image reference for this controller's Jobs.
+func (r *SlapdDatabaseReconciler) imageRef(img ldapv1alpha1.SlapdImageConfig, defaultRepo string) string {
+	return resolveImageRef(img, defaultRepo, r.DefaultImageTag)
 }
 
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapddatabases,verbs=get;list;watch;create;update;patch;delete
@@ -548,6 +558,11 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 ) error {
 	log := logf.FromContext(ctx)
 
+	podName := fmt.Sprintf("%s-%d", sc.Name, ordinal)
+	if readOnly {
+		podName = fmt.Sprintf("%s-readonly-%d", sc.Name, ordinal)
+	}
+
 	addr := host + ":" + strconv.Itoa(int(ldapContainerPort))
 	conn, err := ldap.DialURL("ldap://"+addr,
 		ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
@@ -585,6 +600,15 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 	dataDN, err := findDataDBDN(conn, sd.Spec.Suffix)
 	if err != nil {
 		// Database doesn't exist yet — create it.
+		//
+		// Its olcDbDirectory must exist first: back-mdb does not create one,
+		// and this pod may have started before the database did. A co-located
+		// Job makes it (ADR-013 amendment of 2026-09-28, option H) — which is
+		// what lets this happen without rolling the fleet. Returning its
+		// pending error skips this pod for now; the caller already retries.
+		if dirErr := r.ensureDatabaseDirs(ctx, sc, podName, readOnly); dirErr != nil {
+			return dirErr
+		}
 		log.Info("creating database", "host", host, "suffix", sd.Spec.Suffix,
 			"consumerOnly", sc.IsConsumerOnly())
 		dataDN, err = r.createDatabase(conn, sd, sc, rootPW)
@@ -775,7 +799,7 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 			}
 		}
 		if wantsAccesslog {
-			if err := r.ensureAccesslogDB(ctx, conn, host, sd, sc); err != nil {
+			if err := r.ensureAccesslogDB(ctx, conn, host, podName, sd, sc); err != nil {
 				return fmt.Errorf("ensure accesslog DB at %s: %w", host, err)
 			}
 			if err := r.ensureAccesslogOverlay(ctx, conn, host, dataDN, sd); err != nil {
@@ -858,9 +882,10 @@ func (r *SlapdDatabaseReconciler) createDatabase(
 		rootDN = "cn=admin," + sd.Spec.Suffix
 	}
 
-	// Each database gets its own subdirectory under /data/, named after the
-	// SlapdDatabase CR. The SlapdCluster controller passes database names to
-	// the init container (DATABASE_DIRS env var) which creates the directories.
+	// Each database gets its own subdirectory under /data/ — spec.dataDirectory
+	// when set, the CR name otherwise (dataDirName, the one definition). The
+	// SlapdCluster controller publishes the list for pod start; ensureDatabaseDirs
+	// covers pods that are already running (ADR-013 amendment of 2026-09-28).
 	dataDir := sd.Spec.DataDirectory
 	if dataDir == "" {
 		dataDir = sd.Name
@@ -1577,7 +1602,7 @@ func (r *SlapdDatabaseReconciler) ensureServerIDs(
 func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 	ctx context.Context,
 	conn *ldap.Conn,
-	host string,
+	host, podName string,
 	sd *ldapv1alpha1.SlapdDatabase,
 	sc *ldapv1alpha1.SlapdCluster,
 ) error {
@@ -1602,14 +1627,22 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 	if len(sr.Entries) > 0 {
 		dbDN = sr.Entries[0].DN
 	} else {
+		// Same reason as the data DB above: /accesslog/<db> must exist before
+		// back-mdb will accept the database. Reached when a database turns
+		// replicated after it was created, where the data DB's own directory
+		// pass has long since run.
+		if dirErr := r.ensureDatabaseDirs(ctx, sc, podName, false); dirErr != nil {
+			return dirErr
+		}
 		log.Info("creating accesslog DB", "host", host, "suffix", logSuffix)
 		addReq := ldap.NewAddRequest("olcDatabase=mdb,cn=config", nil)
 		addReq.Attribute("objectClass", []string{"olcDatabaseConfig", "olcMdbConfig"})
 		addReq.Attribute("olcDatabase", []string{"mdb"})
 		addReq.Attribute("olcSuffix", []string{logSuffix})
 		addReq.Attribute("olcRootDN", []string{"cn=admin,cn=config"})
-		// back-mdb does not create olcDbDirectory; the init container
-		// provisions /accesslog/<db> from DATABASE_DIRS (ADR-019 R3).
+		// back-mdb does not create olcDbDirectory; /accesslog/<db> is
+		// provisioned by the init container at pod start or by the mkdir Job
+		// above on a running pod (ADR-019 R3, ADR-013 amendment).
 		addReq.Attribute("olcDbDirectory", []string{ldapv1alpha1.AccesslogDir(sd.Name)})
 		addReq.Attribute("olcDbIndex", planAccesslogIndices(nil))
 		addReq.Attribute("olcAccess", []string{accesslogACL(sd.Name, sd.Spec.Suffix)})

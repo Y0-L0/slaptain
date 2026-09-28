@@ -179,7 +179,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 - **Mount Points:** `/config` (slapd.d config dir, PVC), `/data` (LMDB data, PVC), `/accesslog` (delta-syncrepl change journals, PVC — one `<dbname>` subdirectory per replicated database, ADR-019), `/run/openldap` (socket, emptyDir), `/etc/openldap/tls` (TLS secret, optional).
 - **Module path:** `/usr/lib/ldap` (Debian path). Modules loaded dynamically; plan to compile in statically later.
 - **Schema path:** `/etc/ldap/schema/` (Debian path).
-- **Init Container:** Sets up `cn=config` (admin credentials, modules, TLS). Creates per-database data directories from `DATABASE_DIRS` env var. Does NOT create data databases, schemas, or ACLs.
+- **Init Container:** Sets up `cn=config` (admin credentials, modules, TLS). Creates per-database data directories from the `<name>-database-dirs` ConfigMap mounted at `/etc/slaptain/database-dirs` (a ConfigMap, not pod-template env, so a database add/remove rolls nothing — ADR-013 amendment 2026-09-28). Does NOT create data databases, schemas, or ACLs.
 
 ---
 
@@ -261,7 +261,8 @@ database yielded no readable contextCSN (`lastError` names it).
 2. `reconcileSecret` — create `<name>-config-password` (plaintext `root-password`, create-only); or read from `spec.ldap.cnConfigCredentials.secretName`
 3. `reconcileHeadlessService` — `<name>-headless`, `clusterIP: None` (SSA patch)
 4. `reconcileClusterIPService` — `<name>` (bare name), ClusterIP (SSA patch)
-5. `reconcileStatefulSet` — `serviceName: <name>-headless`; queries SlapdDatabase CRs to compute `DATABASE_DIRS` env var for init container; provisions `volumeClaimTemplates` for config/data/accesslog (persistence is mandatory per ADR-013) (SSA patch)
+4a. `reconcileDatabaseDirsConfigMap` — `<name>-database-dirs`, the per-database LMDB directory lists (`data-dirs` + `accesslog-dirs`) the init container reads at pod start (SSA patch)
+5. `reconcileStatefulSet` — `serviceName: <name>-headless`; mounts the directory-list ConfigMap into the init container **by name**, so the pod template is invariant under the database set; provisions `volumeClaimTemplates` for config/data/accesslog (persistence is mandatory per ADR-013) (SSA patch)
 5a. `reconcileReadOnlyHeadlessService` — `<name>-readonly-headless`, `clusterIP: None` (skipped when `readReplicas=0`)
 5b. `reconcileReadOnlyService` — `<name>-readonly`, ClusterIP (skipped when `readReplicas=0`)
 5c. `reconcileReadOnlyStatefulSet` — second StatefulSet for RO consumers: no accesslog, `LDAP_READONLY_REPLICA=true` (skipped when `readReplicas=0`)
@@ -276,7 +277,7 @@ database yielded no readable contextCSN (`lastError` names it).
 - This ensures `SLAPD_HOST=slapd` resolves the same way for every deployment of the chart
 - The `slapd` chart is itself named `slapd`, so `helm install slapd ./charts/slapd` → fullname `slapd`
 
-**Owned resources:** StatefulSet, Service (×2), Secret, PersistentVolumeClaim — all get `SetControllerReference`.
+**Owned resources:** StatefulSet, Service (×2), Secret, ConfigMap (`<name>-database-dirs`), PersistentVolumeClaim — all get `SetControllerReference`. The SlapdDatabase controller additionally owns the short-lived mkdir Jobs (`<pod>-mkdir-<hash>`), reaped per ADR-018.
 
 **Known gotcha:** `kubebuilder init` requires `--skip-go-version-check` on Go 1.26 (version string not recognized). `kubebuilder create api` does not accept this flag and works without it.
 
@@ -564,7 +565,7 @@ the original decision — the history of reasoning matters.
 - ADR-010: SlapdCluster replication modes (peer / consumer-only, in-place promotion) — *Accepted (impl + e2e green 2026-05-13)*
 - ADR-011: Hot migration topology contract (RID/ServerID coexistence, plain-syncrepl interop, stage transitions) — *Accepted (impl + e2e green 2026-05-13)*
 - ADR-012: Seed is one-shot; cluster wipe is a Kubernetes resource lifecycle operation (replaces removed `forceRebootstrap` + reverted `verifySeedExists`)
-- ADR-013: Defer hot SlapdDatabase add/remove; require persistent storage (rolling restart on DB add/remove accepted as UX wart on persistent storage)
+- ADR-013: Defer hot SlapdDatabase add/remove; require persistent storage — *amended twice on 2026-09-28: first, `DATABASE_DIRS` is the ONLY sanctioned pod-template roll trigger (an `LDAP_REPLICAS` leak had been rolling the fleet on every scale-up for months); then that exemption is retired too, so the count is **zero**. The directory list moves to a ConfigMap (off the template, so add and remove both stop rolling) and already-running pods get their directories from a co-located mkdir Job — ADR-018's pattern, which postdates the May deferral and makes option H dominate the C'/G/F options this ADR costed. Subsumes a latent defect: the list was keyed on CR names, but a database's data directory is `spec.dataDirectory` when set*
 - ADR-014: S3 backup/restore (slapcat→gzip→S3 via co-located Job; bootstrapFrom restore into a fresh DB) — *Accepted (impl + e2e green 2026-06-09; amended 2026-08-24: `SlapdRestore` is a rollback only without external peers — on a mesh member peers replay newer changes, so it is a local re-seed; true rollback is a mesh-wide human runbook)*
 - ADR-015: Cluster DNS domain is resolved (CLUSTER_DOMAIN env → resolv.conf → cluster.local), never hardcoded — *Accepted 2026-07-05*
 - ADR-016: Direct native pod-IP routing as a cross-cluster replication transport (alongside Multus/NodePort; `network.mode: pod-routed`) — *Accepted (impl + e2e green across three routed-pod-CIDR sites 2026-07-06)* — *amended 2026-08-26: replacing a pod invalidates every peer's syncrepl addresses, including via the scale-to-0 restore machine; measured recovery 130-268s, because address discovery rides on the 60s CSN-monitoring tick*
@@ -783,7 +784,7 @@ Two consequences of that split worth knowing before you touch it:
    - Add `accesslog` volume mount to init and main containers.
    - Move config/data/accesslog to `volumeClaimTemplates`.
    - Pass to init container: `LDAP_REPLICATION_ENABLED`, `LDAP_REPLICAS`,
-     `LDAP_CLUSTER_HEADLESS_SVC` (`<name>-headless`), `DATABASE_DIRS`, and `LDAP_REPLICATION_PASSWORD`
+     `LDAP_CLUSTER_HEADLESS_SVC` (`<name>-headless`), `DATABASE_DIRS_PATH`, and `LDAP_REPLICATION_PASSWORD`
      (from `<dbname>-credentials` / `replication-password`).
 
 #### slapd-init Changes for Phase 2
@@ -794,8 +795,8 @@ controller's responsibility.
 
 Init container, gated on `LDAP_REPLICATION_ENABLED=true`:
 - Load `accesslog` and `syncprov` modules.
-- Create the per-database accesslog backing directories `/accesslog/<dbname>` from `DATABASE_DIRS`
-  (`back-mdb` does not create `olcDbDirectory`). The log **databases** themselves, their syncprov
+- Create the per-database accesslog backing directories `/accesslog/<dbname>` from the mounted
+  directory-list ConfigMap (`back-mdb` does not create `olcDbDirectory`). The log **databases** themselves, their syncprov
   overlay and their ACLs are the SlapdDatabase controller's job — see ADR-019 and ADR-020.
 - Skip accesslog setup entirely when `LDAP_READONLY_REPLICA=true` (RO pods don't produce changes).
 

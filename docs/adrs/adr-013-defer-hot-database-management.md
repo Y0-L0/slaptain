@@ -252,3 +252,116 @@ pod templates across replica counts above the 1 ↔ 2 boundary — where
 `tests/e2e/scale_topology_test.go` asserts on a live cluster that a scale in
 either direction leaves the StatefulSet revision and every surviving pod's UID
 untouched while `olcSyncRepl` is rewritten on each of them.
+
+---
+
+## Amendment, 2026-09-28 (second): the last sanctioned trigger goes too — option H
+
+The amendment above named `DATABASE_DIRS` the *only* sanctioned pod-template
+roll trigger. This one retires that exemption. The count of sanctioned triggers
+becomes zero: **no spec field that can change during a cluster's life may reach
+the pod template.**
+
+### What changed since the deferral
+
+Nothing about the frequency argument — adding a database on a Running cluster is
+still not a routine production operation. What changed is the cost side, which
+this ADR costed carefully in May and which is now wrong.
+
+1. **ADR-018 (2026-08-23) gave the operator a co-located Job pattern**, three
+   months after this ADR was written. `backup_job.go:55` mounts a *running*
+   pod's ReadWriteOnce config and data PVCs, via required PodAffinity to that
+   pod, while slapd holds them open. That is exactly the capability the `mkdir`
+   needs, already built and already e2e-green. This ADR's reconsider trigger was
+   "if the operator gains a sidecar for other reasons, mkdir is nearly free" —
+   it gained something better.
+2. **The mesh (ADR-028) multiplied the blast radius.** A database add rolls
+   every pod at *every* site, and under ADR-016 each replaced pod costs every
+   remote site a 130-268 s address-rediscovery window.
+3. **The fleet-roll class is now the exception rather than the norm.** With
+   `LDAP_REPLICAS` removed, this is the last accidental churn source; the
+   remaining ones (`idlExponent`, an image change) are deliberate recreates.
+
+### The problem is two problems
+
+Separating them is the whole of the design, because one of them is free:
+
+1. **Template churn.** The directory list rides as an env var on the init
+   container (`slapdcluster_controller.go:962`). Any change re-renders the
+   template. This fires on **add and remove alike**.
+2. **The directory is absent on already-running pods.** Only on **add** —
+   back-mdb will not register an `olcDatabase` whose `olcDbDirectory` does not
+   exist. On remove there is nothing to do: an orphaned directory is disk, not a
+   defect.
+
+So fixing (1) alone removes the roll for every database *delete* — including the
+one `tests/e2e/cleanup_policy_test.go` pays on each run.
+
+### Option H — a per-pod mkdir Job (unlocked by ADR-018)
+
+Before adding the database to a pod's `cn=config`, the SlapdDatabase controller
+runs a short Job pinned to that pod's node, mounting that pod's data and
+accesslog PVCs read-write, doing `mkdir -p`, and exiting. Image: `slapd-init` —
+already present in every deployment, already has a shell, already runs as UID
+1024, so the directory is created by the identity that will open the LMDB
+environment and no `chown` is needed.
+
+Against this ADR's own cost table:
+
+| | C' | G | F | **H** |
+|---|---|---|---|---|
+| New code | ~300 LoC | ~500 LoC | ~250 LoC | **~120 LoC, cloned from `backup_job.go`** |
+| Image changes | slapd +1 binary | new image | new image | **none** |
+| RBAC | +`pods/exec` | none | none | **none — Jobs already** |
+| Pod overhead | none | +1 container | +1 container | **none (transient)** |
+| Synchronous? | yes | yes | no (~60 s race) | **yes — wait for completion** |
+
+It dominates all three options this ADR costed. C', G and F are hereby rejected
+rather than deferred.
+
+**Honest costs.** A Job pod naming a PVC is an ADR-018 deletion lease and must
+be reaped, including when it never schedules — a Pending Job on a cordoned or
+full node holds the lease just as a finished one does, so this needs a timeout
+and a legible condition, not an unbounded wait. N pods means N Jobs; serial is
+fine, a database add is not latency-sensitive.
+
+### And the other half: the list leaves the pod template
+
+The list moves to a ConfigMap, mounted as a file that the init container reads
+instead of the env var. This is option F's first half without its sidecar — and
+F's only real objection disappears with it. F was asynchronous because a sidecar
+had to *act* on the ConfigMap within the `ldap-add` retry window; here nothing
+urgent reads the file. Running pods get their directories from the Job; the file
+is consulted only at a pod's next start, where a propagation lag of a minute is
+invisible.
+
+The radical version — drop the list entirely, since a fresh pod has an empty
+config PVC and therefore no registered databases needing directories at boot —
+is **rejected**. It is probably true, but it makes pod startup depend on
+reasoning about divergent config/data PVCs (ADR-012 case 2), and the failure
+mode when that reasoning is wrong is a pod that will not start.
+
+### One latent defect this subsumes
+
+`listDatabaseNames` (`slapdcluster_controller.go:1186`) collects `db.Name`, but
+the directory a database actually uses is `spec.dataDirectory` when set, falling
+back to the CR name (`slapddatabase_controller.go:863`). A CR that sets
+`dataDirectory` therefore has the wrong directory created for it today. The
+replacement must key on the **effective** directory name, in both the ConfigMap
+and the Job.
+
+### Consequences
+
+- `DATABASE_DIRS` as a pod-template env var is removed. The pod template becomes
+  invariant under the SlapdDatabase set, in both StatefulSets.
+- The SlapdCluster controller's `Watches(&SlapdDatabase{})` keeps its purpose but
+  changes its subject: it now maintains a ConfigMap, not a template.
+- The reserved `_slaptain-auth` directory (ADR-027) is unaffected — it is
+  unconditional in `bootstrap.sh` precisely because it must never ride in a
+  list that changes.
+- A database add becomes: Job per pod → wait → `ldap-add` per pod. The existing
+  retry loop stays as the backstop it already is.
+- Guard, red-first: an e2e asserting that applying a new `SlapdDatabase` to a
+  Running cluster leaves the StatefulSet revision and every pod's UID untouched
+  — the same assertion shape `scale_topology_test.go` already uses for scaling,
+  and red against the current code by construction.

@@ -42,7 +42,7 @@ func TestPodTemplateDoesNotDependOnReplicaCount(t *testing.T) {
 		sc.Spec.Replication.Enabled = true
 		sc.Spec.LDAP.TLS.Enabled = true
 		sc.Spec.LDAP.TLS.SecretName = "slapd-tls"
-		return r.buildStatefulSetSpec(sc, false, []string{"example-db"}).Template
+		return r.buildStatefulSetSpec(sc, false).Template
 	}
 
 	for _, tc := range []struct{ from, to int32 }{{3, 4}, {2, 5}, {4, 3}} {

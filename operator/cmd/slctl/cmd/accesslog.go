@@ -349,6 +349,16 @@ func checkAccesslogConsistency(dbs []dbIdentity, pods []podAccesslogState, exter
 	case len(legacyNotes) > 0:
 		return checkResult{Name: "accesslog-consistency", Status: "warn",
 			Detail: strings.Join(legacyNotes, "; ") + external}
+	case allPodsSkipped(pods):
+		// Nobody was looked at, so there is nothing to report. Distinct from
+		// "checked == 0", which is also what a cluster with no delta-synced
+		// database legitimately produces — that one is a real pass.
+		//
+		// Reporting pass here is the vacuous green that let a cluster whose
+		// operator was locked out of cn=config read clean on this line while
+		// failing three others (2026-09-28, docs/BACKLOG.md reinstall trap).
+		return checkResult{Name: "accesslog-consistency", Status: "warn",
+			Detail: "not evaluated: no pod yielded a readable database list" + external}
 	default:
 		return checkResult{Name: "accesslog-consistency", Status: "pass",
 			Detail: fmt.Sprintf("%d database/pod pair(s): logbase = olcAccessLogDB = log olcSuffix%s",
@@ -392,4 +402,20 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// allPodsSkipped reports whether every pod was passed over — unreachable, or
+// its cn=config unreadable. It is the difference between "checked nothing
+// because there was nothing to check" and "checked nothing because nobody
+// answered", and only the second one invalidates the verdict.
+func allPodsSkipped(states []podAccesslogState) bool {
+	if len(states) == 0 {
+		return true
+	}
+	for _, s := range states {
+		if !s.Skip {
+			return false
+		}
+	}
+	return true
 }

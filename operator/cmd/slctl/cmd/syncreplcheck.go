@@ -57,6 +57,9 @@ type syncreplPodReading struct {
 // database legitimately carries none, and holding it to the replicated count
 // would turn a supported configuration into a permanent failure.
 func checkSyncreplStanzaCount(dbs []dbIdentity, readings []syncreplPodReading, expectedRW, expectedRO int) checkResult {
+	if len(readings) == 0 {
+		return notEvaluated("syncrepl-stanza-count")
+	}
 	var issues []string
 	for _, r := range readings {
 		want := expectedRW
@@ -85,6 +88,9 @@ func checkSyncreplStanzaCount(dbs []dbIdentity, readings []syncreplPodReading, e
 // checkSyncreplSkipSelf verifies no RW pod consumes from itself, on any
 // database. A self-stanza is harmless in slapd but always a generation bug.
 func checkSyncreplSkipSelf(readings []syncreplPodReading, headlessSvc string) checkResult {
+	if len(readings) == 0 {
+		return notEvaluated("syncrepl-skip-self")
+	}
 	var issues []string
 	for _, r := range readings {
 		if r.RO {
@@ -117,6 +123,9 @@ var ridPattern = regexp.MustCompile(`rid=(\d+)`)
 // docs/BACKLOG.md) collide on the same server. The first-database-only version
 // of this check could never have seen that.
 func checkRIDUniqueness(readings []syncreplPodReading) checkResult {
+	if len(readings) == 0 {
+		return notEvaluated("rid-uniqueness")
+	}
 	var issues []string
 	for _, r := range readings {
 		owner := map[string]string{} // rid -> the suffix that claimed it first
@@ -151,6 +160,9 @@ func checkRIDUniqueness(readings []syncreplPodReading) checkResult {
 // Per database because the attribute is per database: a cluster can carry one
 // database that accepts writes on every pod and another that silently does not.
 func checkMultiProviderPerDB(dbs []dbIdentity, readings []syncreplPodReading) checkResult {
+	if len(readings) == 0 {
+		return notEvaluated("multi-provider")
+	}
 	var issues []string
 	for _, r := range readings {
 		if r.RO {
@@ -192,4 +204,58 @@ func sortedSuffixes(m map[string]syncreplDBReading) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// ── Unreadable cn=config ─────────────────────────────────────────────────────
+//
+// Every check above reads cn=config. When the bind fails there is no evidence,
+// and a check with no evidence must say so rather than render a verdict:
+// "0 stanzas (want 4)" is a claim about the cluster's configuration, and it is
+// false — nobody looked.
+//
+// Live case, 2026-09-28: a reinstall over surviving PVCs (docs/BACKLOG.md) left
+// the operator's newly generated config password out of step with the olcRootPW
+// already on disk. Every bind returned err=49, and slctl answered with eight
+// confident FAIL lines about missing syncrepl stanzas on a mesh that was
+// replicating perfectly well — sending the reader to their values file while
+// the cause sat three lines above in the same output.
+
+// configReadFailure is one pod whose cn=config could not be read.
+type configReadFailure struct {
+	Pod string
+	Err string
+}
+
+// checkConfigReadable promotes the bind failure from a per-pod line in the
+// display to a check, so it reaches the exit code and appears among the things
+// a reader scans, ahead of the checks it invalidates.
+func checkConfigReadable(failures []configReadFailure) checkResult {
+	if len(failures) == 0 {
+		return checkResult{Name: "cn-config-readable", Status: "pass", Detail: "cn=config readable on every queried pod"}
+	}
+	parts := make([]string, 0, len(failures))
+	for _, f := range failures {
+		parts = append(parts, fmt.Sprintf("%s: %s", f.Pod, f.Err))
+	}
+	sort.Strings(parts)
+	return checkResult{
+		Name:   "cn-config-readable",
+		Status: "fail",
+		Detail: fmt.Sprintf("%d pod(s) refused the cn=config bind, so every check below that reads it "+
+			"was NOT evaluated: %s", len(failures), strings.Join(parts, "; ")),
+	}
+}
+
+// notEvaluated is what a cn=config check returns when no pod yielded readable
+// cn=config. Deliberately not "pass": a vacuous green is how a broken cluster
+// reports clean, and it is the failure mode ADR-008's amendment named for
+// contextCSN. Deliberately not "fail" either — the failure is the bind, which
+// cn-config-readable already reports, and repeating it once per dependent check
+// buries it.
+func notEvaluated(name string) checkResult {
+	return checkResult{
+		Name:   name,
+		Status: "warn",
+		Detail: "not evaluated: no pod's cn=config could be read (see cn-config-readable)",
+	}
 }

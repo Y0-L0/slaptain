@@ -183,3 +183,61 @@ func TestCheckMultiProvider(t *testing.T) {
 		t.Errorf("an RO pod with multiProvider on a database must fail, got %s — %s", got.Status, got.Detail)
 	}
 }
+
+// A pod whose cn=config could not be read produces NO verdict about cn=config.
+//
+// Observed live 2026-09-28, walking docs/MULTI-SITE.md: a reinstall over
+// surviving PVCs left the operator's freshly generated config password out of
+// step with the olcRootPW already on disk, so every bind failed with err=49.
+// slctl read zero syncrepl stanzas from zero readable pods and reported
+// "0 stanzas (want 4)" eight times over — a confident, detailed, wrong claim
+// about the cluster's configuration, which sent the reader to check their
+// values file while the actual cause sat three lines above in the same output.
+//
+// Unreadable evidence must never become a verdict. ADR-008's 2026-09-14
+// amendment established that for contextCSN ("unreadable evidence never counts
+// toward True"); this is the same rule in the other direction, which is worse,
+// because a False invents a defect that does not exist.
+func TestChecksDoNotJudgeUnreadablePods(t *testing.T) {
+	none := readings() // every pod's cn=config was unreadable, so nothing to judge
+
+	for _, got := range []checkResult{
+		checkSyncreplStanzaCount(twoDBs, none, 2, 3),
+		checkSyncreplSkipSelf(none, "slapd-headless"),
+		checkMultiProviderPerDB(twoDBs, none),
+		checkRIDUniqueness(none),
+	} {
+		if got.Status == "fail" {
+			t.Errorf("%s FAILED on no evidence: %s", got.Name, got.Detail)
+		}
+		if got.Status == "pass" {
+			t.Errorf("%s PASSED on no evidence — a vacuous green is how a broken cluster reports clean: %s",
+				got.Name, got.Detail)
+		}
+		if !strings.Contains(strings.ToLower(got.Detail), "not evaluated") {
+			t.Errorf("%s does not say it was not evaluated, so the reader cannot tell "+
+				"a verdict from an absence: %q", got.Name, got.Detail)
+		}
+	}
+}
+
+// And the cause itself has to be a check, not a line of prose above the checks.
+func TestCheckConfigReadable(t *testing.T) {
+	ok := checkConfigReadable(nil)
+	if ok.Status != "pass" {
+		t.Errorf("no config errors must pass, got %s — %s", ok.Status, ok.Detail)
+	}
+
+	bad := checkConfigReadable([]configReadFailure{
+		{Pod: "slapd-0", Err: `cn=config bind failed: LDAP Result Code 49 "Invalid Credentials"`},
+		{Pod: "slapd-1", Err: `cn=config bind failed: LDAP Result Code 49 "Invalid Credentials"`},
+	})
+	if bad.Status != "fail" {
+		t.Fatalf("unreadable cn=config must fail, got %s", bad.Status)
+	}
+	for _, want := range []string{"slapd-0", "slapd-1", "49"} {
+		if !strings.Contains(bad.Detail, want) {
+			t.Errorf("detail %q does not mention %q", bad.Detail, want)
+		}
+	}
+}

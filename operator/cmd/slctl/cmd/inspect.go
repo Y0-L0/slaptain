@@ -658,6 +658,15 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 	// as the pod's — so on a two-database cluster they covered db1 and were
 	// blind to db2, rid-uniqueness most damagingly of all, since a RID
 	// collision is BETWEEN databases by nature.
+	// Ahead of every check that reads cn=config, because it explains them.
+	var configFailures []configReadFailure
+	for _, ps := range append(append([]podState{}, rwPods...), roPods...) {
+		if ps.err == "" && ps.configError != "" {
+			configFailures = append(configFailures, configReadFailure{Pod: ps.name, Err: ps.configError})
+		}
+	}
+	checks = append(checks, checkConfigReadable(configFailures))
+
 	readings := syncreplReadings(rwPods, roPods)
 	checks = append(checks, checkSyncreplStanzaCount(dbs, readings, expectedRW, expectedRO))
 	checks = append(checks, checkSyncreplSkipSelf(readings, sc.Name+"-headless"))
@@ -745,6 +754,7 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 		// URI (single-endpoint), podAddresses (static Multus), or
 		// DiscoveredAddresses (discovery mode).
 		epStanzaOK := true
+		epStanzaEvaluated := false
 		var epStanzaIssues []string
 		for _, ep := range sc.Spec.Replication.ExternalPeers {
 			// Build the set of strings to search for in syncrepl stanzas.
@@ -769,9 +779,12 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 			// database whose cross-site wiring was missing entirely reported
 			// clean as long as another database's was present.
 			for _, ps := range rwPods {
-				if ps.err != "" {
+				// Same rule as everywhere else here: no readable cn=config is
+				// no evidence, not a missing stanza.
+				if ps.err != "" || ps.configError != "" {
 					continue
 				}
+				epStanzaEvaluated = true
 				bySuffix := ps.syncReplBySuffix()
 				for _, db := range replicatedDBs(dbs) {
 					found := false
@@ -794,7 +807,9 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 				}
 			}
 		}
-		if epStanzaOK {
+		if !epStanzaEvaluated {
+			checks = append(checks, notEvaluated("external-syncrepl"))
+		} else if epStanzaOK {
 			check("external-syncrepl", "pass",
 				fmt.Sprintf("every replicated database on every RW pod has stanzas for all %d external peers",
 					len(sc.Spec.Replication.ExternalPeers)))
@@ -1149,9 +1164,12 @@ func accesslogStates(pods []podState, ro bool) []podAccesslogState {
 	out := make([]podAccesslogState, 0, len(pods))
 	for _, ps := range pods {
 		out = append(out, podAccesslogState{
-			Name:           ps.name,
-			RO:             ro,
-			Skip:           ps.err != "",
+			Name: ps.name,
+			RO:   ro,
+			// Same rule as syncreplReadings: a pod whose cn=config could not be
+			// read has no databases to compare, and counting it as "0 pairs,
+			// all consistent" is a vacuous pass.
+			Skip:           ps.err != "" || ps.configError != "",
 			NamingContexts: ps.namingContexts,
 			DBs:            ps.dbs,
 		})
@@ -1251,7 +1269,12 @@ func syncreplReadings(rwPods, roPods []podState) []syncreplPodReading {
 	var out []syncreplPodReading
 	add := func(pods []podState, ro bool) {
 		for _, ps := range pods {
-			if ps.err != "" {
+			// An unreachable pod contributes nothing (pod-readiness reports
+			// it), and neither does one whose cn=config refused the bind: there
+			// is no evidence there, and a check that treats "could not look" as
+			// "found nothing" reports a configuration defect that does not
+			// exist. cn-config-readable is what reports the bind failure.
+			if ps.err != "" || ps.configError != "" {
 				continue
 			}
 			bySuffix := map[string]syncreplDBReading{}

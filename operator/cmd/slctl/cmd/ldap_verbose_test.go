@@ -118,3 +118,72 @@ func TestChooseNodeIP(t *testing.T) {
 		}
 	})
 }
+
+// --verbose must be safe to run in front of an audience.
+//
+// It used to print the bind password in full, on the argument that this is a
+// lab tool and masking it would be patronising. That argument holds right up
+// until the tool is on a projector — and "remember the extra flag" is exactly
+// the kind of thing nobody remembers while presenting. So the default flipped:
+// --verbose redacts, and showing the password takes a flag whose NAME says what
+// it does, so it cannot be typed by accident or read past in a shell history.
+func TestPasswordRedactionIsTheDefault(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		show       bool // --show-password
+		redact     bool // --redact-password (retained, now redundant)
+		wantRedact bool
+		because    string
+	}{
+		{
+			name:       "plain --verbose",
+			wantRedact: true,
+			because:    "the default must be the safe one; this is the case that runs on a projector",
+		},
+		{
+			name:       "--show-password",
+			show:       true,
+			wantRedact: false,
+			because:    "the escape hatch must actually work, or people will paste passwords by hand instead",
+		},
+		{
+			name:       "--redact-password still accepted",
+			redact:     true,
+			wantRedact: true,
+			because:    "it described the old opt-in; it must not become an error in someone's script",
+		},
+		{
+			// Contradictory flags resolve toward safety rather than toward
+			// last-one-wins, because the cost of the two mistakes is not
+			// symmetric: an unexpectedly masked password is an inconvenience,
+			// an unexpectedly shown one is on the recording.
+			name:       "both flags: redaction wins",
+			show:       true,
+			redact:     true,
+			wantRedact: true,
+			because:    "when the user contradicts themselves, take the answer that cannot leak",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldRedactPassword(tc.show, tc.redact); got != tc.wantRedact {
+				t.Errorf("shouldRedactPassword(show=%v, redact=%v) = %v, want %v — %s",
+					tc.show, tc.redact, got, tc.wantRedact, tc.because)
+			}
+		})
+	}
+}
+
+// The flag has to be reachable, and by the name the help text promises.
+func TestShowPasswordFlagIsParsed(t *testing.T) {
+	var f ldapTargetFlags
+	rest := splitLDAPArgs([]string{"--verbose", "--show-password", "-b", "dc=x"}, &f)
+	if !f.verbose {
+		t.Error("--verbose was not parsed")
+	}
+	if !f.showPassword {
+		t.Error("--show-password was not parsed; the escape hatch is unreachable")
+	}
+	if len(rest) != 2 || rest[0] != "-b" {
+		t.Errorf("slctl flags leaked into the wrapped tool's args: %v", rest)
+	}
+}

@@ -23,7 +23,7 @@ import (
 //	--cluster <name>   --database <name>   --as <ident>
 //	--password <pw>    --pod <ord>         --anonymous   --ldaps
 //	--port-forward     --direct            --node-ip <ip>
-//	--verbose          --redact-password
+//	--verbose          --show-password    --redact-password
 //
 // `--help`/`-h` is delegated to cobra by NOT consuming it here.
 // `--` terminates slctl-flag scanning; remaining tokens always pass through.
@@ -46,7 +46,8 @@ func splitLDAPArgs(raw []string, f *ldapTargetFlags) []string {
 		"--port-forward":    &f.forcePortForward,
 		"--direct":          &f.forceDirect,
 		"--verbose":         &f.verbose,
-		"--redact-password": &f.redactPassword,
+		"--show-password":   &f.showPassword,
+		"--redact-password": &f.redactPassword, // retained; now the default
 	}
 
 	var passthrough []string
@@ -127,10 +128,10 @@ func runLDAPUtil(tool string, raw []string) error {
 	}
 	if f.verbose {
 		// Transparency mode: print the exact reproducible commands so a user
-		// can run them by hand (labs; "disenchant the magic"). The password is
-		// shown in full by default — deliberately, so the printed ldap* line is
-		// copy-pasteable — and masked only under --redact-password. Whether to
-		// keep it out of shell history is the operator's call, not ours.
+		// can run them by hand ("disenchant the magic"). The password is MASKED
+		// unless --show-password is given (shouldRedactPassword): the printed
+		// line stays copy-pasteable in shape, and the one thing that must not
+		// reach a projector or a shell history by default does not.
 		if target.DirectNote != "" {
 			fmt.Fprintf(os.Stderr, "→ direct pod IP: %s\n", target.DirectNote)
 		}
@@ -138,7 +139,8 @@ func runLDAPUtil(tool string, raw []string) error {
 			fmt.Fprintf(os.Stderr, "→ %s\n",
 				formatPortForwardCmd(kubectlGlobalArgs(), ns, target.PortForwardPod, target.LocalPort, target.RemotePort))
 		}
-		fmt.Fprintf(os.Stderr, "→ %s\n", formatInvocation(tool, args, f.redactPassword))
+		fmt.Fprintf(os.Stderr, "→ %s\n",
+			formatInvocation(tool, args, shouldRedactPassword(f.showPassword, f.redactPassword)))
 	} else {
 		fmt.Fprintf(os.Stderr, "→ %s %s as %s\n", tool, target.URI, identity)
 	}
@@ -257,8 +259,13 @@ const ldapLongCommon = `slctl flags (long-form only; short flags pass through to
   --node-ip <ip>       address to reach a NodePort endpoint (overrides the
                        auto-discovered node InternalIP)
   --verbose            print the reproducible kubectl port-forward + ldap*
-                       command (with the real password) so you can run it by hand
-  --redact-password    mask the password in --verbose output (for demos/screenshares)
+                       command so you can run it by hand. The bind password is
+                       MASKED as '<password>' — safe in front of an audience
+  --show-password      print the real bind password in --verbose output. It
+                       lands on your terminal and in your shell history; the
+                       flag is named so that is never a surprise
+  --redact-password    accepted and redundant: masking is the default since
+                       v0.2.2. Still wins if combined with --show-password
 
 All other arguments pass through to the wrapped ldap-utils tool. Use '--' to
 mark the end of slctl flags explicitly if needed.`

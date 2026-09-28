@@ -32,8 +32,33 @@ type ldapTargetFlags struct {
 	nodeIP           string // --node-ip: override the node address for a NodePort endpoint
 
 	// Transparency.
-	verbose        bool // --verbose: print the reproducible kubectl/ldap* commands
-	redactPassword bool // --redact-password: mask the password in --verbose output
+	verbose bool // --verbose: print the reproducible kubectl/ldap* commands
+	// showPassword (--show-password) prints the bind password in clear in that
+	// output. Opt-in, and named so it cannot be typed by accident or skimmed
+	// past in a shell history — see shouldRedactPassword.
+	showPassword bool
+	// redactPassword (--redact-password) is what the opt-in used to be called
+	// back when clear text was the default. Retained so it is not an error in
+	// someone's script, and it still wins over --show-password.
+	redactPassword bool
+}
+
+// shouldRedactPassword decides whether --verbose masks the bind password.
+//
+// Redacted by DEFAULT since 2026-09-28. The original call was the opposite —
+// this is a lab tool, masking a password the user already knows is
+// patronising — and that reasoning holds right up until the terminal is on a
+// projector. "Remember the extra flag" is precisely what nobody remembers while
+// presenting, so the safe behaviour has to be the one you get by not thinking
+// about it. The reverse flag is named for what it does, so it cannot be typed
+// by accident and is obvious in a shell history afterwards.
+//
+// Contradictory flags resolve toward safety rather than last-one-wins: the two
+// mistakes do not cost the same. An unexpectedly masked password is an
+// inconvenience the user fixes in one more keystroke; an unexpectedly shown one
+// is already in the recording.
+func shouldRedactPassword(showPassword, redactPassword bool) bool {
+	return redactPassword || !showPassword
 }
 
 // ldapTarget is the resolved connection + bind information.

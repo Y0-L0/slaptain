@@ -73,8 +73,8 @@ type podJSON struct {
 	// "syncRepl"/"multiProvider", which only ever carried the first data DB's.
 	SyncReplBySuffix      map[string][]string `json:"syncReplBySuffix,omitempty"`
 	MultiProviderBySuffix map[string]string   `json:"multiProviderBySuffix,omitempty"`
-	ConfigQueryError   string              `json:"configQueryError,omitempty"`
-	Error              string              `json:"error,omitempty"`
+	ConfigQueryError      string              `json:"configQueryError,omitempty"`
+	Error                 string              `json:"error,omitempty"`
 }
 
 type checkResult struct {
@@ -129,7 +129,7 @@ func (ps podState) toJSON() podJSON {
 			return out
 		}(),
 		ConfigQueryError: ps.configError,
-		Error:              ps.err,
+		Error:            ps.err,
 	}
 }
 

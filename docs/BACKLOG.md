@@ -1566,3 +1566,64 @@ and Readiness here means "the process exists" — see "The slapd container has n
 
 Whichever wins, the demo and `docs/DEVELOPMENT.md` should stop implying that
 `make operator-helm-install` is a control-plane-only operation.
+
+---
+
+## Hot migration e2e never wires the source back, so Stage 2 is untested
+
+**What:** `tests/e2e-migration.sh` stands up `fakeprod` (peer mode,
+`deltaSync: false` — a stand-in legacy plain-syncrepl provider) and `slaptain`
+(consumer-only, `externalPeers` → fakeprod), and `tests/e2e/migration_test.go`
+asserts seven things about it: the seeded entry arrives by plain syncrepl,
+`entryUUID` matches the source, `DataPresent` holds on a never-seeded database
+(ADR-025 D5), consumer-only rejects writes, `mode: peer` promotes **in place**
+(pod UID and slapd container `StartedAt` unchanged), writes are accepted after
+promotion, and `entryUUID`s survive the promotion.
+
+`apply_fake_prod()` gives fakeprod **no `externalPeers`**. Nothing points back at
+slaptain, which is exactly ADR-011 Stage 2's "source-side configuration changes:
+add reciprocal syncrepl stanzas pointing at slaptain pods". So the fixture never
+reaches Stage 2 — it reaches the slaptain half of it.
+
+**Why it matters:** the post-promotion spec asserts the write is *accepted*
+(`migration_test.go:215`); it never asserts it *arrives* at fakeprod, and no spec
+writes on the source after promotion. Stage 2's verification clause — "lag stable
+< 5 s in **both** directions" — has nothing behind it, and bidirectional
+dual-running is the property that makes the migration hot rather than a cutover.
+ADR-011's status line reads "e2e-verified via `tests/e2e-migration.sh`", which is
+true of the interop and the stage transitions and overstates the rest; it wants a
+one-line amendment either way.
+
+Bidirectionality is covered *elsewhere* — `external_replication_test.go`
+(`E2E_EXTERNAL_REPL=1`) exercises two-way delta-syncrepl between two slaptain
+clusters. The untested combination is specifically **bidirectional against a
+plain-syncrepl, non-slaptain provider**, i.e. the only topology hot migration
+exists for.
+
+**Three further gaps in the same fixture**, smaller and separable:
+
+- **Foreign ServerID coexistence.** Stage 2 puts slaptain's serverIDs on the
+  source's `olcServerID` list. That is the CSN-collision hazard ADR-011's
+  "Foreign ServerID declaration" decision exists to prevent, and nothing
+  exercises it.
+- **Demotion.** ADR-010's in-place peer → consumer-only demotion is the
+  documented rollback for Stage 2 (`docs/MIGRATION-HOT.md:137`). Only the
+  promotion direction has a spec.
+- **Single pod on both sides** (`replicas: 1`), so no per-pod ServerID
+  coordination under a migration and no mesh member migrating.
+
+Stages 3–5 (client cutover, source drain, source retirement) are runbook-only by
+design — human and ops steps, not operator behaviour. They are not part of this
+entry.
+
+**Wanted, cheapest first:** after the promotion spec, patch `fakeprod`'s
+SlapdDatabase/SlapdCluster to add an `externalPeers` entry pointing at
+`slaptain-0` with `deltaSync: false`, then assert the post-promotion write
+appears on `srcConn` — the spec already holds a connection to fakeprod for the
+`entryUUID` comparison, so the machinery is there. Red-first is free here: the
+assertion is red against the current fixture for the right reason. That converts
+the largest untested claim into a spec without needing a real legacy slapd.
+
+Foreign-serverID and demotion are separate pieces; the multi-pod variant depends
+on the same "specs cannot provision their own topology" framework gap as the
+`slapd-init` pinning entry above.

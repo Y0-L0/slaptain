@@ -1,0 +1,37 @@
+# SlapdBackup — one on-demand backup of one database's data tree to S3 (ADR-014).
+#
+# The operator runs a co-located Job pinned to pod-0's node: an init container
+# dumps `slapcat | gzip` into an emptyDir, then the operator image uploads it.
+# The artifact is a plain gzipped slapcat LDIF, interchangeable with stock
+# slapcat/slapadd.
+#
+# A backup always takes a backup and records its circumstances unconditionally —
+# status carries sourcePod, sourceContextCSN, and the SourceConverged /
+# SourceSuffixHealthy conditions. They are honesty, not a gate.
+#
+# Guide: docs/BACKUP.md
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdBackup
+metadata:
+  name: example-db-backup
+spec:
+  # The SlapdDatabase to back up, in this namespace.
+  databaseRef: example-db
+
+  storage:
+    bucket: my-ldap-backups
+    # prefix is optional; the object key is
+    # <prefix>/<cluster>/<database>/<timestamp>.ldif.gz
+    prefix: prod
+    region: eu-central-1
+    # endpoint is empty for real AWS S3; set it for any S3-compatible store.
+    # endpoint: https://s3.example:7443
+    # The Secret must carry keys `access-key-id` and `secret-access-key`.
+    credentialsSecretName: my-s3-creds
+    # insecureTLS: false   # test-only; skips verification of the endpoint
+
+  # compression: gzip     # the only value today, and the default
+  # podAffinity: true     # default. Pins the Job to pod-0's node so it can
+  #                       # mount that pod's ReadWriteOnce data PVC (RWO is
+  #                       # per node, not per pod). Set false only if a node
+  #                       # able to mount the PVC is available some other way.

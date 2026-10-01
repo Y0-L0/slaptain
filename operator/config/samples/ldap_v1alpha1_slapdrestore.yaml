@@ -1,0 +1,45 @@
+# SlapdRestore — load a backup into an EXISTING, populated database
+# (ADR-014 amendment).
+#
+# Imperative and immutable: a command, not desired state. To restore again,
+# create another SlapdRestore. The SlapdCluster controller drives it through the
+# same machine as SlapdDatabase.spec.bootstrapFrom — preflight while the cluster
+# is still serving, then scale to 0, offline slapadd into every pod, scale up.
+# A failed load holds the cluster at 0 rather than serving half a directory.
+# One restore per cluster at a time; others queue.
+#
+# WHAT IT MEANS DEPENDS ON YOUR TOPOLOGY:
+#   - no external peers  → a true point-in-time rollback.
+#   - a mesh member      → a LOCAL RE-SEED, not a rollback. slapadd restores
+#     each entry with its original CSN, so peers replay every post-backup change
+#     and the site converges back to the mesh's current state. The operator emits
+#     a warning event and says so in status.message. A real mesh-wide rollback is
+#     a human runbook — see docs/BACKUP.md.
+#
+# To restore into a FRESH database instead, use SlapdDatabase.spec.bootstrapFrom;
+# that is the cleaner path and the one to prefer when you have the choice.
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdRestore
+metadata:
+  name: example-db-rollback
+spec:
+  # The existing SlapdDatabase to restore into, in this namespace.
+  databaseRef: example-db
+
+  source:
+    # Either a SlapdBackup in this namespace...
+    backupRef: example-db-backup
+    # ...or a direct S3 object, e.g. a legacy slapcat dump uploaded by hand:
+    # s3:
+    #   key: prod/legacy/2026-06-01.ldif.gz
+    #   storage:
+    #     bucket: my-ldap-backups
+    #     region: eu-central-1
+    #     credentialsSecretName: my-s3-creds
+
+  # Preflight verifies the cluster's replication-password against the {SSHA}
+  # hash stamped on the backup object, and default-denies on a mismatch — a
+  # restored database keeps the BACKUP's cn=replication password, so a mismatch
+  # means syncrepl silently fails to authenticate afterwards. Set this only for
+  # a deliberate mismatch you will repair by hand.
+  # skipReplicationPasswordCheck: false

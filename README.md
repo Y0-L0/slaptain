@@ -185,6 +185,32 @@ consistency checks (CSN convergence per database, topology, suffix visibility),
 wraps `ldapsearch` with the endpoint and credentials discovered for you. See
 [`docs/slctl.md`](docs/slctl.md).
 
+## Sample Manifests
+
+One commented example per CRD lives in
+**[`operator/config/samples/`](operator/config/samples/)** — the shape of every
+field, with the non-obvious ones explained inline:
+
+| File | Kind |
+|---|---|
+| [`ldap_v1alpha1_slapdmesh.yaml`](operator/config/samples/ldap_v1alpha1_slapdmesh.yaml) | `SlapdMesh` — the site inventory of a multi-site deployment |
+| [`ldap_v1alpha1_slapdcluster.yaml`](operator/config/samples/ldap_v1alpha1_slapdcluster.yaml) | `SlapdCluster` — one site's server fleet |
+| [`ldap_v1alpha1_slapddatabase.yaml`](operator/config/samples/ldap_v1alpha1_slapddatabase.yaml) | `SlapdDatabase` — suffix, credentials, ACLs, indices, seed |
+| [`ldap_v1alpha1_slapdschema.yaml`](operator/config/samples/ldap_v1alpha1_slapdschema.yaml) | `SlapdSchema` — attributeTypes and objectClasses |
+| [`ldap_v1alpha1_slapdbackup.yaml`](operator/config/samples/ldap_v1alpha1_slapdbackup.yaml) | `SlapdBackup` — one on-demand backup to S3 |
+| [`ldap_v1alpha1_slapdscheduledbackup.yaml`](operator/config/samples/ldap_v1alpha1_slapdscheduledbackup.yaml) | `SlapdScheduledBackup` — cron schedule plus retention |
+| [`ldap_v1alpha1_slapdrestore.yaml`](operator/config/samples/ldap_v1alpha1_slapdrestore.yaml) | `SlapdRestore` — in-place rollback of a populated database |
+
+Apply one directly, or copy it and edit:
+
+```bash
+kubectl apply -n slaptain-testing -f operator/config/samples/ldap_v1alpha1_slapdcluster.yaml
+```
+
+Authoritative field documentation is the CRD itself — `kubectl explain
+slapdcluster.spec.replication`, or the Go types in
+[`operator/api/v1alpha1/`](operator/api/v1alpha1/).
+
 ## OpenLDAP 2.7 by default
 
 The slapd images ship **OpenLDAP 2.7.1**, built from a vendored Debian
@@ -229,61 +255,47 @@ image pair — needed for hot-migration clusters that must match a 2.6 source.
 - **Diagnostics**: `slctl` inspects every pod directly and judges what it finds — CSN convergence per database, topology, stanza counts, suffix visibility — and collects a full incident bundle with `debug-dump`. See [slctl](docs/slctl.md).
 - **Server-side apply**: all resource management uses SSA — no optimistic concurrency conflicts.
 
-## Cross-Cluster Replication
+## Multi-Site Meshes
 
-One directory across several Kubernetes clusters, replicating bidirectionally
-(N-way multi-master delta-syncrepl) over TLS. The clusters share no API server
-and no control plane.
+Multi-site is a **first-class feature**, not a deployment trick: one directory
+across several Kubernetes clusters, replicating bidirectionally (N-way
+multi-master delta-syncrepl) over TLS, with no shared API server and no shared
+control plane. Each site stays autonomous — it keeps serving, and keeps being
+reconfigurable, while the others are unreachable.
 
-Describe the sites once, in a `SlapdMesh`, and apply **one chart with one values
-file, unchanged, at every site**. The operator derives each site's
-`serverIDBase`, its peer list, the network mode and the trust wiring from the
-mesh plus its own `siteName`:
+It has its own CRD. A `SlapdMesh` describes the sites once — each site's
+`serverIDIndex`, how to reach it, how to trust it, and the network the
+replication traffic rides. A `SlapdCluster` joins by name:
 
 ```yaml
-mesh:
-  name: slapd-mesh
-  sites:
-    - {name: site-a, serverIDIndex: 0, endpoint: https://api.site-a.k8s.example:6443}
-    - {name: site-b, serverIDIndex: 1, endpoint: https://api.site-b.k8s.example:6443}
-    - {name: site-c, serverIDIndex: 2, endpoint: https://api.site-c.k8s.example:6443}
-  network:
-    mode: pod-routed
+spec:
+  meshRef: slapd-mesh
 ```
 
-```bash
-# The one command whose arguments differ per site:
-helm upgrade --install slaptain \
-  oci://ghcr.io/chuck-chuck-chuck-net/charts/slaptain \
-  -n slaptain-system --create-namespace --set siteName=site-a
-
-# The bundle — same chart, same values, everywhere:
-helm upgrade --install ldap \
-  oci://ghcr.io/chuck-chuck-chuck-net/charts/slapd-mesh \
-  -n slaptain --create-namespace -f my-mesh.yaml
-```
-
-A wrong `siteName` is the dangerous misconfiguration, not a missing one: two
-sites that claim the same name collide their serverID decades, which slapd does
-not validate and whose only symptom is that some writes never propagate. A
-missing one is loud — mesh features simply stay off.
+and the operator derives that site's `serverIDBase`, its external peers, the
+network mode and the trust wiring from the mesh plus its own `siteName`. Because
+the mesh object carries no per-site fields, **the same chart and the same values
+file are applied unchanged at every site** — the one argument that differs
+anywhere is `--set siteName=<site>` on the operator's own chart.
 
 Full guide: **[Multi-Site Deployments](docs/MULTI-SITE.md)** — the model, the
-cross-site invariants, getting started, and how to tell a mesh is healthy.
-Chart reference: [`charts/slapd-mesh`](charts/slapd-mesh/README.md). Design
-record: [ADR-028](docs/adrs/adr-028-mesh-scoped-vs-site-scoped.md).
+cross-site invariants, a walk-through install, and how to tell a mesh is
+healthy. Chart: [`charts/slapd-mesh`](charts/slapd-mesh/README.md). Sample CR:
+[`operator/config/samples/ldap_v1alpha1_slapdmesh.yaml`](operator/config/samples/ldap_v1alpha1_slapdmesh.yaml).
+Design record: [ADR-028](docs/adrs/adr-028-mesh-scoped-vs-site-scoped.md).
 
-Peers can also be written out by hand on a mesh-less `SlapdCluster`
+Peers can still be written out by hand on a mesh-less `SlapdCluster`
 (`spec.replication.externalPeers`, with a `uri`, static `podAddresses` or a
-`discovery` block) — the lower-level form the mesh derives, and still the way
-to peer with something that is not a slaptain cluster (see
+`discovery` block) — the lower-level form the mesh derives, and still the way to
+peer with something that is *not* a slaptain cluster (see
 [ADR-011](docs/adrs/adr-011-hot-migration-topology.md) on migration topologies).
-The `discovery` form is what the e2e suite exercises; the `uri` and static
-`podAddresses` forms lost their end-to-end coverage when the mesh became the
-only test path, and are carried as open items in
-[`docs/BACKLOG.md`](docs/BACKLOG.md).
+The `discovery` form is what the e2e suite exercises; `uri` and static
+`podAddresses` lost their end-to-end coverage when the mesh became the only test
+path, and are carried as open items in [`docs/BACKLOG.md`](docs/BACKLOG.md).
 
-RID scheme: each `SlapdDatabase` declares a `ridBase`. In-cluster peers use RIDs `ridBase+1..ridBase+49`, external peers use `ridBase+51..ridBase+99`. See [ADR-003](docs/adrs/adr-003-operator-owns-syncrepl.md).
+RID scheme: each `SlapdDatabase` declares a `ridBase`. In-cluster peers use RIDs
+`ridBase+1..ridBase+49`, external peers `ridBase+51..ridBase+99`. See
+[ADR-003](docs/adrs/adr-003-operator-owns-syncrepl.md).
 
 ## Backup & Restore
 
@@ -367,7 +379,8 @@ Running a replicated OpenLDAP cluster on Kubernetes creates lifecycle problems t
 - [TLS Certificates](docs/TLS.md) — where certificates come from (org PKI, cert-manager, the cluster CA), and how clients come to trust them
 - [slctl](docs/slctl.md) — the diagnostic CLI: status, inspect, debug-dump, ldapsearch/add/modify/delete against a managed cluster
 - [OpenLDAP Versions](docs/OPENLDAP-VERSIONS.md) — the 2.7/2.6 image pairs, the tag scheme, and the 2.6 -> 2.7 migration runbook
-- [Architecture Decision Records](docs/adrs/) — ADR-001 through ADR-028
+- [Sample manifests](operator/config/samples/) — one commented example per CRD
+- [Architecture Decision Records](docs/adrs/) — ADR-001 through ADR-030
 - [Development Guide](docs/DEVELOPMENT.md) — prerequisites, image builds, operator dev loop, e2e cycle, debugging, project discipline
 - [GitHub Issues](https://github.com/chuck-chuck-chuck-net/slaptain/issues) — bug reports and feature requests
 
@@ -402,6 +415,7 @@ make charts-package
 make charts-push
 ```
 
+Sample manifests for every CRD: [`operator/config/samples/`](operator/config/samples/).
 Full CRD type definitions: [`operator/api/v1alpha1/`](operator/api/v1alpha1/).
 
 ## License

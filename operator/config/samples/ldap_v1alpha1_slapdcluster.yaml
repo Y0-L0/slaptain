@@ -1,17 +1,26 @@
+# SlapdCluster — the slapd infrastructure: StatefulSet, Services, PVCs, TLS.
+# Database-level configuration (suffix, ACLs, indices, seed) lives on
+# SlapdDatabase and SlapdSchema CRs instead — see ADR-004 and the samples
+# beside this one.
 apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
 kind: SlapdCluster
 metadata:
   name: slapd
 spec:
-  images:
-    slapd:
-      repository: ghcr.io/chuck-chuck-chuck-net/slaptain/slapd
-      tag: latest
-      pullPolicy: IfNotPresent
-    init:
-      repository: ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-init
-      tag: latest
-      pullPolicy: IfNotPresent
+  # images is OPTIONAL. Omitted, the operator defaults both data-plane images to
+  # its own registry path and tag, so a cluster tracks the operator it is
+  # running under. Set fields here only to pin deliberately (e.g. the -ol26
+  # OpenLDAP 2.6 pair for hot-migration interop — always pin both or neither,
+  # see docs/OPENLDAP-VERSIONS.md).
+  # images:
+  #   slapd:
+  #     repository: ghcr.io/chuck-chuck-chuck-net/slaptain/slapd
+  #     tag: 0.2.1
+  #     pullPolicy: IfNotPresent
+  #   init:
+  #     repository: ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-init
+  #     tag: 0.2.1
+  #     pullPolicy: IfNotPresent
 
   ldap:
     # cnConfigCredentials:
@@ -22,11 +31,13 @@ spec:
 
   # Set replicas > 1 together with replication.enabled=true for N-way multi-master.
   replicas: 1
-  # logLevel is a slapd debug bitmask; omit to use the default 256 (stats).
-  # Set to 0 to silence slapd entirely.
+  # readReplicas: 0    # pure consumer pods in a second StatefulSet, <name>-readonly
+  # logLevel is a slapd debug bitmask; omit for the default 16640 (stats+sync,
+  # ADR-024). Set to 0 to silence slapd entirely.
 
+  # Persistence is mandatory (ADR-013) — there is no `enabled` field. These are
+  # the sizes, storage classes and access modes of the per-pod PVCs.
   persistence:
-    enabled: true
     config:
       size: 1Gi
       accessMode: ReadWriteOnce
@@ -44,6 +55,14 @@ spec:
 
   replication:
     enabled: false
+  # To join a multi-site mesh, set meshRef instead of writing externalPeers by
+  # hand: the operator then derives serverIDBase, the peer list, the network
+  # mode and the trust wiring from the SlapdMesh plus its own siteName
+  # (ADR-028; see ldap_v1alpha1_slapdmesh.yaml and docs/MULTI-SITE.md).
+  # Setting a derived field alongside meshRef is refused, not silently ignored.
+  # meshRef: slapd-mesh
+  # sites: [site-a, site-b]   # optional subset of the mesh's sites
+  #
   # Example 3-replica multi-master cluster:
   # replicas: 3
   # replication:

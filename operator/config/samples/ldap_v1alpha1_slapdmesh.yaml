@@ -1,0 +1,67 @@
+# SlapdMesh — the site inventory a multi-site deployment is derived from (ADR-028).
+#
+# This object is MESH-SCOPED: it carries no per-site fields, so the same bytes
+# are applied at every site. Each site entry is written from the point of view
+# of every OTHER site — "how to reach and trust this one". The single per-site
+# fact in the whole system, "which of these am I", is the operator chart's
+# siteName (SITE_NAME), and never appears in a CR.
+#
+# A SlapdCluster joins by setting spec.meshRef; the operator then derives its
+# serverIDBase, its externalPeers, the network mode and the trust wiring. Setting
+# any of those by hand alongside meshRef is refused, never silently preferred.
+#
+# Full guide: docs/MULTI-SITE.md
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdMesh
+metadata:
+  name: slapd-mesh
+spec:
+  sites:
+    - name: site-a
+      # serverIDIndex fixes this site's serverID decade (index * 100); pod N then
+      # gets base + N + 1, so site 2 / pod 3 reads 203 straight out of a CSN.
+      # Explicit, not the list position: reordering this list must never
+      # renumber a live site. Unique per mesh, gaps are fine, ceiling is 40.
+      serverIDIndex: 0
+      # endpoint is this site's Kubernetes API server, on the network the other
+      # sites reach it over. Read by the bootstrap scripts and `slctl`, not by
+      # the operator — the operator uses the address inside the kubeconfig
+      # Secret below. Keep the two consistent.
+      endpoint: https://api.site-a.k8s.example:6443
+      # The Secret (present at every OTHER site) holding a kubeconfig for this
+      # site's API server, used for dynamic peer discovery (ADR-007).
+      kubeconfigSecret:
+        name: mesh-site-a-kubeconfig
+        # key: kubeconfig
+      # The Secret (present at every OTHER site) holding this site's CA
+      # certificate, mounted so consumers can verify it (ADR-007).
+      caSecretName: mesh-site-a-ca
+    - name: site-b
+      serverIDIndex: 1
+      endpoint: https://api.site-b.k8s.example:6443
+      kubeconfigSecret:
+        name: mesh-site-b-kubeconfig
+      caSecretName: mesh-site-b-ca
+    - name: site-c
+      serverIDIndex: 2
+      endpoint: https://api.site-c.k8s.example:6443
+      kubeconfigSecret:
+        name: mesh-site-c-kubeconfig
+      caSecretName: mesh-site-c-ca
+
+  network:
+    # pod-routed: primary pod IPs on a natively cross-site-routed pod network
+    # (ADR-016). Use `multus` with multusNetwork for a dedicated replication
+    # NAD instead (ADR-007).
+    mode: pod-routed
+    # multusNetwork: infra/replication-net
+    # useForInCluster: false
+
+  # trust.issuerRef is declarative only today: certificate bootstrap is a CLI
+  # step run once per site pair (ADR-028 §7), not part of the reconcile loop.
+  # It is carried here so the mesh stays the single description of the fabric.
+  # trust:
+  #   issuerRef:
+  #     name: mesh-ca-issuer
+  #     kind: ClusterIssuer
+  #     group: cert-manager.io

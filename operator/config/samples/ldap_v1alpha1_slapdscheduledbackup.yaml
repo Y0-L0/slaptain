@@ -1,0 +1,37 @@
+# SlapdScheduledBackup — a cron schedule that emits owned SlapdBackup objects,
+# plus retention (ADR-014).
+#
+# Retention deletes for real: the S3 object first, then the SlapdBackup. Only
+# Completed backups are pruned — running ones must not be touched, and failed
+# ones are kept deliberately so the morning after is diagnosable. Leave
+# `retention` unset to write and never delete (e.g. when a bucket lifecycle
+# policy or object lock owns expiry instead).
+#
+# Guide: docs/BACKUP.md
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdScheduledBackup
+metadata:
+  name: nightly
+spec:
+  databaseRef: example-db
+  # Standard 5-field cron, evaluated in UTC.
+  schedule: "0 3 * * *"
+
+  retention:
+    # Keep the 14 most recent successful backups...
+    maxCount: 14
+    # ...and delete anything older than 30 days. Either or both.
+    maxAge: 720h
+
+  storage:
+    bucket: my-ldap-backups
+    prefix: prod
+    region: eu-central-1
+    # endpoint: https://s3.example:7443
+    credentialsSecretName: my-s3-creds
+
+  # immediate: false   # also fire once on creation, rather than waiting for the
+  #                    # first scheduled tick
+  # suspend: false     # stop emitting backups without deleting the schedule
+  # compression: gzip
+  # podAffinity: true

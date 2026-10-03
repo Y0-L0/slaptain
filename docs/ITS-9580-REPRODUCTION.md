@@ -25,6 +25,21 @@ Source line numbers are from that tree.
 Reproduced in four steps with two servers and no fault injection:
 **write, write, `SIGKILL`, start.**
 
+**The `SIGKILL` is a stand-in, not the claim.** No administrator action is
+required anywhere in this bug. Two independent facts make that so:
+
+- the broken on-disk state exists on **every** delta-syncrepl provider from its
+  first write — it is not caused by the stop, only revealed by it;
+- **slapd supplies the unclean stop itself.** A field node crashed with
+  `back-mdb/id2entry.c:828: mdb_opinfo_get: Assertion '!rc' failed` while
+  ingesting replicated entries — a failed `mdb_txn_renew` that the code asserts
+  on rather than handles (`docs/its9580/field-crash/`). That is a separate
+  upstream defect, and it is also exactly the unclean stop this one needs.
+
+So the chain requires nobody to do anything wrong: a node joins by replication,
+is born with the invariant already broken on disk, and slapd then crashes on its
+own during ordinary replication.
+
 `SIGTERM` is safe, which is why routine restarts never show this and why it
 looks random in the field: the trigger is node loss, an OOM kill, a lost
 machine, or a container runtime's grace period expiring.
@@ -182,6 +197,22 @@ end state and the report does not depend on it.
 went from five serverIDs to one *and to an older value*. An unclean stop
 explains the same end state without needing that path, so the mechanism behind
 that particular observation remains uncaptured.
+
+## A note on framing
+
+It is tempting to describe this as a failure to bootstrap a replaced node by
+replication, because that is the scenario it was found in. That is not quite
+right, and the accurate version is stronger.
+
+The bootstrap **succeeds**: the replacement node recovers the complete DIT, and
+cross-site replication comes back. Nothing about the wipe creates the
+divergence. What happens is that the node — like every other node with an
+accesslog — comes up with `minCSN` on disk and `contextCSN` only in memory, and
+therefore *looks* perfectly healthy while being one unclean stop from refusing
+every consumer forever.
+
+The scope is accordingly wider than any recovery scenario: it is every
+delta-syncrepl provider, from its first write, in a default configuration.
 
 ## For upstream
 

@@ -1,0 +1,34 @@
+6ac1867d.273bd266 0x7f521bfff6c0 conn=2071 op=2 SEARCH RESULT tag=101 err=0 qtime=0.000012 etime=0.000175 nentries=1 text=
+6ac1867d.27419549 0x7f521b7fe6c0 conn=2071 fd=26 closed (connection lost)
+6ac1867d.27e332ad 0x7f4a07dfe6c0 conn=2072 fd=26 ACCEPT from IP=<ip>:43506 (IP=<ip>:1024)
+6ac1867d.27e5a1fe 0x7f5211bfd6c0 conn=2072 op=0 BIND dn="cn=admin,cn=config" method=128
+6ac1867d.27e5e016 0x7f5211bfd6c0 conn=2072 op=0 BIND dn="cn=admin,cn=config" mech=SIMPLE bind_ssf=0 ssf=0
+6ac1867d.27e6ed8a 0x7f5211bfd6c0 conn=2072 op=0 RESULT tag=97 err=0 qtime=0.000016 etime=0.000174 text=
+6ac1867d.27e9e573 0x7f5218efd6c0 conn=2072 op=1 SRCH base="cn=config" scope=1 deref=0 filter="(olcSuffix=<test-suffix>)"
+6ac1867d.27e9ff79 0x7f5218efd6c0 conn=2072 op=1 SRCH attr=dn
+6ac1867d.27eb9f8d 0x7f5218efd6c0 conn=2072 op=1 SEARCH RESULT tag=101 err=0 qtime=0.000010 etime=0.000193 nentries=1 text=
+6ac1867d.27ede4f6 0x7f521bfff6c0 conn=2072 op=2 SRCH base="olcDatabase={4}mdb,cn=config" scope=0 deref=0 filter="(objectClass=*)"
+6ac1867d.27edfa3f 0x7f521bfff6c0 conn=2072 op=2 SRCH attr=olcSyncRepl olcMultiProvider
+6ac1867d.27ee9b86 0x7f521bfff6c0 conn=2072 op=2 SEARCH RESULT tag=101 err=0 qtime=0.000008 etime=0.000068 nentries=1 text=
+6ac1867d.27f459a3 0x7f521b7fe6c0 conn=2072 op=3 MOD dn="olcDatabase={4}mdb,cn=config"
+6ac1867d.27f4801a 0x7f521b7fe6c0 conn=2072 op=3 MOD attr=olcSyncRepl
+6ac1867d.27f4e29b 0x7f521b7fe6c0 slap_get_csn: conn=2072 op=3 generated new csn=20261003224933.670353Z#000000#000#000000 manage=1
+6ac1867d.27f4fc6a 0x7f521b7fe6c0 slap_queue_csn: queueing 0x7f520c378930 20261003224933.670353Z#000000#000#000000
+6ac1867d.27ffb172 0x7f521b7fe6c0 conn=2072 op=3 RESULT tag=103 err=0 qtime=0.000087 etime=0.000841 text=
+6ac1867d.27ffd927 0x7f521b7fe6c0 slap_graduate_commit_csn: removing 0x7f520c378930 20261003224933.670353Z#000000#000#000000
+6ac1867d.28056edd 0x7f5211bfd6c0 conn=2072 fd=26 closed (connection lost)
+6ac1867d.284f1956 0x7f5218efd6c0 ldap_sync_search: rid=032 starting refresh (sending cookie=rid=032)
+6ac1867d.28534a5f 0x7f521b7fe6c0 syncrepl_message_to_entry: rid=032 DN: <test-suffix>, UUID: 723ce6e4-53c8-1041-93ed-eff100f5074c
+6ac1867d.2854674a 0x7f521b7fe6c0 syncrepl_entry: rid=032 LDAP_RES_SEARCH_ENTRY(LDAP_SYNC_ADD) csn=(none) tid 0x7f521b7fe6c0
+6ac1867d.28550cd6 0x7f521b7fe6c0 syncrepl_entry: rid=032 inserted UUID 723ce6e4-53c8-1041-93ed-eff100f5074c
+6ac1867d.28555853 0x7f521b7fe6c0 syncrepl_entry: rid=032 be_search (32)
+6ac1867d.285566cb 0x7f521b7fe6c0 syncrepl_entry: rid=032 <test-suffix>
+6ac1867d.285dd819 0x7f521bfff6c0 start_refresh: rid=034 a refresh on rid=032 in progress, pausing
+6ac1867d.285e5a0e 0x7f4a07dfe6c0 start_refresh: rid=033 a refresh on rid=032 in progress, pausing
+6ac1867d.288c2db3 0x7f5211bfd6c0 conn=2073 fd=32 ACCEPT from IP=<ip>:43508 (IP=<ip>:1024)
+6ac1867d.288f96e0 0x7f5218efd6c0 conn=2073 op=0 BIND dn="cn=admin,<test-suffix>" method=128
+6ac1867d.28902744 0x7f5218efd6c0 conn=2073 op=0 BIND dn="cn=admin,<test-suffix>" mech=SIMPLE bind_ssf=0 ssf=0
+6ac1867d.28913c9e 0x7f5218efd6c0 conn=2073 op=0 RESULT tag=97 err=0 qtime=0.000021 etime=0.000127 text=
+6ac1867d.2893a97d 0x7f521bfff6c0 conn=2073 op=1 SRCH base="<test-suffix>" scope=0 deref=0 filter="(objectClass=*)"
+6ac1867d.2893be57 0x7f521bfff6c0 conn=2073 op=1 SRCH attr=objectClass structuralObjectClass entryUUID
+slapd: ../../../../../servers/slapd/back-mdb/id2entry.c:828: mdb_opinfo_get: Assertion `!rc' failed.

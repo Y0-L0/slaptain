@@ -1,0 +1,204 @@
+
+=== slapd build under test
+@(#) $OpenLDAP: slapd 2.7.1-0+slaptain1 (Sep 11 2026 10:00:00) $
+	slaptain <noreply@chuck-chuck-chuck.net>
+
+
+=== configuration (identical on both nodes bar serverID/ports/paths)
+include /etc/ldap/schema/core.schema
+include /etc/ldap/schema/cosine.schema
+include /etc/ldap/schema/inetorgperson.schema
+
+pidfile  /srv/its9580/A/slapd.pid
+argsfile /srv/its9580/A/slapd.args
+
+modulepath /usr/lib/ldap
+moduleload back_mdb
+moduleload syncprov
+moduleload accesslog
+
+serverID 1
+
+# ---- change journal (the delta-syncrepl log DB) ------------------------
+database  mdb
+suffix    "cn=accesslog"
+directory /srv/its9580/A/log
+maxsize   1073741824
+rootdn    "cn=admin,cn=accesslog"
+rootpw    secret
+index     entryCSN,objectClass,reqEnd,reqResult,reqStart,reqDN eq
+
+overlay   syncprov
+syncprov-nopresent  TRUE
+syncprov-reloadhint TRUE
+
+# ---- data --------------------------------------------------------------
+database  mdb
+suffix    "dc=example,dc=org"
+directory /srv/its9580/A/data
+maxsize   1073741824
+rootdn    "cn=admin,dc=example,dc=org"
+rootpw    secret
+index     objectClass,entryCSN,entryUUID eq
+
+multiprovider TRUE
+
+overlay   syncprov
+
+overlay   accesslog
+logdb     "cn=accesslog"
+logops    writes
+logsuccess TRUE
+logpurge  07+00:00 01+00:00
+
+syncrepl rid=002
+  provider=ldap://127.0.0.1:9002
+  bindmethod=simple
+  binddn="cn=admin,dc=example,dc=org"
+  credentials=secret
+  searchbase="dc=example,dc=org"
+  type=refreshAndPersist
+  retry="5 +"
+  syncdata=accesslog
+  logbase="cn=accesslog"
+  logfilter="(&(objectClass=auditWriteObject)(reqResult=0))"
+
+=== 1. seed the suffix on A, start both nodes
+
+=== 2. write at A and at B so both serverIDs enter the journals
+adding new entry "cn=fromA,dc=example,dc=org"
+
+adding new entry "cn=fromB,dc=example,dc=org"
+
+
+--- A data
+dn: dc=example,dc=org
+
+dn: cn=fromA,dc=example,dc=org
+
+dn: cn=fromB,dc=example,dc=org
+
+
+--- B data
+dn: dc=example,dc=org
+
+dn: cn=fromB,dc=example,dc=org
+
+dn: cn=fromA,dc=example,dc=org
+
+
+--- A log DB
+dn: cn=accesslog
+minCSN: 20261003200751.068026Z#000000#001#000000
+minCSN: 20261003200751.075975Z#000000#002#000000
+contextCSN: 20261003200751.068026Z#000000#001#000000
+contextCSN: 20261003200751.075975Z#000000#002#000000
+
+
+--- B log DB
+dn: cn=accesslog
+minCSN: 20261003200750.045076Z#000000#000#000000
+minCSN: 20261003200751.075975Z#000000#002#000000
+contextCSN: 20261003200750.045076Z#000000#000#000000
+contextCSN: 20261003200751.068026Z#000000#001#000000
+contextCSN: 20261003200751.075975Z#000000#002#000000
+
+
+Both nodes healthy: minCSN's SID set is contained in contextCSN's.
+Stale results so far: 1
+
+=== 3. stop A, remove ONE contextCSN value from its log DB, reload offline
+
+--- A's log DB suffix entry as dumped
+dn: cn=accesslog
+objectClass: auditContainer
+cn: accesslog
+structuralObjectClass: auditContainer
+minCSN: 20261003200751.068026Z#000000#001#000000
+minCSN: 20261003200751.075975Z#000000#002#000000
+contextCSN: 20261003200751.068026Z#000000#001#000000
+contextCSN: 20261003200751.075975Z#000000#002#000000
+
+
+--- A's log DB suffix entry after the edit
+dn: cn=accesslog
+objectClass: auditContainer
+cn: accesslog
+structuralObjectClass: auditContainer
+minCSN: 20261003200751.068026Z#000000#001#000000
+minCSN: 20261003200751.075975Z#000000#002#000000
+contextCSN: 20261003200751.068026Z#000000#001#000000
+
+slapadd accepted the NO-USER-MODIFICATION minCSN verbatim.
+
+=== PREDICTION, made before starting anything
+  syncprov.c:3480 walks minCSN in SID order and fails on the first SID that
+  contextCSN does not carry.  The lowest minCSN SID absent from contextCSN is
+  002, so A must log exactly:
+
+      syncprov_op_search: consumer not within recorded mincsn for DB's
+      mincsn=20261003200751.075975Z#000000#002#000000
+
+  and must answer EVERY consumer cookie with err=4096 "sync cookie is stale".
+
+=== 4. start A (bad state) then B (healthy consumer)
+
+--- A's log DB, live
+dn: cn=accesslog
+minCSN: 20261003200751.068026Z#000000#001#000000
+minCSN: 20261003200751.075975Z#000000#002#000000
+contextCSN: 20261003200751.068026Z#000000#001#000000
+
+
+--- provider side: distinct 'not within recorded mincsn' messages on A
+consumer not within recorded mincsn for DB's mincsn=20261003200751.075975Z#000000#002#000000
+
+--- provider side: one stale result in full
+6ac1609d.2859cbc2 0x7f11a12206c0 conn=1001 op=1 syncprov_op_search: registered persistent search
+6ac1609d.2859dffd 0x7f11a12206c0 conn=1001 op=1 syncprov_op_search: consumer not within recorded mincsn for DB's mincsn=20261003200751.075975Z#000000#002#000000
+6ac1609d.285a1844 0x7f11a12206c0 conn=1001 op=1 SEARCH RESULT tag=101 err=4096 qtime=0.000006 etime=0.000109 nentries=0 text=sync cookie is stale
+
+--- consumer side: B's reaction
+6ac1609d.2857a1a1 0x7f40537fe6c0 ldap_sync_search: rid=001 starting refresh (sending cookie=rid=001,sid=002,csn=20261003200751.068026Z#000000#001#000000;20261003200751.075975Z#000000#002#000000)
+6ac1609d.285a92cd 0x7f4053fff6c0 do_syncrep2: rid=001 delta-sync lost sync, switching to REFRESH
+6ac1609d.285e8b48 0x7f40537fe6c0 ldap_sync_search: rid=001 starting refresh (sending cookie=rid=001,sid=002,csn=20261003200751.068026Z#000000#001#000000;20261003200751.075975Z#000000#002#000000)
+6ac1609d.28921aa0 0x7f4053fff6c0 ldap_sync_search: rid=001 starting refresh (sending cookie=rid=001,sid=002,csn=20261003200750.045076Z#000000#000#000000;20261003200751.068026Z#000000#001#000000;20261003200751.075975Z#000000#002#000000)
+
+--- rate, measured over 10 s on the consumer
+err=4096 results seen by B: 44810 -> 59388  => 1457 per second
+(retry="5 +" is configured and is never consulted on this path)
+
+--- does it heal?  sampling every 30 s
+  t+ 70s  cumulative err=4096 on B: 102761
+  t+100s  cumulative err=4096 on B: 146069
+  t+130s  cumulative err=4096 on B: 189324
+
+=== 5. the cure: have the missing serverID write one entry
+serverID 002 is node B.  One write at B re-enters SID 002 in
+A's log DB contextCSN via syncprov_new_ctxcsn().  minCSN is not touched.
+adding new entry "cn=cure,dc=example,dc=org"
+
+
+--- A's log DB after the cure write
+dn: cn=accesslog
+minCSN: 20261003200751.068026Z#000000#001#000000
+minCSN: 20261003200751.075975Z#000000#002#000000
+contextCSN: 20261003200751.068026Z#000000#001#000000
+contextCSN: 20261003201008.887803Z#000000#002#000000
+
+
+--- rate after the cure
+err=4096 on B: 189570 -> 189570  => 0 per second
+(was 1457 per second before; cumulative before cure: 189561)
+
+--- replication still works
+dn: dc=example,dc=org
+
+dn: cn=fromA,dc=example,dc=org
+
+dn: cn=fromB,dc=example,dc=org
+
+dn: cn=cure,dc=example,dc=org
+
+
+=== done

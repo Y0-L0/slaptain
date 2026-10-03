@@ -93,12 +93,18 @@ and nothing repairs it.
 the before state, the after state, and a log DB that went from five SIDs to one
 *and to an older value*, which is a replace rather than a merge.
 
-## Reproducing it on three plain slapd servers
+## Reproducing it: two plain slapd servers, deterministically
 
-No Kubernetes, no operator.
+`docs/its9580/repro.sh` does the whole thing and needs nothing but podman.
+Captured output of a run is in `docs/its9580/sample-run.log`. The container
+plumbing is one marked ten-line block at the top — delete it and the rest runs
+unchanged on a VM with OpenLDAP 2.7.1 installed.
+
+No Kubernetes, no operator, no three-site mesh, no storage loss, **and no
+race**: the bad state is manufactured offline rather than waited for.
 
 ```
-A, B, C — OpenLDAP 2.7.1, serverIDs 1, 2, 3.
+A, B — OpenLDAP 2.7.1, serverIDs 1 and 2, loopback.
 
 Each node:
   data DB  dc=example,dc=org
@@ -106,51 +112,56 @@ Each node:
     overlay accesslog   logdb cn=accesslog   logops writes   logsuccess TRUE
   log DB   cn=accesslog
     overlay syncprov    syncprov-nopresent TRUE   syncprov-reloadhint TRUE
-  olcMultiProvider TRUE
-  syncrepl to the other two with  syncdata=accesslog  logbase="cn=accesslog"
+  multiprovider TRUE
+  syncrepl to the other with  syncdata=accesslog  logbase="cn=accesslog"
 ```
 
-1. Write at **A**, at **B** and at **C**, so the data DB's `contextCSN` carries
-   all three SIDs.
-2. Converge. On every node confirm
-   `ldapsearch -b cn=accesslog -s base '+' minCSN contextCSN` lists all three in
-   both attributes.
-3. **Create the divergence.** Stop **C**, delete its `cn=accesslog` *and* data
-   directories, start it; it performs a plain full refresh from a peer.
-4. **Check the invariant** on each node:
+1. Write once at **A** and once at **B**, so both log DBs carry SIDs 001 and
+   002 in `minCSN` and in `contextCSN`. Let them converge.
+2. Stop **A**. `slapcat` its log DB, **delete the single `contextCSN` line whose
+   SID is 002**, `slapadd` the result into a fresh directory, start **A**.
+
+   Deleting a `contextCSN` value is preferred over adding a fictional `minCSN`
+   one: it mirrors the destructive `MOD REPLACE` that `accesslog.c:2069`
+   describes, and it leaves the missing SID owned by a **real running node**, so
+   the cure in step 4 can be demonstrated with only two nodes.
+
+   `slapadd` accepts `minCSN` verbatim despite its `NO-USER-MODIFICATION` flag,
+   and slapd does not recompute or overwrite it at startup. That is what makes
+   this deterministic.
+3. **Observe.** B now receives `err=4096` on every connection and retries with
+   no delay. A logs, for every one of them:
+
    ```
-   minCSN:     …#001…  …#002…  …#003…
-   contextCSN: …#001…                     ← 002, 003 missing  → this node is broken
+   syncprov_op_search: consumer not within recorded mincsn for DB's
+     mincsn=<the lowest minCSN value whose SID is absent from contextCSN>
+   SEARCH RESULT tag=101 err=4096 ... nentries=0 text=sync cookie is stale
    ```
-   **This step is a race and does not fire every time** — a deliberate retrigger
-   did not reproduce it. Loop 3–4.
-5. **Observe.** Every consumer of that node loops at tens to >100 `err=4096` per
-   second; the provider logs `consumer not within recorded mincsn for DB's
-   mincsn=<lowest minCSN SID absent from contextCSN>`.
 
-### Deterministic shortcut — untested, try this first
+   The script prints which CSN it expects **before** starting slapd, so the
+   prediction is falsifiable rather than fitted afterwards.
+4. **Cure, to confirm the mechanism.** One `ldapadd` at **B**. SID 002 re-enters
+   A's log-DB `contextCSN` via `syncprov_new_ctxcsn()`, `minCSN` untouched, and
+   the storm stops within one round trip.
 
-`minCSN` is `NO-USER-MODIFICATION`, so it cannot be injected over LDAP, but step
-3 is only a means to an end. Offline:
+### Measured, on a loopback pair
 
-```
-stop slapd
-slapcat -b cn=accesslog > log.ldif
-# add one minCSN value whose SID is NOT in the log DB's contextCSN
-slapadd -b cn=accesslog < log.ldif        # into a fresh directory
-start slapd
-```
+- **1449 `err=4096` per second**, with `retry="5 +"` configured and never
+  consulted on this path. The three-site Kubernetes mesh measured >100/s; a
+  loopback pair is simply faster at the same loop.
+- **No healing.** Cumulative on the consumer at 30-second intervals: 101860 →
+  144649 → 187767. Flat, no decay.
+- **Cure: 1449/s → 0/s**, with all entries present on both nodes afterwards.
 
-This should reproduce the branch at `syncprov.c:3480` directly, with no race and
-possibly with only **two** nodes — a provider in the bad state and one consumer.
-**Not tested here:** the runtime image is distroless and has no shell. It is the
-first thing to try on a VM, since it removes the only non-deterministic step.
+(Figures from an independent re-run of the committed script, not from the
+session that wrote it.)
 
-### Confirming the diagnosis without a fix
+### A corroborating detail
 
-Have each missing SID write one entry. Their SIDs re-enter the log DB's
-`contextCSN` via `syncprov_new_ctxcsn()` and the storm stops. Measured: two LDAP
-adds ended a 22-minute storm within 90 seconds, with `minCSN` untouched.
+A separate prototype injected two *fictional* `minCSN` SIDs (003 and 004) into a
+`contextCSN` of {001, 002}. The provider named `#003#` — the lowest absent SID —
+in all 26274 messages over 20 seconds. So the naming rule holds with more than
+one absent SID, and an absent SID need not belong to any node that ever existed.
 
 ## What was proven by removal, and what was not
 
@@ -159,7 +170,12 @@ adds ended a 22-minute storm within 90 seconds, with `minCSN` untouched.
 - three sites / cross-site consumers (single-site 3-replica: 0 occurrences);
 - losing the data or config directories (wiping only the accesslog: 0);
 - dormant SIDs, long uptime, an aged accesslog (one occurrence was on a mesh
-  under 20 minutes old).
+  under 20 minutes old);
+- **more than two nodes** — the committed reproduction uses two;
+- **any replication history** — the divergence is injected into a database
+  ninety seconds old;
+- **storage loss of any kind**;
+- **any race** — the setup is deterministic and worked first time.
 
 **Proven sufficient** — the storm tracked this condition exactly, appearing with
 it and stopping within 90 s of its removal, nothing else changed:
@@ -171,6 +187,14 @@ it and stopping within 90 s of its removal, nothing else changed:
 - `syncprov-nopresent` / `syncprov-reloadhint` on the log DB (the code says they
   gate the branch; not tested by turning them off);
 - `olcMultiProvider`, the data DB's sessionlog, two databases per node.
+
+**Still reasoned, not observed — and the report must say so.** The committed
+reproduction injects the *end state*. It demonstrates the consequence of the
+divergence, not its cause: the destructive `MOD REPLACE contextCSN` copied onto
+the log DB has never been captured in the act, because both field occurrences
+consumed the provider's log ring first. What was seen in the field is the before
+state, the after state, and a log DB that went from five SIDs to one *and to an
+older value* — a replace, not a merge.
 
 **Not established:** whether a single-site cluster can reach the bad state at
 all. It was shown not to reproduce *via the storage-loss trigger* in two

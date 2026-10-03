@@ -56,6 +56,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── BACKUP.md                   # S3 backup/restore user guide (ADR-014)
 │   ├── MONITORING.md               # What slaptain exposes to Prometheus (both surfaces), the measured join keys, and what it still cannot tell you (ADR-033)
 │   ├── VERSIONING.md               # Where the `v` goes: git tags only; images/charts/appVersion bare
+│   ├── ITS-9580-REPRODUCTION.md    # Upstream-facing: the permanent stale-cookie loop on 2.7.1, in pure slapd terms
 │   ├── TLS.md                      # Certificates: where they come from, and how clients come to trust them (ADR-029)
 │   ├── TUNING.md                   # Tuning & sizing guide: defaults, placement classes, lab→prod sizing (ADR-024)
 │   ├── DEBUG-IMAGES.md             # slapd:<tag>-debug / -asan: diagnostic image variants for heap corruption

@@ -2867,6 +2867,18 @@ for the recovered site never changed — sites 2 and 3 both held
 in the recovered site's *outbound* direction, which is not the side issuing
 these cookies.
 
+**Characterised 2026-10-03 — see `docs/ITS-9580-REPRODUCTION.md`.** The
+invariant is now known and is nothing to do with data loss, dormancy or
+Kubernetes: *on a delta-syncrepl provider, the log DB's `minCSN` names a
+serverID its `contextCSN` does not contain*. Every consumer is then told the
+cookie is stale on every connection, forever, and retries with no backoff.
+Proven by removal: three sites unnecessary, losing `/data` or `/config`
+unnecessary, dormancy unnecessary. Proven sufficient: two LDAP adds that
+restored the missing SIDs ended a 22-minute storm within 90 s. Mechanism traced
+to `syncprov.c:3320` (trim the cookie against `contextCSN`) versus `:3480`
+(validate it against `minCSN`), with the two sets permitted to differ — and all
+line references verified against the 2.7.1 tree.
+
 **Still unproven:** that it predates ADR-031. Nobody has run the PVC-loss
 scenario on a multi-site mesh under the pre-ADR-031 scheme, so "pre-existing" is
 the reasonable reading rather than a demonstrated one. **A baseline run on

@@ -2812,3 +2812,65 @@ a transient `Error` on the way there is invisible to a wait.
   phase from creation, not just the end state).
 - Once fixed, the explanatory paragraph in `docs/demo/README.md` step 3 can
   shrink to a line or go.
+
+## ITS#9580 stale-cookie storm observed on OpenLDAP 2.7.1
+
+ADR-021 adopted 2.7.1 specifically because ITS#9580 is fixed in no 2.6.x
+release. On 2026-10-03 the `dataloss_recovery` spec's no-storm assertion fired
+on **2.7.1**, on a three-site mesh: 5991 `sync cookie is stale` lines on
+`slapd-0`, 0 on the other two, against a limit of 50.
+
+Mechanism, from the provider's own log:
+
+```
+syncprov_op_search: got a persistent search with a
+  cookie=rid=001,sid=066,csn=…#065…;…#066…;20261003140300…#067#…;20261003135937…#0c9#…
+syncprov_op_search: consumer not within recorded mincsn
+  for DB's mincsn=20261003144533.051273Z#000000#065#000000
+SEARCH RESULT tag=101 err=4096 … text=sync cookie is stale
+```
+
+The spec wipes `slapd-0`'s PVCs, so its accesslog refills from scratch and its
+`mincsn` starts at the recovery moment. The consumers' cookies still carry SIDs
+`067` and `0c9`, last written ~50 minutes earlier — **dormant SIDs**. Provider
+answers stale, consumer full-refreshes, loop.
+
+This is the dormancy shape ADR-008's 2026-09-11 amendment describes and that
+ADR-021 expected 2.7 to resolve. Two facts bound it: the identical spec
+**passed** on the same code and images in an earlier run the same day, and the
+failing run was a *second* destructive pass over a mesh that had been standing
+for ~50 minutes — outside the one-pass-per-setup envelope the suite assumes.
+
+So the open question is not whether slaptain is wrong but whether ADR-021's
+premise is complete: is ITS#9580 fixed in 2.7.1 for the dormant-SID case, or
+only for the case the upstream ticket describes? Found during ADR-031 Phase 8
+validation and deliberately **not** acted on there — weakening an ADR-021 guard
+on a single observation would be exactly the wrong move. It belongs to ADR-021
+and ADR-008.
+
+**Second observation, 2026-10-03, and it refutes the bounding above.** It fired
+again on 2.7.1 on a **fresh** mesh — first run after setup, not a second
+destructive pass, no accumulated dormancy. 3911 lines, and still producing
+~20/s **25 minutes** after the event, connection ids past 324 000: a persistent
+hot loop, not a settling transient. Provider-side on the recovered pod,
+answering remote consumers binding as `cn=repl-<db>,cn=slaptain-auth` from the
+other two sites.
+
+So the "outside the suite's one-pass envelope" explanation does not survive. The
+open question sharpens to: **is the 2.7.1 fix for ITS#9580 simply absent for the
+PVC-loss-on-a-mesh case?** The spec's own text says 2.7.1 "should be ~0
+everywhere", and on this evidence it is not.
+
+Ruled out as a cause, with evidence: the ADR-031 RID ledger. The consumers' RIDs
+for the recovered site never changed — sites 2 and 3 both held
+`external/site-1/0 = 1` from start to finish — and the renumbering happened only
+in the recovered site's *outbound* direction, which is not the side issuing
+these cookies.
+
+**Still unproven:** that it predates ADR-031. Nobody has run the PVC-loss
+scenario on a multi-site mesh under the pre-ADR-031 scheme, so "pre-existing" is
+the reasonable reading rather than a demonstrated one. **A baseline run on
+`v0.2.2` would settle it in one pass** and is the cheapest next step.
+
+**Then:** reproduce deliberately and control the dormancy variable, rather than
+taking it as a side effect of whichever spec happens to wipe a PVC.

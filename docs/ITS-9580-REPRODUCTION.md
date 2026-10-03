@@ -30,11 +30,15 @@ required anywhere in this bug. Two independent facts make that so:
 
 - the broken on-disk state exists on **every** delta-syncrepl provider from its
   first write — it is not caused by the stop, only revealed by it;
-- **slapd supplies the unclean stop itself.** A field node crashed with
-  `back-mdb/id2entry.c:828: mdb_opinfo_get: Assertion '!rc' failed` while
+- **slapd crashes on its own during ordinary replication.** A field node exited
+  139 on `back-mdb/id2entry.c:828: mdb_opinfo_get: Assertion '!rc' failed` while
   ingesting replicated entries — a failed `mdb_txn_renew` that the code asserts
-  on rather than handles (`docs/its9580/field-crash/`). That is a separate
-  upstream defect, and it is also exactly the unclean stop this one needs.
+  on rather than handles (`docs/its9580/field-crash/`). **Correction, 2026-10-04:**
+  that pod was a *read-only replica*, which carries no accesslog at all, so that
+  particular crash **cannot** have produced this bug. It is a separate upstream
+  defect and it shows slapd does abort itself in this code path — but it is not
+  evidence of the unclean stop *this* bug needs, and was wrongly presented as
+  such. What stopped the field providers uncleanly remains unidentified.
 
 So the chain requires nobody to do anything wrong: a node joins by replication,
 is born with the invariant already broken on disk, and slapd then crashes on its
@@ -96,6 +100,22 @@ minCSN:     …#001…   minCSN:     …#002…
 The log DB's `contextCSN` is not merely short — it has never been written at
 all. `syncprov_db_open` loads that nothing at startup while `accesslog_db_root`
 loads the full `minCSN`.
+
+**Confirmed in production shape**, not only in the two-node fixture. Read off a
+healthy, running, three-site Kubernetes node with `slapcat` against a copy of
+its live LMDB file — the pod was serving normally and nothing had gone wrong:
+
+```
+cn=accesslog-example-db          (log DB; no syncprov-checkpoint configured)
+  minCSN:     …#001…  …#003…  …#002…  …#065…  …#066…     ← five serverIDs
+  contextCSN: …#001…  …#003…                              ← two
+```
+
+`minCSN` names three serverIDs that `contextCSN` does not. That node was one
+unclean stop away from refusing every consumer, while every health check it has
+reported green. Here the divergence is partial rather than total, so the
+exposure is not limited to a log DB that has never been checkpointed — a
+partially-written `contextCSN` is equally fatal.
 
 ## Mechanism
 

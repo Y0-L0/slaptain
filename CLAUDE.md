@@ -671,6 +671,54 @@ or inspecting cluster state.
 
 Common flags: `--context`, `--kubeconfig`, `-n namespace`, `--json`, `-A` (all namespaces).
 
+#### Reading a pod's databases ON DISK (not what slapd serves)
+
+`slctl debug` mounts the slapd PVCs read-only at `/config`, `/data` and
+`/accesslog`, which makes it the way to inspect **on-disk** state — distinct
+from what `ldapsearch` returns, which is whatever slapd holds in memory. The
+two genuinely differ: a log DB's `contextCSN` is only written by a syncprov
+checkpoint or a clean shutdown, so a healthy pod routinely serves values that
+are not on disk at all (`docs/ITS-9580-REPRODUCTION.md`).
+
+Four obstacles, in the order you will hit them:
+
+1. **The toolkit image has no `slapcat`** — it ships `ldap-utils`, the *client*
+   package. Use `--image` to swap in `slapd-init`, which carries the matching
+   server toolchain and a shell:
+   `--image <registry>/slaptain/slapd-init:<same tag as the pod's slapd>`.
+2. **`slapcat -F /config/slapd.d` fails** with
+   `olcDbDirectory: value #0: invalid path: Read-only file system` — the config
+   load insists the database directory is writable. Do not fight it; copy the
+   LMDB file out and use a throwaway config instead.
+3. **`mdb` is a loadable module in this build**, so a hand-written config needs
+   `moduleload back_mdb.la` or you get `Unrecognized database type (mdb)` —
+   which looks exactly like "the attribute is absent" if you grep past it.
+4. **Databases are one directory per CR name**: `/accesslog/<db>/data.mdb`,
+   `/data/<db>/data.mdb`.
+
+```bash
+slctl debug slapd --context <ctx> -n slaptain-testing --pod 0   --image <registry>/slaptain/slapd-init:<tag> -- bash -c '
+rm -rf /tmp/w; mkdir -p /tmp/w/db
+cp -a /accesslog/<db>/data.mdb /tmp/w/db/
+cat > /tmp/w/c.conf <<EOF
+include /etc/ldap/schema/core.schema
+include /etc/ldap/schema/cosine.schema
+modulepath /usr/lib/ldap
+moduleload back_mdb.la
+moduleload accesslog.la
+moduleload syncprov.la
+database mdb
+suffix "cn=accesslog-<db>"
+directory /tmp/w/db
+EOF
+slapcat -f /tmp/w/c.conf -b "cn=accesslog-<db>" | awk "/^dn:/{n++} n<2"'
+```
+
+Two cautions. Always look at raw `slapcat` output before grepping — a config
+error and a genuinely missing attribute are indistinguishable once filtered.
+And each `slctl debug` call adds an **ephemeral container that persists until
+the pod is recreated**, so batch your commands into one invocation.
+
 Example after a failed e2e test:
 ```bash
 slctl inspect -n slaptain-testing slapd

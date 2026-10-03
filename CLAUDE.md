@@ -56,8 +56,8 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── BACKUP.md                   # S3 backup/restore user guide (ADR-014)
 │   ├── MONITORING.md               # What slaptain exposes to Prometheus (both surfaces), the measured join keys, and what it still cannot tell you (ADR-033)
 │   ├── VERSIONING.md               # Where the `v` goes: git tags only; images/charts/appVersion bare
-│   ├── ITS-9580-REPRODUCTION.md    # Upstream-facing: the permanent stale-cookie loop on 2.7.1, in pure slapd terms
-│   ├── its9580/                    # Runnable repro + controls: write, write, SIGKILL, start (podman; no k8s)
+│   ├── ITS-9398-REPRODUCTION.md    # Upstream-facing: the permanent stale-cookie loop on 2.7.1, in pure slapd terms
+│   ├── its9398/                    # Runnable repro + controls: write, write, SIGKILL, start (podman; no k8s)
 │   ├── TLS.md                      # Certificates: where they come from, and how clients come to trust them (ADR-029)
 │   ├── TUNING.md                   # Tuning & sizing guide: defaults, placement classes, lab→prod sizing (ADR-024)
 │   ├── DEBUG-IMAGES.md             # slapd:<tag>-debug / -asan: diagnostic image variants for heap corruption
@@ -678,7 +678,7 @@ Common flags: `--context`, `--kubeconfig`, `-n namespace`, `--json`, `-A` (all n
 from what `ldapsearch` returns, which is whatever slapd holds in memory. The
 two genuinely differ: a log DB's `contextCSN` is only written by a syncprov
 checkpoint or a clean shutdown, so a healthy pod routinely serves values that
-are not on disk at all (`docs/ITS-9580-REPRODUCTION.md`).
+are not on disk at all (`docs/ITS-9398-REPRODUCTION.md`).
 
 Four obstacles, in the order you will hit them:
 

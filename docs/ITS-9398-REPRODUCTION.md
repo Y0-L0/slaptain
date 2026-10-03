@@ -1,12 +1,67 @@
 # A delta-syncrepl provider stops serving every consumer after an unclean stop
 
-Working notes toward an upstream report on OpenLDAP 2.7.1. Every claim below is
-either demonstrated by a script in `docs/its9580/`, backed by a source line, or
+Working notes on **ITS#9398, "Stale accesslog cookie due to unclean shutdown"**
+— open since 2020 — as it manifests on OpenLDAP 2.7.1. Every claim below is
+either demonstrated by a script in `docs/its9398/`, backed by a source line, or
 explicitly marked as inferred-but-unobserved.
 
 **Build:** `@(#) $OpenLDAP: slapd 2.7.1-0+slaptain1 (Sep 11 2026 10:00:00) $`,
 built from a vendored Debian packaging fork of the 2.7.1 release (ADR-021).
 Source line numbers are from that tree.
+
+## Upstream status: already filed, by a maintainer, open six years
+
+**ITS#9398** — *"Stale accesslog cookie due to unclean shutdown"*, Quanah
+Gibson-Mount, 2020-11-19, assigned to Ondřej Kuzník, **UNCONFIRMED**, target
+milestone 2.7.2, depends on ITS#9225. Verified by direct fetch. Its description
+is this entire failure mode in one paragraph:
+
+> "If slapd terminates uncleanly, a checkpoint will be lost on the accesslog db.
+> Depending on the syncprov overlay checkpoint settings (usually no
+> checkpointing is enabled on the accesslog db) this can cause the system to
+> refuse engage in replication at startup."
+
+The contemplated fix (Kuzník, 2023-11-07) is to have syncprov defer the backend
+commit and send the contextCSN update from a result callback — which depends on
+**ITS#9225** (back-mdb PREPARE/2-phase commit), and that is **VERIFIED
+SUSPENDED**: *"I suggest we postpone this."* (hyc, 2026-04-07). So the intended
+remedy is blocked behind an explicitly postponed enhancement.
+
+**We previously cited ITS#9580 throughout. That was wrong.** ITS#9580 is
+*"Refresh vs. accesslog in delta-MPR"* (Kuzník, 2021-06-14, IN_PROGRESS) and its
+description mentions neither `minCSN`, nor "sync cookie is stale", nor unclean
+shutdown. The `ITS#9580 FIXME` comments we were reading sit inside code that
+*that* ticket added; one of them happens to remark that it depends on syncprov's
+checkpoint. We mistook the remark for the ticket.
+
+### The requirement is real and undocumented
+
+Nothing upstream tells you to put a `syncprov-checkpoint` on the **log** DB:
+
+- `slapo-accesslog(5)` never mentions checkpoints, CSNs, syncprov, or shutdown
+  at all — zero matches across the whole page.
+- `slapo-syncprov(5)` documents `syncprov-checkpoint`, `syncprov-nopresent`
+  ("should only be set TRUE for a syncprov instance on top of a log database")
+  and `syncprov-reloadhint` without ever connecting them.
+- The Admin Guide's delta-syncrepl worked example gives the log DB
+  `nopresent`/`reloadhint` only, and puts `syncprov-checkpoint 1000 60` on the
+  **primary** DB twenty lines later. Identical in the 2.4, 2.5, 2.6 and 2.7
+  guides.
+- **Upstream's own regression fixtures agree**: of every config in the 2.7.1
+  tree that puts a syncprov on a log DB, not one carries a checkpoint there.
+
+The only adjacent advice is generic and framed as a performance concern, not a
+correctness one — `overlays.sdf`: a checkpoint is recommended "to **minimize
+recovery time** after an unclean shutdown".
+
+The invariant itself appears nowhere in any document. The closest is a
+maintainer's mailing-list remark (Kuzník, 2023-02-28): *"accesslog's contextCSN
+should always be in sync with its main DB"*, where he also calls this class
+*"the most common reason to see e-syncRefreshRequired - 4096"*.
+
+There is **no documented recovery procedure**. The "one write from the absent
+serverID" cure appears once, in a 2006 user post, never endorsed by a
+maintainer; our measurement is better evidence than that citation.
 
 ## Summary
 
@@ -33,7 +88,7 @@ required anywhere in this bug. Two independent facts make that so:
 - **slapd crashes on its own during ordinary replication.** A field node exited
   139 on `back-mdb/id2entry.c:828: mdb_opinfo_get: Assertion '!rc' failed` while
   ingesting replicated entries — a failed `mdb_txn_renew` that the code asserts
-  on rather than handles (`docs/its9580/field-crash/`). **Correction, 2026-10-04:**
+  on rather than handles (`docs/its9398/field-crash/`). **Correction, 2026-10-04:**
   that pod was a *read-only replica*, which carries no accesslog at all, so that
   particular crash **cannot** have produced this bug. It is a separate upstream
   defect and it shows slapd does abort itself in this code path — but it is not
@@ -50,10 +105,10 @@ machine, or a container runtime's grace period expiring.
 
 ## Reproducing it
 
-`docs/its9580/repro.sh` — two plain slapd servers, podman only, no Kubernetes,
+`docs/its9398/repro.sh` — two plain slapd servers, podman only, no Kubernetes,
 no fault injection, no race. The container plumbing is one marked block; delete
 it and the script runs on any host with OpenLDAP 2.7.1 installed.
-`docs/its9580/controls.sh` runs the variants in the table below.
+`docs/its9398/controls.sh` runs the variants in the table below.
 Captured output: `sample-run.log` and the three `control-*.log` files.
 
 ```
@@ -177,6 +232,26 @@ A pre-existing `ITS#9580 FIXME` sits four lines above that lookup at **`:3462`**
 → ~1400 stale results per second per consumer, each preceded by a full refresh
 of the entire DIT.
 
+### What the impact is — and what it is not
+
+**Data still converges.** Measured on a live three-site mesh while a provider
+was storming at ~5700 stale results per minute: an entry written at the broken
+provider reached **all nine** read-write pods across all three sites, as did a
+control entry written at a healthy node. We predicted one-way divergence and
+were wrong; the prediction is recorded here because the negative matters.
+
+The reason is step 5 above — the consumer's fallback full refresh against the
+*data* suffix **succeeds**. In the same 45-second window the broken provider
+served 2211 full searches of `dc=example,dc=org` alongside 4355 stale results.
+The data gets through; it is the delta-syncrepl optimisation that is gone.
+
+So the harm is **resource exhaustion, not data loss**: every consumer refreshes
+the entire DIT, hundreds of times a second, forever. On a fixture DIT that
+merely pins a CPU (observed: 2237m on the provider, 550-660m on each of five
+consumers). On a production DIT it is an outage. And because nothing breaks
+functionally, every replication health check keeps passing — which is why this
+survived so long unnoticed.
+
 ## Controls
 
 | Scenario | disk `contextCSN` at stop | after restart |
@@ -195,7 +270,7 @@ cost of a `contextCSN` write per operation on a write-heavy database.
 
 ## Proven versus inferred
 
-**Proven by experiment**, on `2.7.1-0+slaptain1`, scripts in `docs/its9580/`:
+**Proven by experiment**, on `2.7.1-0+slaptain1`, scripts in `docs/its9398/`:
 
 - a log DB's on-disk `contextCSN` is absent on a healthy running node with no
   checkpoint configured;

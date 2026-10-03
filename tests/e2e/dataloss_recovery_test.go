@@ -45,7 +45,7 @@ var _ = Describe("data loss recovery via replication",
 	var preObservedGeneration int64
 
 	// Wall-clock mark taken just before the data-loss event, used to scope the
-	// slapd log reads to the recovery window (see the ITS#9580 spec below).
+	// slapd log reads to the recovery window (see the ITS#9398 spec below).
 	var lossStartedAt time.Time
 
 	BeforeAll(func(ctx SpecContext) {
@@ -93,7 +93,7 @@ var _ = Describe("data loss recovery via replication",
 		oldUID := oldPod.UID
 
 		// Mark the window before anything is destroyed. Pod logs are read back
-		// from here in the ITS#9580 spec; a mark taken later would miss the
+		// from here in the ITS#9398 spec; a mark taken later would miss the
 		// first — busiest — seconds of the refresh.
 		lossStartedAt = time.Now().Add(-10 * time.Second)
 
@@ -202,7 +202,7 @@ var _ = Describe("data loss recovery via replication",
 		waitForCrossSiteReplication(ctx, "the pod-loses-its-PVCs recovery")
 	}, NodeTimeout(18*time.Minute))
 
-	// ── ITS#9580: the recovery must not trigger a stale-cookie refresh storm ──
+	// ── ITS#9398: the recovery must not trigger a stale-cookie refresh storm ──
 	//
 	// This is the assertion that justifies running OpenLDAP 2.7 (ADR-021). On
 	// 2.6 the spec above converges *in fact* but leaves the mesh in a refresh
@@ -224,7 +224,7 @@ var _ = Describe("data loss recovery via replication",
 	// race upstream's 414866b8 FIXME describes). The threshold of 50 cleanly
 	// separates that measured isolated staleness from the measured storm
 	// (thousands); see ADR-021 before "fixing" a red by raising it.
-	It("no 'sync cookie is stale' storm follows the recovery (ITS#9580, ADR-021)",
+	It("no 'sync cookie is stale' storm follows the recovery (ITS#9398, ADR-021)",
 		func(ctx SpecContext) {
 			const needle = "sync cookie is stale"
 			// Isolated staleness is legitimate — a consumer can genuinely hold a
@@ -255,7 +255,7 @@ var _ = Describe("data loss recovery via replication",
 
 			Expect(total).To(BeNumerically("<", maxOccurrences),
 				"%d %q lines across %v since the PVC-loss recovery (limit %d). This is the "+
-					"ITS#9580 refresh storm: OpenLDAP 2.6 cannot serve a delta-sync cookie from "+
+					"ITS#9398 refresh storm: OpenLDAP 2.6 cannot serve a delta-sync cookie from "+
 					"an accesslog that a full refresh filled in receive order. Reproduces on "+
 					"-ol26 images only in a multi-site mesh with a dormant SID; on 2.7.1 it "+
 					"should be ~0 everywhere. See ADR-021.",

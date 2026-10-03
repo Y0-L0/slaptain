@@ -164,6 +164,18 @@ accesslog database ever gets one.**
 - RFC 4533 — the LDAP Content Synchronization Operation; present and delete
   phases: <https://www.rfc-editor.org/rfc/rfc4533>
 
+## Amendment (2026-10-04): this conclusion is ours, not upstream's
+
+A documentation search on 2026-10-04 found **no upstream text stating that a
+sessionlog on an accesslog DB is harmful**. What upstream actually documents is
+a narrower, different rule: `syncprov-sessionlog` and
+`syncprov-sessionlog-source` are mutually exclusive (`slapo-syncprov(5)`).
+
+The decision here stands — it rests on this project's own source reading and
+red-first evidence, which is recorded above. Only the provenance needs
+correcting: wherever this reads as though upstream says so, it does not. We say
+so, and we should defend it on our own evidence.
+
 ---
 
 ## Amendment, 2026-10-15: the session log may come from the accesslog — opt-in, startup-only

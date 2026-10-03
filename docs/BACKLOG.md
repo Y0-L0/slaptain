@@ -2815,6 +2815,8 @@ a transient `Error` on the way there is invisible to a wait.
 
 ## ITS#9580 stale-cookie storm observed on OpenLDAP 2.7.1
 
+## ITS#9398 stale-cookie storm on OpenLDAP 2.7.1 (filed upstream in 2020, still open)
+
 ADR-021 adopted 2.7.1 specifically because ITS#9580 is fixed in no 2.6.x
 release. On 2026-10-03 the `dataloss_recovery` spec's no-storm assertion fired
 on **2.7.1**, on a three-site mesh: 5991 `sync cookie is stale` lines on
@@ -2867,7 +2869,16 @@ for the recovered site never changed — sites 2 and 3 both held
 in the recovered site's *outbound* direction, which is not the side issuing
 these cookies.
 
-**Root cause found 2026-10-03 — see `docs/ITS-9580-REPRODUCTION.md`.** It is
+**Root cause found, and it is upstream's ITS#9398 — see
+`docs/ITS-9398-REPRODUCTION.md`.** Filed by a maintainer in 2020, still
+UNCONFIRMED, its intended fix blocked behind the suspended ITS#9225. We spent
+weeks citing ITS#9580, which is a different ticket; the FIXME comments we were
+reading sit in code *that* ticket added. Upstream documents nowhere that the log
+DB needs a `syncprov-checkpoint`, and its own regression fixtures omit it.
+Impact is resource exhaustion, not data loss: measured on a live mesh, entries
+still reach all nine pods because the consumer's fallback full refresh succeeds
+— it is the delta optimisation that is gone, at ~1400 full-DIT refreshes per
+second per consumer. It is
 not a dormancy artefact, not data loss, and not ours. On a delta-syncrepl log
 DB, `minCSN` is written to disk eagerly while `contextCSN` is written **only by
 a syncprov checkpoint** — and no delta-syncrepl guide tells you to configure one

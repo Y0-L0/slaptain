@@ -185,3 +185,31 @@ Ship two image pairs, with the plain tag being OpenLDAP 2.7.1.
   ITS#9580 diagnosis and the posture this ADR supersedes.
 - `docs/OPENLDAP-VERSIONS.md` — the user-facing version/tag contract and runbook.
 - `images/openldap-deb/README.md` — fork provenance, delta and exit strategy.
+
+## Amendment (2026-10-04): the ticket this ADR names is not the bug it describes
+
+This ADR adopted 2.7.1 on the premise that "ITS#9580 is fixed in no 2.6.x
+release". Both halves of that need correcting, and the decision deserves a
+re-read rather than a quiet edit.
+
+**ITS#9580 is a different bug.** It is *"Refresh vs. accesslog in delta-MPR"*
+(Kuzník, 2021-06-14), still IN_PROGRESS, and it appears in no `CHANGES` entry on
+any branch. The stale-cookie storm this project kept attributing to it is
+**ITS#9398**, *"Stale accesslog cookie due to unclean shutdown"* — open since
+2020, UNCONFIRMED, blocked behind the suspended ITS#9225. Both tickets were
+verified directly against bugs.openldap.org on 2026-10-04.
+
+**So 2.7 did not fix the storm, because nothing has.** `syncprov.c` at master
+(2026-10-01) is byte-identical to the 2.7.1 release for every line this
+concerns. A 2.7.1 cluster is exactly as exposed as a 2.6 one, which is why the
+storm has been observed repeatedly on 2.7.1 in this lab.
+
+That does **not** automatically invalidate adopting 2.7 — the LMDB and packaging
+reasons stand on their own, and the 2.6 branch differs in a way that may matter
+(the ITS#9580 contextCSN-propagation block in `accesslog.c` landed after 2.6.0
+and was never backported, so the skew likely has a different shape there —
+inferred, not measured). What it invalidates is the *headline justification* as
+written. Anyone re-reading this ADR should know the upgrade did not buy the fix
+it was taken for.
+
+See `docs/ITS-9398-REPRODUCTION.md`.

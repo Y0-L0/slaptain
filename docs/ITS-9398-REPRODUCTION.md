@@ -323,3 +323,49 @@ delta-syncrepl provider, from its first write, in a default configuration.
 3. **A default-configuration hazard.** The documented delta-syncrepl recipe does
    not include a checkpoint on the log DB, so every deployment following it is
    one `kill -9` away from a provider that never serves a consumer again.
+
+## Open questions, as of 2026-10-04
+
+Recorded so they are not rediscovered from scratch. None is answered.
+
+**1. What uncleanly stops the providers in the field?** This is the one real
+gap. The reproduction uses `SIGKILL` as a stand-in, but nobody has identified
+what does it on the lab. Two candidates, neither confirmed:
+
+- *Grace-period expiry.* The slapd pods set **no**
+  `terminationGracePeriodSeconds` (so the Kubernetes default of 30 s applies)
+  and have **no** `preStop` hook. If slapd needs longer than 30 s to close its
+  databases, every pod deletion is an unclean stop — and a full e2e suite
+  deletes pods many times over. Nobody has measured slapd's actual shutdown
+  duration on a loaded pod. **This is the cheapest next measurement and it may
+  be a slaptain defect rather than upstream's.**
+- *A crash.* One was captured — `back-mdb/id2entry.c:828: mdb_opinfo_get:
+  Assertion '!rc' failed`, exit 139, during syncrepl ingest
+  (`docs/its9398/field-crash/`). But it was on a **read-only replica**, which
+  carries no accesslog, so that instance cannot have caused this. It stands as
+  a separate upstream defect and as proof that slapd does abort itself on this
+  path.
+
+**2. Why was the storm absent and then present on a pod that never restarted?**
+On 2026-10-03 the storming pod showed `restartCount=0`, started 23:00:01, yet a
+stale-cookie census at ~00:58 found **zero** across all twelve pods, and by
+~01:30 it was at ~5700/minute. The model says a process loads the bad
+`contextCSN` at startup and is broken from that moment, which fits
+`restartCount=0` — the "restart" was the pod's creation — but not the quiet
+window. Either the storm began well after startup for a reason we have not
+identified, or no consumer happened to request those log DBs during the census.
+Unresolved, and it matters: "broken from startup" and "goes bad later" imply
+different triggers.
+
+**3. Frequency.** Reconstructed from reports rather than measured consistently,
+so treat as indicative: the e2e's stale-cookie assertion fired in roughly **4 of
+8** executions across the session — but **4 of 5** on full three-site suites and
+**0 of 3** on single-site or label-filtered runs. That split is consistent with
+the mechanism (full suites churn pods far more, so they hit more unclean stops)
+and is itself the best circumstantial evidence for question 1.
+
+**4. Does `logpurge` reopen the window on a steady-state server?** The purge
+path advances `minCSN` on disk with a real `be_modify` on its own timer
+(`accesslog.c:656-684`, `:760-787`), with no corresponding `contextCSN` write.
+If so, the exposure is not confined to the bootstrap window but returns on every
+purge cycle. Read from source; not measured.

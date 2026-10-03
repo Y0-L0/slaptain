@@ -1,0 +1,96 @@
+
+[1m=== build under test[0m
+@(#) $OpenLDAP: slapd 2.7.1-0+slaptain1 (Sep 11 2026 10:00:00) $
+	slaptain <noreply@chuck-chuck-chuck.net>
+
+
+[1m=== config (A); LOGCKP='1 1'[0m
+13:serverID 1
+15:database  mdb
+16:suffix    "cn=accesslog"
+26:syncprov-checkpoint 1 1
+28:database  mdb
+29:suffix    "dc=example,dc=org"
+
+[1m=== 1. seed A, start both, write from BOTH sids, converge[0m
+
+--- A log DB (served)
+dn: cn=accesslog
+minCSN: 20261003212144.932289Z#000000#001#000000
+minCSN: 20261003212144.937270Z#000000#002#000000
+contextCSN: 20261003212144.932289Z#000000#001#000000
+contextCSN: 20261003212144.937270Z#000000#002#000000
+
+--- B log DB (served)
+dn: cn=accesslog
+minCSN: 20261003212143.907193Z#000000#000#000000
+minCSN: 20261003212144.937270Z#000000#002#000000
+contextCSN: 20261003212143.907193Z#000000#000#000000
+contextCSN: 20261003212144.932289Z#000000#001#000000
+contextCSN: 20261003212144.937270Z#000000#002#000000
+
+
+A minCSN sids:     001 002 
+A contextCSN sids: 001 002 
+
+--- A log DB ON DISK right after the very first writes (no kill yet)
+dn: cn=accesslog
+minCSN: 20261003212144.932289Z#000000#001#000000
+minCSN: 20261003212144.937270Z#000000#002#000000
+contextCSN: 20261003212144.932289Z#000000#001#000000
+contextCSN: 20261003212144.937270Z#000000#002#000000
+disk minCSN sids:     001 002 
+disk contextCSN sids: 001 002 
+
+[1m=== 2. SCENARIO=kill[0m
+
+[1m=== 3. served vs disk on A, immediately before stopping it[0m
+
+--- served
+dn: cn=accesslog
+minCSN: 20261003212144.932289Z#000000#001#000000
+minCSN: 20261003212144.937270Z#000000#002#000000
+contextCSN: 20261003212144.932289Z#000000#001#000000
+contextCSN: 20261003212144.937270Z#000000#002#000000
+
+--- disk
+dn: cn=accesslog
+minCSN: 20261003212144.932289Z#000000#001#000000
+minCSN: 20261003212144.937270Z#000000#002#000000
+contextCSN: 20261003212144.932289Z#000000#001#000000
+contextCSN: 20261003212144.937270Z#000000#002#000000
+served minCSN sids:     001 002 
+served contextCSN sids: 001 002 
+disk   minCSN sids:     001 002 
+disk   contextCSN sids: 001 002 
+
+[1m=== 4. stop A (SIGKILL) and restart[0m
+/c.sh: line 101:    10 Killed                  slapd -f "$SRV/$n/slapd.conf" -h "ldap://127.0.0.1:$p/" -d $DBG >> "$SRV/$n.slapd.log" 2>&1
+
+--- A log DB on disk while A is down
+dn: cn=accesslog
+minCSN: 20261003212144.932289Z#000000#001#000000
+minCSN: 20261003212144.937270Z#000000#002#000000
+contextCSN: 20261003212144.932289Z#000000#001#000000
+contextCSN: 20261003212144.937270Z#000000#002#000000
+disk minCSN sids:     001 002 
+disk contextCSN sids: 001 002 
+
+--- A served after restart
+dn: cn=accesslog
+minCSN: 20261003212144.932289Z#000000#001#000000
+minCSN: 20261003212144.937270Z#000000#002#000000
+contextCSN: 20261003212144.932289Z#000000#001#000000
+contextCSN: 20261003212144.937270Z#000000#002#000000
+
+
+--- storm rate on the provider A
+err=4096: 0 -> 0 => 0/s
+
+--- writes still replicate A->B?
+dn: cn=afterkill,dc=example,dc=org
+
+
+[1m=== DONE scenario=kill logckp='1 1'[0m
+/c.sh: line 101:   113 Killed                  slapd -f "$SRV/$n/slapd.conf" -h "ldap://127.0.0.1:$p/" -d $DBG >> "$SRV/$n.slapd.log" 2>&1
+/c.sh: line 101:    18 Killed                  slapd -f "$SRV/$n/slapd.conf" -h "ldap://127.0.0.1:$p/" -d $DBG >> "$SRV/$n.slapd.log" 2>&1

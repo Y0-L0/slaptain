@@ -2867,7 +2867,34 @@ for the recovered site never changed — sites 2 and 3 both held
 in the recovered site's *outbound* direction, which is not the side issuing
 these cookies.
 
-**Characterised 2026-10-03 — see `docs/ITS-9580-REPRODUCTION.md`.** The
+**Root cause found 2026-10-03 — see `docs/ITS-9580-REPRODUCTION.md`.** It is
+not a dormancy artefact, not data loss, and not ours. On a delta-syncrepl log
+DB, `minCSN` is written to disk eagerly while `contextCSN` is written **only by
+a syncprov checkpoint** — and no delta-syncrepl guide tells you to configure one
+on the log DB, so slaptain does not. The on-disk invariant is therefore violated
+from the first write onward on a perfectly healthy node, invisibly, and **any
+unclean stop makes it permanent**: `write, write, SIGKILL, start` reproduces it
+on two servers with no fault injection. `SIGTERM` is safe, because
+`syncprov_db_close` checkpoints — which is why routine restarts never show it
+and why it looked random.
+
+**For slaptain, three options, none yet taken** (see also the heartbeat note
+below):
+
+1. `syncprov-checkpoint 1 1` on every accesslog DB. Proven to close it, but
+   `100 5` was proven *not* to — a batched checkpoint is a lottery — so the
+   sound setting costs a `contextCSN` write per operation on a write-heavy
+   database.
+2. Detect and cure: the operator can read the invariant per log DB per pod, and
+   the cure is one write from the server whose serverID is missing. Cheap to
+   detect; the cure needs that *specific* node to write, which the operator
+   cannot arrange cross-site (ADR-026 R2 forbids the fan-out).
+3. **Make every serverID write periodically.** That is ADR-008's deferred
+   heartbeat, and its deferral rested on ITS#9580 being fixed in 2.7 — a premise
+   this work refutes. The case should be reopened on the new evidence.
+
+**Earlier characterisation, superseded in its causal account but not in its
+observations:** The
 invariant is now known and is nothing to do with data loss, dormancy or
 Kubernetes: *on a delta-syncrepl provider, the log DB's `minCSN` names a
 serverID its `contextCSN` does not contain*. Every consumer is then told the

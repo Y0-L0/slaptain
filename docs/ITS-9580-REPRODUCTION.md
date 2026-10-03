@@ -1,107 +1,41 @@
-# A permanent `sync cookie is stale` loop on OpenLDAP 2.7.1
+# A delta-syncrepl provider stops serving every consumer after an unclean stop
 
-Working notes toward an upstream report. Written so that every claim is either
-backed by a source line or explicitly marked as reasoned-but-unobserved — the
-distinction upstream will press on first.
+Working notes toward an upstream report on OpenLDAP 2.7.1. Every claim below is
+either demonstrated by a script in `docs/its9580/`, backed by a source line, or
+explicitly marked as inferred-but-unobserved.
 
 **Build:** `@(#) $OpenLDAP: slapd 2.7.1-0+slaptain1 (Sep 11 2026 10:00:00) $`,
 built from a vendored Debian packaging fork of the 2.7.1 release (ADR-021).
-Source line numbers below are from that tree.
+Source line numbers are from that tree.
 
-## The invariant
+## Summary
 
-> On a delta-syncrepl provider, if the **log DB's `minCSN`** names a serverID
-> that the **log DB's `contextCSN`** does not contain, then *every* consumer of
-> that provider receives `err=4096 sync cookie is stale` on *every* connection,
-> regardless of how current it is — and retries with **no backoff**.
+> On a delta-syncrepl provider, the accesslog DB's **`minCSN` is written to disk
+> eagerly** while its **`contextCSN` is only written by a syncprov checkpoint**.
+> With no `syncprov-checkpoint` configured on the log DB — which no
+> delta-syncrepl setup guide tells you to configure — the on-disk invariant
+> `minCSN ⊆ contextCSN` is violated **from the first write onward, permanently,
+> on a perfectly healthy node.**
+>
+> It is invisible while the process lives, because searches read the in-memory
+> copy. **Any unclean termination makes it fatal:** after the restart, that
+> provider answers `err=4096 sync cookie is stale` to every consumer on every
+> connection, forever, and the consumers retry with no backoff.
 
-It does not heal. Observed flat at thousands of lines per minute for 22 minutes,
-with no decay.
+Reproduced in four steps with two servers and no fault injection:
+**write, write, `SIGKILL`, start.**
 
-This is reached by, but not caused by, losing a replica's storage. The storage
-loss is one way to make the two attributes diverge; the divergence is the bug.
+`SIGTERM` is safe, which is why routine restarts never show this and why it
+looks random in the field: the trigger is node loss, an OOM kill, a lost
+machine, or a container runtime's grace period expiring.
 
-## Mechanism
+## Reproducing it
 
-### Provider — `servers/slapd/overlays/syncprov.c`, `syncprov_op_search()`
-
-1. **`:3320`** — *"If there are SIDs we don't recognize in the cookie, drop
-   them"*. The consumer's cookie is trimmed to the provider's own `contextCSN`
-   SID set.
-2. **`:3342`** — `if (srs->sr_state.numcsns != numcsns)` → *"consumer cookie is
-   missing a csn we track"* discards the cookie and forces a refresh. Passing
-   this guard means the trimmed cookie and the provider's `contextCSN` are now
-   index-aligned, which the next step relies on.
-3. **`:3457`** — the branch is entered only when
-   `ad_minCSN != NULL && si->si_nopres && si->si_usehint`, i.e. only on a log DB
-   whose `syncprov` has `nopresent` and `reloadhint` set.
-4. **`:3480`** — the check itself:
-
-   ```c
-   for ( i=0, j=0; i < a->a_numvals; i++ ) {
-       while ( j < numcsns && minsids[i] > sids[j] ) j++;
-       if ( j < numcsns && minsids[i] == sids[j] &&
-               ber_bvcmp( &a->a_vals[i], &srs->sr_state.ctxcsn[j] ) <= 0 ) {
-           /* minCSN for this serverID is contained, keep going */
-           continue;
-       }
-       /* … LDAP_SYNC_REFRESH_REQUIRED, "sync cookie is stale" … */
-   ```
-
-   A SID present in `minCSN` but absent from `contextCSN` drives `j` to
-   `numcsns`, so `j < numcsns` fails and control falls through to stale —
-   **unconditionally, for every possible cookie**. The cookie was just
-   normalised against `contextCSN`; it is then validated against `minCSN`; and
-   nothing requires the two to agree.
-
-Note the pre-existing `ITS#9580 FIXME` immediately above the lookup at
-**`:3462`**: *"when we've figured out and split the sessionlog/deltalog
-tracking, use the appropriate attribute"*. Upstream already considers this area
-unfinished.
-
-### Consumer — `servers/slapd/syncrepl.c`
-
-5. `do_syncrep2()` turns `REFRESH_REQUIRED` in `SYNCLOG_LOGGING` into
-   `SYNCLOG_FALLBACK` — *"delta-sync lost sync, switching to REFRESH"*.
-6. The fallback full refresh against the **data** suffix succeeds and returns an
-   **empty** cookie, so the consumer's stored cookie is never updated.
-7. **`:2336`** — on `REFRESH_REQUIRED` outside `SYNCLOG_LOGGING`:
-   `/* give up but schedule an immedite retry */  rc = SYNC_PAUSED;`
-   (typo upstream's).
-8. **`:2383`** — `SYNC_PAUSED` sets `rtask->interval.tv_sec = 0` and reschedules
-   immediately. **`retry=` and `interval=` are never consulted on this path.**
-
-→ same cookie, same trim, same stale. Measured at >100 stale results per second
-per consumer, each preceded by a full refresh of the entire DIT.
-
-### How the attributes diverge
-
-`servers/slapd/overlays/accesslog.c:2069` carries its own `ITS#9580 FIXME`:
-
-> *"This will only work if we log successful writes and nothing else, otherwise
-> we're reverting some CSNs (at least our own) in the contextCSN to an older
-> value. Right now we depend on syncprov's checkpoint to clean up after."*
-
-A plain (non-delta) refresh delivers a `MOD REPLACE contextCSN` to the data DB,
-and the accesslog overlay copies that modlist verbatim onto the log DB.
-`REPLACE` is destructive, so a shorter vector from the refresh source **removes
-SIDs** from the log DB's `contextCSN`. `minCSN` only ever grows. They diverge,
-and nothing repairs it.
-
-**Reasoned, not observed:** the truncating modify was never captured in the act
-— both occurrences consumed the provider's log ring first. What was observed is
-the before state, the after state, and a log DB that went from five SIDs to one
-*and to an older value*, which is a replace rather than a merge.
-
-## Reproducing it: two plain slapd servers, deterministically
-
-`docs/its9580/repro.sh` does the whole thing and needs nothing but podman.
-Captured output of a run is in `docs/its9580/sample-run.log`. The container
-plumbing is one marked ten-line block at the top — delete it and the rest runs
-unchanged on a VM with OpenLDAP 2.7.1 installed.
-
-No Kubernetes, no operator, no three-site mesh, no storage loss, **and no
-race**: the bad state is manufactured offline rather than waited for.
+`docs/its9580/repro.sh` — two plain slapd servers, podman only, no Kubernetes,
+no fault injection, no race. The container plumbing is one marked block; delete
+it and the script runs on any host with OpenLDAP 2.7.1 installed.
+`docs/its9580/controls.sh` runs the variants in the table below.
+Captured output: `sample-run.log` and the three `control-*.log` files.
 
 ```
 A, B — OpenLDAP 2.7.1, serverIDs 1 and 2, loopback.
@@ -116,98 +50,150 @@ Each node:
   syncrepl to the other with  syncdata=accesslog  logbase="cn=accesslog"
 ```
 
-1. Write once at **A** and once at **B**, so both log DBs carry SIDs 001 and
-   002 in `minCSN` and in `contextCSN`. Let them converge.
-2. Stop **A**. `slapcat` its log DB, **delete the single `contextCSN` line whose
-   SID is 002**, `slapadd` the result into a fresh directory, start **A**.
+1. Start both. Write one entry at **A** and one at **B**. Let them converge.
+2. `kill -9` node **A**.
+3. Start **A**.
+4. Keep **B** idle.
 
-   Deleting a `contextCSN` value is preferred over adding a fictional `minCSN`
-   one: it mirrors the destructive `MOD REPLACE` that `accesslog.c:2069`
-   describes, and it leaves the missing SID owned by a **real running node**, so
-   the cure in step 4 can be demonstrated with only two nodes.
+Measured: **1389 `err=4096` per second**, flat (cumulative 78652 → 120500 over
+30 s), with `retry="5 +"` configured and never consulted. One write at **B**
+takes it to **0/s** immediately.
 
-   `slapadd` accepts `minCSN` verbatim despite its `NO-USER-MODIFICATION` flag,
-   and slapd does not recompute or overwrite it at startup. That is what makes
-   this deterministic.
-3. **Observe.** B now receives `err=4096` on every connection and retries with
-   no delay. A logs, for every one of them:
+Step 4 matters. The serverID missing from A's on-disk `contextCSN` is restored
+the moment that server writes anything, so a cluster with one busy writer
+self-heals and an idle peer keeps the storm running indefinitely. That is the
+"dormant serverID" earlier field reports described.
 
+### The disk-versus-served observation
+
+Taken on a node that is **running normally and has never been restarted**:
+
+```
+--- SERVED (ldapsearch against the live slapd — syncprov's in-memory si_ctxcsn)
+minCSN:     …#001…   minCSN:     …#002…
+contextCSN: …#001…   contextCSN: …#002…
+
+--- ON DISK (slapcat of a byte copy of the live LMDB directory)
+minCSN:     …#001…   minCSN:     …#002…
+                                        ← contextCSN absent entirely
+```
+
+The log DB's `contextCSN` is not merely short — it has never been written at
+all. `syncprov_db_open` loads that nothing at startup while `accesslog_db_root`
+loads the full `minCSN`.
+
+## Mechanism
+
+### Why the disk state is wrong on a healthy node
+
+- `minCSN` is written eagerly: `accesslog.c:2141` does a real `LDAP_MOD_ADD`
+  through `be_modify` for every new serverID it journals.
+- `contextCSN` on that DB lives only in `si_ctxcsn` and reaches disk solely
+  through `syncprov_checkpoint` (`syncprov.c:1612`), whose **only two callers**
+  are the configured checkpoint (`:2638`) and `syncprov_db_close` (`:4204`,
+  guarded by `if (si->si_numops)`).
+
+So with no checkpoint configured, the only thing that ever persists
+`contextCSN` is a clean shutdown. That is precisely why `SIGTERM` is safe and
+`SIGKILL` is not.
+
+Upstream's own `accesslog.c:2069` `ITS#9580 FIXME` says *"we depend on
+syncprov's checkpoint to clean up after"* — a dependency on configuration that
+is not on by default and is not mentioned in the delta-syncrepl instructions.
+
+### Why the bad state is fatal rather than merely degraded
+
+`servers/slapd/overlays/syncprov.c`, `syncprov_op_search()`:
+
+1. **`:3320`** — *"If there are SIDs we don't recognize in the cookie, drop
+   them"*: the consumer's cookie is trimmed to the provider's `contextCSN` set.
+2. **`:3342`** — a count mismatch after that trim discards the cookie outright,
+   so past this point the trimmed cookie and `contextCSN` are index-aligned.
+3. **`:3457`** — the branch is entered only when
+   `ad_minCSN != NULL && si->si_nopres && si->si_usehint`, i.e. on a log DB.
+4. **`:3480`** — the trimmed cookie is then validated against **`minCSN`**:
+
+   ```c
+   for ( i=0, j=0; i < a->a_numvals; i++ ) {
+       while ( j < numcsns && minsids[i] > sids[j] ) j++;
+       if ( j < numcsns && minsids[i] == sids[j] &&
+               ber_bvcmp( &a->a_vals[i], &srs->sr_state.ctxcsn[j] ) <= 0 )
+           continue;
+       /* … LDAP_SYNC_REFRESH_REQUIRED, "sync cookie is stale" … */
    ```
-   syncprov_op_search: consumer not within recorded mincsn for DB's
-     mincsn=<the lowest minCSN value whose SID is absent from contextCSN>
-   SEARCH RESULT tag=101 err=4096 ... nentries=0 text=sync cookie is stale
-   ```
 
-   The script prints which CSN it expects **before** starting slapd, so the
-   prediction is falsifiable rather than fitted afterwards.
-4. **Cure, to confirm the mechanism.** One `ldapadd` at **B**. SID 002 re-enters
-   A's log-DB `contextCSN` via `syncprov_new_ctxcsn()`, `minCSN` untouched, and
-   the storm stops within one round trip.
+   A serverID in `minCSN` but absent from `contextCSN` drives `j` to `numcsns`,
+   so the guard fails and control falls through to stale — **unconditionally,
+   for every possible cookie**. The cookie is normalised against one attribute
+   and judged against another, and nothing requires the two to agree.
 
-### Measured, on a loopback pair
+A pre-existing `ITS#9580 FIXME` sits four lines above that lookup at **`:3462`**.
 
-- **1449 `err=4096` per second**, with `retry="5 +"` configured and never
-  consulted on this path. The three-site Kubernetes mesh measured >100/s; a
-  loopback pair is simply faster at the same loop.
-- **No healing.** Cumulative on the consumer at 30-second intervals: 101860 →
-  144649 → 187767. Flat, no decay.
-- **Cure: 1449/s → 0/s**, with all entries present on both nodes afterwards.
+### Why the consumer makes it a denial of service
 
-(Figures from an independent re-run of the committed script, not from the
-session that wrote it.)
+5. `do_syncrep2()` turns `REFRESH_REQUIRED` into `SYNCLOG_FALLBACK`; the
+   fallback full refresh against the data suffix succeeds and returns an
+   **empty** cookie, so the stored cookie never changes.
+6. **`syncrepl.c:2336`** — `/* give up but schedule an immedite retry */`
+   (upstream's typo) sets `SYNC_PAUSED`.
+7. **`:2383`** — `SYNC_PAUSED` sets `rtask->interval.tv_sec = 0` and reschedules
+   immediately. **`retry=` and `interval=` are never consulted on this path.**
 
-### A corroborating detail
+→ ~1400 stale results per second per consumer, each preceded by a full refresh
+of the entire DIT.
 
-A separate prototype injected two *fictional* `minCSN` SIDs (003 and 004) into a
-`contextCSN` of {001, 002}. The provider named `#003#` — the lowest absent SID —
-in all 26274 messages over 20 seconds. So the naming rule holds with more than
-one absent SID, and an absent SID need not belong to any node that ever existed.
+## Controls
 
-## What was proven by removal, and what was not
+| Scenario | disk `contextCSN` at stop | after restart |
+|---|---|---|
+| converge, `SIGKILL`, start | *(absent)* | **1526/s storm** |
+| converge, `SIGTERM`, start | written by `db_close` | **clean** |
+| `syncprov-checkpoint 1 1` on log DB, `SIGKILL` | `001 002` | **clean** |
+| `syncprov-checkpoint 100 5` on log DB, `SIGKILL` | `001` only | **1473/s storm** |
 
-**Proven unnecessary** — removed, storm absent:
+The last row is the important one: **a batched checkpoint is a lottery, not a
+guard.** The exposure is the interval between a new serverID entering `minCSN`
+(immediately) and the next checkpoint writing `contextCSN`. Since new serverIDs
+appear rarely and in bursts — at topology changes — a time- or operation-batched
+checkpoint will lose that race sooner or later. Only `1 1` closes it, at the
+cost of a `contextCSN` write per operation on a write-heavy database.
 
-- three sites / cross-site consumers (single-site 3-replica: 0 occurrences);
-- losing the data or config directories (wiping only the accesslog: 0);
-- dormant SIDs, long uptime, an aged accesslog (one occurrence was on a mesh
-  under 20 minutes old);
-- **more than two nodes** — the committed reproduction uses two;
-- **any replication history** — the divergence is injected into a database
-  ninety seconds old;
-- **storage loss of any kind**;
-- **any race** — the setup is deterministic and worked first time.
+## Proven versus inferred
 
-**Proven sufficient** — the storm tracked this condition exactly, appearing with
-it and stopping within 90 s of its removal, nothing else changed:
+**Proven by experiment**, on `2.7.1-0+slaptain1`, scripts in `docs/its9580/`:
 
-- `minCSN` ⊋ `contextCSN` by SID set, on the log DB.
+- a log DB's on-disk `contextCSN` is absent on a healthy running node with no
+  checkpoint configured;
+- `SIGKILL` + restart alone produces the permanent storm — no node loss, no
+  concurrent write load, no race, no fault injection;
+- `SIGTERM` + restart does not;
+- `syncprov-checkpoint 1 1` on the log DB prevents it; `100 5` does not;
+- one write from the absent serverID cures it instantly, with `minCSN`
+  untouched;
+- the consumer's retry ignores `retry=`.
 
-**Observed in every reproduction but never removed, so not proven necessary:**
+**Inferred from source, not observed in any run:** that `accesslog.c:2069`'s
+destructive copy can *additionally* truncate a `contextCSN` that a checkpoint
+had previously written. That branch never executed in any run here
+(`trying to reset contextCSN`: 0 occurrences). It is a second route to the same
+end state and the report does not depend on it.
 
-- `syncprov-nopresent` / `syncprov-reloadhint` on the log DB (the code says they
-  gate the branch; not tested by turning them off);
-- `olcMultiProvider`, the data DB's sessionlog, two databases per node.
+**Observed in the field but not reproduced here:** a log DB whose `contextCSN`
+went from five serverIDs to one *and to an older value*. An unclean stop
+explains the same end state without needing that path, so the mechanism behind
+that particular observation remains uncaptured.
 
-**Still reasoned, not observed — and the report must say so.** The committed
-reproduction injects the *end state*. It demonstrates the consequence of the
-divergence, not its cause: the destructive `MOD REPLACE contextCSN` copied onto
-the log DB has never been captured in the act, because both field occurrences
-consumed the provider's log ring first. What was seen in the field is the before
-state, the after state, and a log DB that went from five SIDs to one *and to an
-older value* — a replace, not a merge.
+## For upstream
 
-**Not established:** whether a single-site cluster can reach the bad state at
-all. It was shown not to reproduce *via the storage-loss trigger* in two
-attempts; nothing in the code path requires more than one node.
-
-## Two points for upstream
-
-1. **The trim-then-validate asymmetry** at `syncprov.c:3320` versus `:3480` is
-   the defect. The cookie is normalised against `contextCSN` and then checked
-   against `minCSN`, and the two sets are permitted to differ. Skipping `minCSN`
-   entries whose SID is absent from `sids[]` would turn a permanent outage into
-   the graceful degradation the surrounding code plainly intends.
-2. **Independently: the retry path has no backoff.** `syncrepl.c:2336` → `:2383`
-   reschedules immediately. Any persistent provider-side `REFRESH_REQUIRED`
-   therefore becomes a self-inflicted denial of service, with a full DIT refresh
-   per iteration. That is worth fixing whatever happens to point 1.
+1. **The asymmetry is the bug.** `minCSN` is durable, `contextCSN` is not, and
+   nothing enforces the invariant between them across a restart. Either both
+   should be written in the same transaction, or `syncprov_op_search` should
+   skip `minCSN` entries whose serverID is absent from `sids[]` — the latter
+   fixes the stale-disk case and the `accesslog.c:2069` case together.
+2. **Independently, the retry path has no backoff.** `syncrepl.c:2336` → `:2383`
+   reschedules immediately, so any persistent provider-side `REFRESH_REQUIRED`
+   becomes a self-inflicted denial of service. Worth fixing whatever happens to
+   point 1.
+3. **A default-configuration hazard.** The documented delta-syncrepl recipe does
+   not include a checkpoint on the log DB, so every deployment following it is
+   one `kill -9` away from a provider that never serves a consumer again.

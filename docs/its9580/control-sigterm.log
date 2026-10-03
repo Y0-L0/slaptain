@@ -1,0 +1,91 @@
+
+[1m=== build under test[0m
+@(#) $OpenLDAP: slapd 2.7.1-0+slaptain1 (Sep 11 2026 10:00:00) $
+	slaptain <noreply@chuck-chuck-chuck.net>
+
+
+[1m=== config (A); LOGCKP=''[0m
+13:serverID 1
+15:database  mdb
+16:suffix    "cn=accesslog"
+28:database  mdb
+29:suffix    "dc=example,dc=org"
+
+[1m=== 1. seed A, start both, write from BOTH sids, converge[0m
+
+--- A log DB (served)
+dn: cn=accesslog
+minCSN: 20261003212034.358304Z#000000#001#000000
+minCSN: 20261003212034.363063Z#000000#002#000000
+contextCSN: 20261003212034.358304Z#000000#001#000000
+contextCSN: 20261003212034.363063Z#000000#002#000000
+
+--- B log DB (served)
+dn: cn=accesslog
+minCSN: 20261003212033.333668Z#000000#000#000000
+minCSN: 20261003212034.363063Z#000000#002#000000
+contextCSN: 20261003212033.333668Z#000000#000#000000
+contextCSN: 20261003212034.358304Z#000000#001#000000
+contextCSN: 20261003212034.363063Z#000000#002#000000
+
+
+A minCSN sids:     001 002 
+A contextCSN sids: 001 002 
+
+--- A log DB ON DISK right after the very first writes (no kill yet)
+dn: cn=accesslog
+minCSN: 20261003212034.358304Z#000000#001#000000
+minCSN: 20261003212034.363063Z#000000#002#000000
+disk minCSN sids:     001 002 
+disk contextCSN sids: 
+
+[1m=== 2. SCENARIO=term[0m
+
+[1m=== 3. served vs disk on A, immediately before stopping it[0m
+
+--- served
+dn: cn=accesslog
+minCSN: 20261003212034.358304Z#000000#001#000000
+minCSN: 20261003212034.363063Z#000000#002#000000
+contextCSN: 20261003212034.358304Z#000000#001#000000
+contextCSN: 20261003212034.363063Z#000000#002#000000
+
+--- disk
+dn: cn=accesslog
+minCSN: 20261003212034.358304Z#000000#001#000000
+minCSN: 20261003212034.363063Z#000000#002#000000
+served minCSN sids:     001 002 
+served contextCSN sids: 001 002 
+disk   minCSN sids:     001 002 
+disk   contextCSN sids: 
+
+[1m=== 4. stop A (SIGTERM) and restart[0m
+
+--- A log DB on disk while A is down
+dn: cn=accesslog
+minCSN: 20261003212034.358304Z#000000#001#000000
+minCSN: 20261003212034.363063Z#000000#002#000000
+contextCSN: 20261003212034.358304Z#000000#001#000000
+contextCSN: 20261003212034.363063Z#000000#002#000000
+disk minCSN sids:     001 002 
+disk contextCSN sids: 001 002 
+
+--- A served after restart
+dn: cn=accesslog
+minCSN: 20261003212034.358304Z#000000#001#000000
+minCSN: 20261003212034.363063Z#000000#002#000000
+contextCSN: 20261003212034.358304Z#000000#001#000000
+contextCSN: 20261003212034.363063Z#000000#002#000000
+
+
+--- storm rate on the provider A
+/c.sh: line 208: 0
+0: syntax error in expression (error token is "0")
+
+--- writes still replicate A->B?
+dn: cn=afterterm,dc=example,dc=org
+
+
+[1m=== DONE scenario=term logckp=''[0m
+/c.sh: line 101:   115 Killed                  slapd -f "$SRV/$n/slapd.conf" -h "ldap://127.0.0.1:$p/" -d $DBG >> "$SRV/$n.slapd.log" 2>&1
+/c.sh: line 101:    18 Killed                  slapd -f "$SRV/$n/slapd.conf" -h "ldap://127.0.0.1:$p/" -d $DBG >> "$SRV/$n.slapd.log" 2>&1

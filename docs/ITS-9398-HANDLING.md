@@ -4,6 +4,12 @@ Decision input, gathered 2026-10-04. The bug itself is in
 [`ITS-9398-REPRODUCTION.md`](ITS-9398-REPRODUCTION.md); this file is only about
 *coping with it*.
 
+> **Revised 2026-10-04** after the reproduction and heal experiments. The
+> mitigation table now reflects two distinct failure modes, a reframed option
+> A, a validated option D and F, and a new option I. The survey sections above
+> it (detection, avoidance, shutdown, recovery, Kubernetes) are unchanged and
+> still current — they are about what the *ecosystem* does, which has not moved.
+
 Every claim is labelled by provenance — **upstream doc** / **maintainer** /
 **vendor or distribution** / **folklore** / **our inference** — because we have
 already been burned once by reading a code comment as a ticket.
@@ -335,12 +341,13 @@ No recommendation; this is the menu for the decision.
 
 | | Option | Evidence for | Evidence against / cost |
 |---|---|---|---|
-| **A** | `olcSpCheckpoint` on every `cn=accesslog-<db>` | ITS#9398 names the missing checkpoint as the cause; our measurement (`1 1` clean, `100 5` storm) | Against upstream's guide, its fixtures, Symas, every distro; Chu's "only an optimization"; ITS#8607 shows checkpoints and accesslog have interacted badly before. Write amplification on a write-heavy DB |
+| **A** | `olcSpCheckpoint` on every `cn=accesslog-<db>` | ITS#9398 names the missing checkpoint as the cause; our measurement (`1 1` clean, `100 5` storm). **Reframed 2026-10-04:** this is not belt-and-braces — a checkpoint *restores the safety net `logpurge` removes*. slapd rebuilds a lost `contextCSN` by scanning for the greatest `entryCSN`; purging deletes exactly those entries | Against upstream's guide, its fixtures, Symas, every distro; Chu's "only an optimization"; ITS#8607 shows checkpoints and accesslog have interacted badly before. Write amplification on a write-heavy DB |
 | **B** | Raise `terminationGracePeriodSeconds` to ~90 s | Every slapd packaging rides systemd's 90 s; Zeilenga 2001 | 30 s never *shown* insufficient; no upstream figure for shutdown duration; slows worst-case rollouts; useless against OOM/node crash |
 | **C** | `preStop` hook | k8s-native | No slapd precedent anywhere, not even Symas's own chart; slapd has no "flush now" command, so a hook can only sleep or poll |
-| **D** | Extend operator CSN monitoring to the accesslog suffix | Kuzník verbatim; ahead of the entire ecosystem | Sees the consequence, not the latent state; needs the replication identity bind (ADR-020) |
+| **D** | Extend operator CSN monitoring to the accesslog suffix | Kuzník verbatim; ahead of the entire ecosystem. **Implemented and validated** as `its9398.sh diagnose` (serverIDs in `minCSN` minus those in `contextCSN`), red→green against a deliberately armed fault | Sees the consequence, not the latent state — over LDAP it reads the in-memory view, which stays clean until the restart; needs the replication identity bind (ADR-020, verified sufficient) |
 | **E** | On-disk preflight: `slapcat` vs `ldapsearch` on the log DB | The only check that sees exposure *before* a restart; ITS#10173's repair starts here | Folklore provenance; distroless image needs an init container or Job (ADR-018 reaping) |
-| **F** | Operator repair: write from the absent serverID on a detected stall | Symas documents exactly this; our measurement shows instant clearance | ADR-026 R2 if it writes customer data — would need a slaptain-owned entry; repairs symptom, recurs every unclean stop |
+| **F** | Operator repair: write from the absent serverID on a detected stall (**mode A**) | Symas documents exactly this; validated twice — the live incident (3 writes, 6968/min → 0, CPU recovered mesh-wide) and an armed fault (1 write) | The write must originate at the pod owning the missing serverID, usually **another site** → operator fan-out, which ADR-028 rejected under ADR-026 R2. Cannot help a serverID that no longer exists (scaled-down ordinal, decommissioned site). Would want a slaptain-owned entry rather than customer data |
+| **I** | **Own-serverID regression watch + local heal (mode B)** — *added 2026-10-04* | Only pod P mints CSNs stamped P, so no peer may hold a newer value for P's own serverID than P does: a check needing **no disk read**, from data the existing cross-pod CSN monitoring already fetches. Cure is a **purely local** write on P — no fan-out, no ADR-026 R2 question. Zero cost in steady state. Validated: `err=53` ~30/min → 0 | Only covers mode B; mode A still needs F. Detects after the restart, not before. Reverses ADR-008's twice-deferred heartbeat stance — needs an ADR, not a quiet implementation |
 | **G** | Wipe and rebuild the log DB from a converged peer | Symas's second rung; Quanah's ITS#10173 | Kuzník: transplant is safe *"if the server was shut down cleanly"* — the very precondition we'd be repairing. Scale-to-0 class outage |
 | **H** | Document only | The ecosystem's revealed preference for six years | Their tolerance rests on rarity, which k8s falsifies; no-backoff retry makes it resource-exhausting rather than merely degraded |
 
@@ -348,6 +355,13 @@ No recommendation; this is the menu for the decision.
 substitutes**. B and C only cover stops that go *through* the pod lifecycle. OOM
 kills, node crashes, and node shutdown on a default cluster bypass them
 entirely. **Only A survives those.**
+
+**Second constraint, from the 2026-10-04 experiments:** there are **two failure
+modes**, and no single option covers both. Mode A (missing serverID, the storm)
+can only be healed from another site; mode B (own-serverID regression,
+`err=53`, cheap) can only be healed locally. D detects mode A, I detects mode
+B. A is the only option that prevents either, because it is the only one that
+makes `contextCSN` durable. See `ITS-9398-REPRODUCTION.md` for the measurements.
 
 ---
 

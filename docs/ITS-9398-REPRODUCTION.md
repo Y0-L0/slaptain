@@ -92,25 +92,78 @@ The resulting inversion is why nothing detects this: **in memory `contextCSN`
 leads `minCSN`; on disk `minCSN` leads `contextCSN`.** Every health check reads
 over LDAP, which is the in-memory view, which looks perfect.
 
+### Why purging is also what disarms the safety net
+
+A stale on-disk `contextCSN` is normally harmless, because slapd rebuilds it.
+Admin Guide: *"At startup time, if the provider is unable to read a contextCSN
+from the suffix entry, it will scan the entire database to determine the
+value… the database will still be scanned for any entryCSN values greater than
+it."* Chu, 2011, answering this exact unclean-shutdown question: *"the syncprov
+overlay always reads the largest entryCSN out of the database at startup time
+anyway."* That is why upstream has called this works-as-designed for fifteen
+years, and for a **data** DB it is true.
+
+**A log DB is the one kind of database whose contents are deliberately
+deleted.** `logpurge` removes exactly the entries that scan would rebuild from.
+After a sweep there is nothing left carrying a larger `entryCSN`, the scan
+finds nothing newer, and the stale value stands.
+
+So purging does two things, and the second is the one that matters: it ratchets
+`minCSN` forward **and** it destroys the evidence that would otherwise repair
+`contextCSN` at startup. Measured both ways — a kill with journal entries
+present reconstructs cleanly (3×); a kill after a sweep does not.
+
+The accesslog is the backstop for the data DB. Nothing is the backstop for the
+accesslog, and it is the only one that gets pruned.
+
 ### The unclean stop, and which serverID matters
 
 A clean shutdown writes `contextCSN` and all of the above evaporates. A
 `kill -9`, an OOM kill, a node crash or a non-graceful node shutdown does not,
 so slapd restarts with `minCSN` ahead of `contextCSN`. Then:
 
-- a serverID **present** in `contextCSN` but lagging — **survivable**
-  (measured: one refresh, then quiet);
+- a **foreign** serverID present in `contextCSN` but merely lagging —
+  **survivable** (measured: one refresh, then quiet);
 - a serverID in `minCSN` and **absent from `contextCSN` altogether** —
-  **fatal**.
+  **fatal, mode A**;
+- the pod's **own** serverID lagging — **fatal, mode B** (see below).
 
-Fatal because the provider decides "can I answer from the journal?" by looking
-`minCSN` up against its own vector. A serverID it holds *no high-water mark for
-at all* is not a stale window but an incoherent one, so it gives up and answers
-`e-syncRefreshRequired` (4096) — "your cookie is stale, re-read everything".
+Mode A is fatal because the provider decides "can I answer from the journal?"
+by looking `minCSN` up against its own vector. A serverID it holds *no
+high-water mark for at all* is not a stale window but an incoherent one, so it
+gives up and answers `e-syncRefreshRequired` (4096) — "your cookie is stale,
+re-read everything". The serverIDs that end up missing are the ones **new to
+that journal since the last `contextCSN` persist**: a remote site writing to a
+database for the first time, a rebuilt pod, a freshly created database.
 
-The serverIDs that end up missing are the ones **new to that journal since the
-last `contextCSN` persist**: a remote site writing to a database for the first
-time, a rebuilt pod, a freshly created database.
+### Two failure modes, and only one of them is cross-site
+
+The same stale on-disk `contextCSN` produces two different failures. Both were
+measured on the mesh; both sit inside ITS#9398, whose description names no
+error code.
+
+| | **mode A — missing serverID** | **mode B — own-serverID regression** |
+|---|---|---|
+| observed as | `err=4096 sync cookie is stale` | `err=53 consumer state is newer than provider` |
+| what disagrees | a serverID in `minCSN`, absent from `contextCSN` | the pod's **own** `contextCSN` went backwards across the restart |
+| cost | storm: 6968/min, provider at 2380m CPU, consumers in permanent full refresh | ~30/min, **no measurable CPU** |
+| cure must come from | the pod owning the missing serverID — usually **another site** | the pod **itself** — a local write |
+
+Mode B is the one the log explains outright:
+
+```
+syncprov_op_search: consumer 1 state 20261004094304…#001
+                 is newer than provider 1 state 20261003225946…#001
+```
+
+`#001` is the restarted pod's own serverID and `…225946` is precisely its stale
+on-disk value. Only pod P ever mints CSNs stamped P, so P's own high-water mark
+going backwards is pathological by construction — and that also makes it
+**cheaply detectable**: no peer should ever hold a newer value for P's own
+serverID than P does.
+
+Healing mode A's missing serverIDs left mode B running unchanged, which is how
+we know they are genuinely separate failures and not two views of one.
 
 ### Why it is a storm rather than a hiccup
 
@@ -137,8 +190,13 @@ lookup succeeds, delta-sync resumes.
 
 Only a write *from that serverID* works. A write from any other server carries
 that other server's stamp and does nothing for the gap. This is the part that
-is easy to get wrong: on a mesh the missing serverID usually belongs to a
+is easy to get wrong: in **mode A** the missing serverID usually belongs to a
 **different site** than the broken pod.
+
+**In mode B the serverID is the broken pod's own**, so the cure is a purely
+local write on that pod — no cross-site write, no peer credentials, nothing
+outside the site's own operator. Measured: one such write took `err=53` from
+~30/min to **0**.
 
 ### Two consequences
 

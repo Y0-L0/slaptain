@@ -6,3 +6,4 @@ tests/image-pull-secret.yaml
 /lab.yaml
 /storm-repro-iter-*.log
 .claude/worktrees/
+/.claude/local/

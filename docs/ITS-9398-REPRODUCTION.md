@@ -750,6 +750,61 @@ missing ingredient is still unidentified. The negative is a flat line across
 the whole window, not a short look: 21 consecutive samples at zero while the
 broken relation was verified present and writes were flowing.
 
+### Why the safety net does not catch this — and why a log DB is uniquely exposed
+
+Upstream's answer to "contextCSN is not persisted, isn't that dangerous?" has
+been *"works as designed"* since 2011, and the reason is a documented recovery
+mechanism. Admin Guide, replication chapter:
+
+> "At startup time, if the provider is unable to read a contextCSN from the
+> suffix entry, it will scan the entire database to determine the value. When a
+> contextCSN value is read, the database will still be scanned for any entryCSN
+> values greater than it, to make sure the contextCSN value truly reflects the
+> greatest committed entryCSN in the database."
+
+**Maintainer**, Howard Chu, openldap-technical 2011-12, answering precisely the
+unclean-shutdown question (<https://www.openldap.org/lists/openldap-technical/201112/msg00278.html>):
+
+> "the syncprov overlay always reads the largest entryCSN out of the database at
+> startup time anyway, so even if it didn't save the contextCSN before stopping,
+> it will be up to date on every startup."
+
+No ITS was filed; the thread closes as working as intended. And for a **data**
+database it *is* intended and it works — the entries are still there, so the
+scan reconstructs the vector.
+
+**A log database is the one kind of database whose contents are deliberately
+deleted.** `logpurge` removes exactly the entries the startup scan would
+reconstruct from. After a purge there is nothing left carrying the larger
+`entryCSN`, so the scan finds nothing newer and the stale on-disk `contextCSN`
+stands unchallenged.
+
+That is the whole explanation for the three clean kills earlier in this
+document, and it is testable both ways — which is what we did without realising
+it:
+
+| journal contents at kill | startup scan has evidence? | outcome |
+|---|---|---|
+| entries present | yes | `contextCSN` reconstructed — **clean** (measured 3×) |
+| purged empty/thin | no | stale `contextCSN` stands — **broken** (measured) |
+
+The circle closes on itself: asked in 2011 what protects a *data* DB against
+losing a delete's CSN to an unclean stop, Chu's answer was that delta-syncrepl
+has "a persistent log". The accesslog is the backstop for the data DB — **and
+nothing is the backstop for the accesslog**, which is also the only one that
+gets pruned.
+
+**Upstream status of this specific point.** ITS#9398's description is generic —
+*"If slapd terminates uncleanly, a checkpoint will be lost on the accesslog db.
+Depending on the syncprov overlay checkpoint settings (usually no checkpointing
+is enabled on the accesslog db) this can cause the system to refuse engage in
+replication at startup."* It names no error code, so **both failure modes above
+sit inside it**, and there is no separate ticket for the `err=53` one. What is
+in **no** ticket we could find is the interaction recorded here: that
+`logpurge` defeats the documented startup reconstruction, which is the reason
+the bug survives the 2011 "works as designed" answer. That is the contribution
+to make upstream.
+
 ### Status of the Kubernetes reproduction, plainly
 
 Three attempts, increasingly targeted, **all clean**:

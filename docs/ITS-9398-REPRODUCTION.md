@@ -431,11 +431,68 @@ If true, two things follow, and both are testable:
   unprecedented configuration — unlike option A, every deployment already sets
   `logpurge`.
 
-**Decisive next test**, and it needs no kill: `slapcat` the log DB (the
-`slctl debug` recipe in CLAUDE.md) immediately before and after a purge sweep,
-and watch whether on-disk `contextCSN` advances with it. That separates
-"purge persists it" from "2.7 persists it eagerly for some other reason"
-without another 20-minute cycle.
+### The slapcat test: purge is the TRIGGER, not the cure
+
+Run 2026-10-04. The prediction above was **wrong, and informatively so**.
+
+Baseline, with the log DB's served `contextCSN` for SID 001 at `…094304`
+(a write made moments earlier) — read off the disk with `slapcat`:
+
+```
+ON DISK   contextCSN: 20261003225946…#001      ← stale, missing the write
+          minCSN:     20261003225946…#001
+```
+
+So on-disk `contextCSN` is genuinely not written per-write. The documented
+mechanism holds. Then `accesslogPurge` was set to `00:01 00:01` and a sweep
+allowed to run. Reading the disk again:
+
+```
+ON DISK   contextCSN: 20261003225946…#001      ← UNCHANGED
+          minCSN:     20261004094304…#001      ← ADVANCED to the new write
+```
+
+**The purge persists `minCSN` and does not persist `contextCSN`.** It is
+therefore not a checkpoint in disguise — it is the mechanism that drives
+`minCSN` *past* the on-disk `contextCSN`. Purging is the **trigger**.
+
+Note the inversion this creates: in memory `contextCSN` is ahead of `minCSN`,
+on disk `minCSN` is ahead of `contextCSN`. The served view is not merely
+optimistic, it is the exact opposite of the durable one.
+
+### A lagging serverID is survivable; a missing one is the bug
+
+A SIGKILL in that state was then taken, and the broken relation **did** survive
+the restart — the pod came up serving
+
+```
+contextCSN: …225946#001      minCSN: …094304#001     (minCSN ahead)
+```
+
+— and yet produced **no storm**: one stale answer from each of its two
+providers and two `lost sync` lines on the restarted pod, i.e. a single
+one-shot refresh, then quiet.
+
+That sharpens the precondition, and it is the distinction the diagnosis in this
+document already encodes: what is fatal is a serverID present in `minCSN` and
+**absent from `contextCSN` altogether**, not one that is merely older. All
+three serverIDs were present here; one was behind. `syncprov_findcsn(mincsn)`
+survives a lagging value and fails an unknown one.
+
+The original incident matches exactly: `example-db2` had `contextCSN` with
+**only** `#001` while `minCSN` named `#001 #002 #066` — two serverIDs missing
+outright, not lagging.
+
+So the full recipe, and the reason a plain restart never showed it:
+
+1. a serverID must be **new to this log DB** since the last `contextCSN`
+   persist (first write from a site, a pod rejoining, a fresh database);
+2. a purge sweep must then persist `minCSN` including that serverID, while
+   `contextCSN` stays behind on disk;
+3. an unclean stop must prevent `contextCSN` being written;
+4. on restart, `minCSN` names a serverID `contextCSN` has never heard of.
+
+All four are ordinary operation. None is fault injection.
 
 ### Status of the Kubernetes reproduction, plainly
 

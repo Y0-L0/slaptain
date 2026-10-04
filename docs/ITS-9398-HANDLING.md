@@ -78,6 +78,13 @@ health check in existence, and it checks *cardinality*, not our ⊆ relationship
 > with 4 values`. In an environment where there are only 2 providers, this
 > indicates the issue is present."
 
+**Folklore, better-sourced than we thought.** The 2006 Poliakoff report — the
+origin of the "one write" cure — has a follow-up (msg00068) mentioning *"a slapd
+segmentation fault occurred during his maintenance window"*. So the 2006 case
+was itself an **unclean stop**: a true ITS#9398 instance fourteen years before
+the ticket, not merely an adjacent symptom. Chu attributed it at the time to
+`slapadd` without `contextCSN`.
+
 **Folklore, mechanically exact.** openldap-technical 2023-10-13, "contextCSN via
 slapcat outdated, despite having set syncprov-checkpoint": a user noticed
 `slapcat` returning stale `contextCSN` while `ldapsearch` returned correct
@@ -85,6 +92,33 @@ values on all four servers. That is our in-memory-versus-on-disk split, observed
 by accident, on the data DB, by someone who got no substantive answer.
 
 → The pre-failure signal exists only on disk, and nobody looks there.
+
+**Maintainer**, Quanah, openldap-technical 2021-07-06 — the closest public
+thread to our failure mode (a consumer dropped into REFRESH after a *provider*
+restart): *"I generally advise using some type of monitoring on the CSNs for
+each server so you can quickly be notified when such an issue has arisen."* He
+does not say which CSNs, and says nothing about the log DB.
+
+### And we implement exactly the half Kuzník calls insufficient
+
+**Verified in our own code, 2026-10-04.** Both probe paths cover the data
+suffix only:
+
+- `operator/internal/controller/slapdcluster_controller.go:1380` passes
+  `db.suffix`, and `slapdbackup_controller.go:397` passes `sd.Spec.Suffix` —
+  suffixes that come from `SlapdDatabase` CRs. An accesslog DB has no CR, so it
+  is never probed.
+- `slctl` skips it *deliberately*, in two places:
+  `cmd/inspect.go:452` (`continue // accesslog / internal DBs: journals, no seed
+  identity of their own`) and `cmd/inspect.go:1245`, whose doc comment names the
+  exclusion outright.
+
+That skip was right for what it was written for — ADR-025 suffix health, where a
+journal has no seed identity. It is exactly wrong for ITS#9398. Note the hard
+limit though: both paths read over LDAP, i.e. the **in-memory** value, which
+stays healthy right up to the restart that matters. Probing the log DB detects
+the *post-restart* broken state, not the pre-restart exposure — only reading the
+on-disk value (`slapcat`) sees it coming.
 
 ## 2. Avoidance — the absence is near-total
 
@@ -146,6 +180,19 @@ deliberate.
 > **Our pods use the Kubernetes default of 30 s with no `preStop` hook. That is
 > shorter than every slapd packaging surveyed, and the only shorter one refuses
 > to SIGKILL at all.**
+
+**And nobody has carried the requirement into Kubernetes either.** Symas's own
+Helm chart (`symas/helm-openldap`) sets **no `terminationGracePeriodSeconds`**
+anywhere in `templates/statefulset.yaml` and ships `lifecycleHooks: {}` — so
+30 s, no preStop, and no log-DB checkpoint. Same for `jp-gouin/helm-openldap`
+and `MaximeWewer/openldap-platform`. *The vendor that filed the bug ships a chart
+that runs into it.*
+
+**A second, independent argument for ADR-030.** A liveness probe is an
+unclean-shutdown *generator*: it manufactures exactly the event this bug needs,
+on a healthy-but-slow server. All three charts above ship one by default. We
+dropped ours for an unrelated reason (a frozen pod should leave the Service, not
+the cluster); ITS#9398 would have demanded the same decision on its own.
 
 Two details worth carrying: Debian's `slapd.service` is **new in trixie** —
 bookworm (2.5.13) has no unit at all, only the sysv-generator plus a drop-in

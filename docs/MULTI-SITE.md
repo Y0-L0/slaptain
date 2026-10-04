@@ -625,7 +625,7 @@ empty`) rather than showing an empty list.
 
 ```bash
 kubectl get slapdcluster slapd -o jsonpath=\
-'{range .status.externalPeerStatuses[*]}{.name}{"  "}{.replicationState}{"  "}{.discoveredAddresses}{"\n"}{end}'
+'{range .status.externalPeerStatuses[*]}{.name}{"  "}{.replicationState}{"  "}{.discoveredProviders[*].address}{"\n"}{end}'
 ```
 
 Shape of the output on a healthy three-site mesh, read at site 1 (one line per

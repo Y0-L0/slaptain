@@ -167,6 +167,14 @@ the regenerated CRDs.
 **Roles.** test-author → implementer → reviewer (correctness, with hazard 2 as
 the named target: prove that every refusal path leaves `olcSyncRepl` untouched).
 
+**Release gate, not optional (added 2026-10-05).** M1's correctness review
+confirmed that a discovery refusal reaches the atomic `Replace` as a short set,
+and that the same path opens a one-pass window on operator upgrade. Both are
+instances of the pre-existing three-path defect in `docs/BACKLOG.md`, and both
+are reachable only between M1 and M4 — which land in the same release. M4's
+hazard-2 withhold is therefore what makes M1 shippable, and M5 must not run
+before it.
+
 **Done when** every stanza's RID is a coordinate, a missing column withholds
 without writing, and the gate has exactly one reason to withhold on.
 

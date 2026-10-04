@@ -28,6 +28,76 @@ errcheck 40, lll 31, modernize 15, goconst 13, prealloc 13, gocyclo 9, unused 4,
 unparam 2, revive 1 (uncapped counts, unchanged by this change). Worth a separate
 sweep.
 
+## Three paths hand `Replace("olcSyncRepl")` a short set with no error
+
+`olcSyncRepl` is installed with one atomic
+`modReq.Replace("olcSyncRepl", desired)`, so a set shorter than the pod's
+current one is a **deletion**, not a partial update. Three paths skip a peer
+and carry on, handing `Replace` a set missing that peer's stanzas:
+
+- a peer whose bind-password Secret cannot be read;
+- a discovery peer that has not resolved any addresses yet;
+- `len(ep.URIs) == 0` inside the builder.
+
+Each is "withhold means delete" in the shape RID-PLAN hazard 2 names: a
+transiently unreadable Secret or a peer mid-discovery tears that peer's
+cross-site stanzas off every pod, and replication for that link stops rather
+than pausing. Nothing reports it — the pass is not marked skipped and the
+database stays `Running`.
+
+**Found 2026-10-03** by the ADR-031 Phase 5 conformance review on the withdrawn
+branch, which verified all three exist unchanged on `main`.
+
+**Two new triggers, 2026-10-05**, from ADR-031 M1's correctness review. Both
+feed the discovery bullet above:
+
+- A remote pod name that will not parse, or two remote pods claiming one
+  ordinal, now refuse the reduction — and a refusal is published as an *empty
+  provider list*, which is exactly the state the consumer already treats as
+  benign.
+- `discoveredAddresses` was removed with no compatibility read, so the first
+  reconcile after an operator upgrade sees an unpopulated `discoveredProviders`
+  and takes the same path. It self-heals on the next pass (the database watches
+  the cluster), at the cost of one syncrepl session restart per cross-site link
+  — which is more than ADR-031's "one `cn=config` write per pod per database"
+  promises, and is an unwelcome shape while ITS#9398 is open.
+
+Both are latent rather than live: the remote selector matches only RW
+StatefulSet pods, whose names always parse and are unique. **Neither may ship:**
+M1 and M4 land in the same release, and M4's hazard-2 withhold closes the window
+before any of it is published. That makes the fix a release gate, not a
+nice-to-have.
+
+**Fix:** treat an unresolvable peer the way the RID gate treats an unassigned
+column — withhold that pod's stanza convergence and report, rather than
+converging to a set that omits it. Red-first: a cluster with two external peers,
+one with an unreadable bind-password Secret, must leave both peers' stanzas on
+the pod.
+
+**Related:** the same review found `syncreplMatch` and `applySyncreplToPod` have
+no test coverage at all, so the atomic `Replace` that makes this dangerous is
+itself guarded only by prose.
+
+---
+
+## A discovery refusal is invisible outside the operator log
+
+`reconcileExternalPeerStatuses` writes a discovery error into
+`status.lastError`, and `checkPeerCSNConvergence` then runs for the same peer
+and unconditionally overwrites it with its own verdict — which, for a peer with
+no addresses, is the generic `no remote addresses available`. The message naming
+the offending pod survives only in the operator log.
+
+Pre-existing mechanism; ADR-031 M1 is what gives it a message worth preserving,
+since its done-criterion is "a malformed pod name refuses that peer **with the
+pod named**" and `kubectl get sc -o yaml` does not name it.
+
+**Fix:** do not clobber a non-empty `status.lastError` with the generic
+no-addresses verdict, or give discovery its own field the CSN pass does not own.
+Found 2026-10-05 by the M1 correctness review.
+
+---
+
 ## A reinstall over surviving PVCs produces a healthy-looking, unconfigurable cluster
 
 Deleting a `SlapdCluster` garbage-collects `<name>-config-password` (the

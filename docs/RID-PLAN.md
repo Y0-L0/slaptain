@@ -81,8 +81,15 @@ the StatefulSet pod name, refusal on a name that will not parse (hazard 6).
 
 **Owns.** `operator/api/v1alpha1/slapdcluster_types.go` (the status type),
 `operator/internal/controller/slapdcluster_controller.go` (discovery and its
-in-file consumers), the single read at `slapddatabase_controller.go:2505`, and
-the tests for those.
+in-file consumers), the single read at `slapddatabase_controller.go:2505`,
+`operator/cmd/slctl/cmd/status.go` and `inspect.go` (they render the old
+field), the generated deepcopy and CRDs, and the tests for those.
+
+**Also M1's, so it does not fall between milestones:** `uri` and
+`podAddresses` peers never go through discovery and so produce no provider of
+their own. The consumer builds theirs — list index is the ordinal for
+`podAddresses`, a `uri` peer is one provider at ordinal 0 — so that every mode
+hands the same type downstream.
 
 **Red-first.** The parse is a pure function: name → ordinal, with a refusal
 case. Table test before implementation.

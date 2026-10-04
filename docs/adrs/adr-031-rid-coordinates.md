@@ -473,7 +473,42 @@ so nothing has to land in a particular order.
 - **Discovery must return ordinals.** `discoverRemotePeerAddresses` returns bare
   IPs today. It returns `(ordinal, address)` pairs after this, with the ordinal
   parsed from the StatefulSet pod name and a **refusal** — not a positional
-  fallback — if that parse ever fails.
+  fallback — if that parse ever fails. Three rules the parse needs that the
+  sentence above does not imply, all found by the M1 test author (2026-10-05):
+
+  - **The prefix matters, not just the tail.** "last dash wins" plus "the tail
+    must round-trip through `FormatInt`" does *not* reject `slapd--1`: it
+    splits into prefix `slapd-` and tail `1`, which round-trips, and parses as
+    ordinal 1. The refusal has to come from the prefix — a Kubernetes object
+    name cannot end in a dash, so no StatefulSet is named `slapd-`.
+  - **Filter before parse.** Only a pod that would otherwise have become a
+    provider may trigger the refusal. Parsing first means one unrelated
+    `Pending` pod matching the label selector refuses the entire peer, and
+    under the atomic `Replace` that peer's stanzas then sit untouched
+    indefinitely. A refusal must be caused by something that was about to be
+    used.
+  - **Two providers claiming one ordinal is a refusal naming both.** Reachable
+    only if the selector catches two fleets — a leftover pod from a renamed
+    StatefulSet, a hand-applied label — so it is defensive rather than
+    expected. It is cheap, and the alternative is a silently preferred
+    provider.
+
+- **A remote pod's ordinal is not part of its RID**, and it is worth saying so
+  because the opposite is the natural reading of "a RID is keyed on provider
+  identity". Decision 1 keys the remote slot on the peer **site**, so the
+  remote ordinal never enters a coordinate. What it is for is **identity-based
+  selection** — ADR-032 decision 2 picks a link's far end as `localOrdinal mod
+  P_remote`, by ordinal and not by position in a discovered list — and stable
+  `provider=` attribution. The stakes of a misparse are therefore "this pod
+  replicates from the wrong remote server", not "two stanzas share a RID".
+  Lower, but not low.
+
+- **`uri` and `podAddresses` peers need providers built too.** Neither goes
+  through pod discovery, so neither produces a `DiscoveredProvider` on its own,
+  and the consumer must construct one: list index is the ordinal for
+  `podAddresses`, and a `uri` peer is a single provider at ordinal 0. Both
+  modes are currently untested (`docs/BACKLOG.md`), which is exactly how this
+  would have fallen between two milestones.
 - **`podAddresses` mode gains a documented meaning for list position**: index =
   provider ordinal. Reordering the list renumbers.
 - **`uri` mode** is one opaque provider: its own `siteIndex`, ordinal 0.

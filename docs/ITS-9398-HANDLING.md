@@ -73,13 +73,55 @@ you listing an accesslog suffix, but none ships it). `slapd-monitor(5)` mentions
 syncrepl, replication state and CSNs **zero times**, so `cn=Monitor` is not a
 route in. **No tool anywhere reads `minCSN`.**
 
-**One gap, stated rather than papered over:** the OpenLDAP Project's own
-[`syncmonitor`](https://git.openldap.org/openldap/syncmonitor) is the tool most
-likely to be an exception, and **we have not read its source** — the GitHub
-mirror 404s and the canonical repo is on git.openldap.org. What we actually
-checked is Symas's page describing it, which does not mention the accesslog.
-That is weaker evidence than the rest of this row. Read the source before
-repeating the claim.
+### syncmonitor: read, and it is worse than "does not cover the accesslog"
+
+The gap flagged above is closed. [`syncmonitor`](https://git.openldap.org/openldap/syncmonitor)
+(1622 lines, `f2debe3`) was read in full on 2026-10-04. It is **written by
+Ondřej Kuzník** — the same maintainer who said both contextCSNs "should be
+monitored as such". His own tool does not do it.
+
+**It is not a poller.** It opens a real syncrepl session (`SyncRequestControl`,
+`refreshAndPersist`) against a user-supplied `-b base`, with filter `(|)` —
+RFC 4526 absolute-false, matching nothing — and tracks only the cookies the
+provider sends. A zero-entry passive replica. `contextCSN`, `minCSN`,
+`accesslog` and `entryCSN` appear **zero times** in the source.
+
+**And it silences our exact symptom, by number.** `environment.py:199`:
+
+```python
+except ldap0.LDAPError as e:
+    result = e.args[0]['result']
+    if result not in (ldap0.TIMELIMIT_EXCEEDED, ldap0.SIZELIMIT_EXCEEDED, 0x1000):
+        logger.warning("Search to %r finished with %r, "
+                       "waiting before reconnection", self.uri, e)
+...
+if result == 0x1000:
+    self.cookie = SyncreplCookie()
+    self.cookie_updated(None)
+await self.set_up()
+```
+
+`0x1000` is 4096, `e-syncRefreshRequired` — the storm signal. It sits in the
+allowlist of outcomes that **do not even log a warning**, next to time- and
+size-limit exceeded. The handler then discards the cookie and reconnects. The
+observer does the same on the in-flight path (`syncrepl_observer.py`: *"Refresh
+required (cookie was rejected), forget it before we propagate"*).
+
+So the Project's own monitoring tool, pointed at a provider stuck in ITS#9398,
+reports **In-sync** and logs nothing. It is not merely blind to the cause; it is
+explicitly deaf to the effect. Its `BROKEN` state comes only from a 30 s
+no-progress watchdog, which an idle directory trips anyway.
+
+*Two things this changes for us.* First, the claim above is now stronger than
+"every tool checks the data suffix only" — syncmonitor does not check a suffix
+at all, and still misses it. Second, there is a real affordance here: `-b` is
+just an argument, so syncmonitor **can be pointed at `cn=accesslog-<db>`**. That
+is the only off-the-shelf thing we found that could observe log-DB cookie state,
+and nobody documents doing it.
+
+*Method note.* A grep for `4096` returned zero and nearly produced a false
+"handles it not at all" — the constant is written `0x1000`. Same lesson as the
+`slapcat` near-miss in CLAUDE.md: count greps do not substitute for reading.
 
 **Maintainer**, Quanah, ITS#10173 comment #3 — the only published `minCSN`
 health check in existence, and it checks *cardinality*, not our ⊆ relationship:

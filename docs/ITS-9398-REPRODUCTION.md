@@ -674,6 +674,79 @@ on an idle mesh with sessions already established that does not happen
 immediately. The incident earlier the same day had both, at 6968 stale answers
 per minute. So: precondition reproducible, consequence still opportunistic.
 
+### Experiments (2026-10-04): the harm is a contextCSN REGRESSION of the pod's OWN serverID
+
+Two experiments were run to size the operator design — how long after a broken
+restart does the storm start, and can a heal beat it. Both were overtaken by
+what they found.
+
+**Setup.** Armed as in the recipe above (write from `SID 202`, a serverID the
+journal had never seen; 1-minute purge; `kill -9`), then driven with continuous
+writes during observation, on the theory that the storm needs consumers to keep
+requesting deltas.
+
+**Result 1 — the state was armed, harder than intended.** After restart,
+`cn=accesslog-example-db2` on the killed pod was missing **two** serverIDs from
+`contextCSN` that `minCSN` named (`0c9`=201, `0ca`=202).
+
+**Result 2 — no storm. A different error entirely.** Over 200 s with live write
+traffic: **0** `err=4096`, **0** `sync cookie is stale`, CPU flat at 4-6m. What
+appeared instead, at a steady ~30/min:
+
+```
+err=53  text=consumer state is newer than provider!
+```
+
+**Result 3 — and it is not about the missing serverIDs at all.** The log says
+exactly what it objects to:
+
+```
+SRCH base="cn=accesslog-example-db2" …
+syncprov_op_search: consumer 1 state 20261004094304.906679Z#000000#001#000000
+                 is newer than provider 1 state 20261003225946.303873Z#000000#001#000000
+```
+
+The disagreement is on **`#001` — the killed pod's own serverID** — and
+`…225946` is precisely the stale *on-disk* `contextCSN` measured before the
+kill. On restart the pod loaded a `contextCSN` for **its own** serverID that was
+older than what it had already served, and its consumers remember the newer
+value. Healing `201`/`202` left `err=53` running unchanged, which is the proof
+that the missing-serverID set difference was not what was hurting.
+
+**Result 4 — the cure is a purely LOCAL write.** One write issued **on the
+broken pod itself**, from its own serverID, moved `contextCSN[001]` from
+`…225946` to `…153801`, past everything its consumers hold.
+
+### What this changes
+
+There are **two distinct failure modes** from the same stale-on-disk
+`contextCSN`, and only one of them was previously described here:
+
+| | observed as | what disagrees | cure must come from |
+|---|---|---|---|
+| **missing serverID** | `err=4096 sync cookie is stale` — the storm | a SID in `minCSN`, absent from `contextCSN` | the pod owning that SID, usually **another site** |
+| **own-SID regression** | `err=53 consumer state is newer than provider` | the pod's **own** `contextCSN` went backwards across a restart | the pod **itself** — local |
+
+The second has a much better shape for an operator:
+
+- **Detectable without reading disks.** Only pod P ever generates CSNs stamped
+  with P's serverID, so P's `contextCSN[P]` must never be below any peer's view
+  of it. A peer holding a newer value for P's own SID is pathological by
+  construction — and is exactly what the operator's existing cross-pod CSN
+  monitoring already fetches.
+- **Curable locally.** No cross-site write, no operator fan-out, no ADR-026 R2
+  question. The pod that is wrong is the pod that must write, and its own
+  site's operator owns it.
+- **Cheap while broken.** ~30 errors/min and no measurable CPU, versus the
+  storm's 6968/min and 2380m. So the budget for detecting and healing it is
+  minutes, not seconds.
+
+**Still unexplained:** what additionally distinguishes the morning's `err=4096`
+storm. The armed state reproduced the broken CSN relation and the `err=53` face
+of it, with live write traffic, and never produced a single stale-cookie answer.
+So the set difference is necessary for the storm but not sufficient, and the
+missing ingredient is still unidentified.
+
 ### Status of the Kubernetes reproduction, plainly
 
 Three attempts, increasingly targeted, **all clean**:

@@ -403,3 +403,188 @@ func TestProvidersFromPods(t *testing.T) {
 		})
 	}
 }
+
+// The three constructors below were written alongside providersFromPods and
+// had no coverage: the table above pins the discovery path only. All three are
+// GREEN FROM BIRTH — the implementations exist and are correct — so each case
+// carries a mutation in its comment, and the report records the mutation run
+// that showed it failing for exactly that reason.
+
+func TestProvidersFromPodAddresses(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		addrs        []string
+		wantOrdinals []int32
+		wantAddrs    []string
+		because      string
+	}{
+		{
+			// ADR-031 Consequences: "podAddresses mode gains a documented
+			// meaning for list position: index = provider ordinal."
+			// Zero-based. Mutation: Ordinal: int32(i+1).
+			name:         "list index is the provider ordinal, counting from zero",
+			addrs:        []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"},
+			wantOrdinals: []int32{0, 1, 2},
+			wantAddrs:    []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"},
+			because:      "ordinal 0 is pod-0; starting at 1 shifts every provider by one",
+		},
+		{
+			// The declared order IS the identity in this mode, so the
+			// constructor must not impose an order of its own. These addresses
+			// are deliberately not in sorted order. Mutation: a sort.Slice on
+			// Address, or on Ordinal after shuffling, inside the constructor.
+			name:         "the declared order is preserved verbatim, never sorted",
+			addrs:        []string{"10.0.0.30", "10.0.0.2", "10.0.0.100"},
+			wantOrdinals: []int32{0, 1, 2},
+			wantAddrs:    []string{"10.0.0.30", "10.0.0.2", "10.0.0.100"},
+			because:      "sorting here would silently renumber a hand-written peer list",
+		},
+		{
+			// Position is the only identity this mode has, so two identical
+			// addresses are still two providers. Mutation: deduplicate.
+			name:         "two identical addresses are still two providers",
+			addrs:        []string{"10.0.0.1", "10.0.0.1"},
+			wantOrdinals: []int32{0, 1},
+			wantAddrs:    []string{"10.0.0.1", "10.0.0.1"},
+			because:      "dedup would shorten the set, and a short stanza set deletes (hazard 2)",
+		},
+		{
+			name:         "a single address is provider zero",
+			addrs:        []string{"10.0.0.1"},
+			wantOrdinals: []int32{0},
+			wantAddrs:    []string{"10.0.0.1"},
+			because:      "the one-peer case must not be special-cased into ordinal 1",
+		},
+		{
+			name:         "an empty list yields no providers",
+			addrs:        nil,
+			wantOrdinals: []int32{},
+			wantAddrs:    []string{},
+			because:      "nothing declared is nothing offered, not an error",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := providersFromPodAddresses(tc.addrs)
+			if gotOrd := ordinalsOf(got); !eqInt32(gotOrd, tc.wantOrdinals) {
+				t.Errorf("ordinals = %v, want %v — %s", gotOrd, tc.wantOrdinals, tc.because)
+			}
+			if gotAddr := addressesOf(got); !eqStr(gotAddr, tc.wantAddrs) {
+				t.Errorf("addresses = %v, want %v — %s", gotAddr, tc.wantAddrs, tc.because)
+			}
+		})
+	}
+}
+
+func TestProvidersFromURI(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		uri          string
+		wantOrdinals []int32
+		wantAddrs    []string
+		because      string
+	}{
+		{
+			// ADR-031 Consequences: "uri mode is one opaque provider: its own
+			// siteIndex, ordinal 0." Mutation: Ordinal: 1.
+			name:         "a uri peer is exactly one provider at ordinal zero",
+			uri:          "ldaps://ldap.example:636",
+			wantOrdinals: []int32{0},
+			wantAddrs:    []string{"ldaps://ldap.example:636"},
+			because:      "the URI is opaque — whatever stands behind it, the peer offers one provider",
+		},
+		{
+			// The address is the whole URI, scheme and port included. Nothing
+			// downstream may re-derive a scheme or a port for it. Mutation:
+			// strip the scheme, or store only the host.
+			name:         "the address is the URI verbatim, scheme and port included",
+			uri:          "ldap://198.51.100.7:1389",
+			wantOrdinals: []int32{0},
+			wantAddrs:    []string{"ldap://198.51.100.7:1389"},
+			because:      "a bare host here would be formatted into a second scheme downstream",
+		},
+		{
+			// The guard that removed the `provider=ldaps://:1025` garbage
+			// stanza. An empty URI is not a provider at an empty address; it is
+			// no provider. Mutation: drop the uri == "" branch.
+			name:         "an empty uri yields no provider at all",
+			uri:          "",
+			wantOrdinals: []int32{},
+			wantAddrs:    []string{},
+			because:      "returning one provider here writes provider=ldaps://:1025, a stanza that can never connect",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := providersFromURI(tc.uri)
+			if gotOrd := ordinalsOf(got); !eqInt32(gotOrd, tc.wantOrdinals) {
+				t.Errorf("ordinals = %v, want %v — %s", gotOrd, tc.wantOrdinals, tc.because)
+			}
+			if gotAddr := addressesOf(got); !eqStr(gotAddr, tc.wantAddrs) {
+				t.Errorf("addresses = %v, want %v — %s", gotAddr, tc.wantAddrs, tc.because)
+			}
+		})
+	}
+}
+
+// providerAddresses is the seam where identity order becomes the address order
+// the selection diagonal indexes into. Reversing it would be invisible to the
+// rest of the suite: slapddatabase_syncrepl_test.go and
+// replidentity_stanza_test.go construct resolvedExternalPeer directly and never
+// cross this function.
+func TestProviderAddresses(t *testing.T) {
+	p := func(ord int32, addr string) ldapv1alpha1.DiscoveredProvider {
+		return ldapv1alpha1.DiscoveredProvider{Ordinal: ord, Address: addr}
+	}
+	for _, tc := range []struct {
+		name      string
+		providers []ldapv1alpha1.DiscoveredProvider
+		want      []string
+		wantNil   bool
+		because   string
+	}{
+		{
+			// Mutation: reverse the slice, or sort it by Address.
+			name:      "order is preserved exactly, so position still means ordinal order",
+			providers: []ldapv1alpha1.DiscoveredProvider{p(0, "10.0.0.30"), p(1, "10.0.0.2"), p(2, "10.0.0.100")},
+			want:      []string{"10.0.0.30", "10.0.0.2", "10.0.0.100"},
+			because:   "the diagonal (localOrdinal + k) % remoteN indexes this slice; reordering it repoints every link",
+		},
+		{
+			// A gap in the ordinals must not become a gap in the slice: the
+			// caller's modulo is over len(addrs), not over the max ordinal.
+			// Mutation: pad the slice to the highest ordinal.
+			name:      "a gap in the ordinals compacts, it does not pad",
+			providers: []ldapv1alpha1.DiscoveredProvider{p(0, "10.0.0.1"), p(2, "10.0.0.3")},
+			want:      []string{"10.0.0.1", "10.0.0.3"},
+			because:   "padding would hand the diagonal an empty address to dial",
+		},
+		{
+			// Mutation: skip empty addresses. Dropping one shortens the slice
+			// and silently shifts every provider after it.
+			name:      "nothing is filtered out, so the slice stays aligned with the providers",
+			providers: []ldapv1alpha1.DiscoveredProvider{p(0, "10.0.0.1"), p(1, ""), p(2, "10.0.0.3")},
+			want:      []string{"10.0.0.1", "", "10.0.0.3"},
+			because:   "filtering here would misalign the slice against the provider list the caller holds",
+		},
+		{
+			// nil, not []string{}. eqStr cannot tell the two apart, so this
+			// case carries wantNil and is checked separately — without it the
+			// case would read as coverage of the len==0 guard while pinning
+			// nothing. Mutation: drop the guard.
+			name:      "no providers is a nil slice, not an empty one",
+			providers: nil,
+			want:      []string{},
+			wantNil:   true,
+			because:   "the guard exists so a caller can distinguish \"no providers\" with == nil",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := providerAddresses(tc.providers)
+			if !eqStr(got, tc.want) {
+				t.Errorf("providerAddresses() = %#v, want %#v — %s", got, tc.want, tc.because)
+			}
+			if tc.wantNil && got != nil {
+				t.Errorf("providerAddresses() = %#v, want a nil slice — %s", got, tc.because)
+			}
+		})
+	}
+}

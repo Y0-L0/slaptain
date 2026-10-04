@@ -9,6 +9,148 @@ explicitly marked as inferred-but-unobserved.
 built from a vendored Debian packaging fork of the 2.7.1 release (ADR-021).
 Source line numbers are from that tree.
 
+## How to read this document
+
+The next section states **the mechanism as we currently understand it**, start
+to end, in the order that makes it make sense. Everything after
+"Upstream status" is the **findings in discovery order** — including the
+hypotheses that turned out to be wrong and the three reproduction attempts that
+came back clean.
+
+That ordering is deliberate. The wrong turns are what establish which
+explanations have been *ruled out*, and more than one of them is a plausible
+first guess that costs a day. If you only want to act, read the next section
+and `docs/ITS-9398-HANDLING.md`. If you are about to re-investigate, read the
+rest first.
+
+## The mechanism, end to end
+
+### The cast
+
+Each logical database is **two** databases on every pod:
+
+- the **data DB** (e.g. `dc=second,dc=example,dc=net`) — the directory itself;
+- the **accesslog DB** (`cn=accesslog-<database>`) — a journal of recent
+  *changes* to that data DB, one entry per write.
+
+Both are **node-local**: every pod has its own `/accesslog` PVC and its own
+copy. Pod A's journal is not pod B's journal.
+
+Delta-syncrepl exists so a consumer that has been away does not re-read the
+whole directory. It presents a cookie — "I last saw state X" — and the provider
+answers with the changes since X, read out of the **journal**, not the data DB.
+If it cannot answer from the journal, it tells the consumer to re-read
+everything instead.
+
+In a mesh every pod is both provider and consumer; "the broken provider" means
+a pod in its provider role, serving others.
+
+### The two numbers on the journal, and their different durability
+
+The accesslog DB's root entry carries two multi-valued attributes, one value
+per serverID:
+
+- **`contextCSN`** — the newest change held, per serverID. High-water mark.
+- **`minCSN`** — the *oldest* change still held, per serverID. Low-water mark,
+  i.e. how far back the journal can still answer.
+
+Together they bound the window the journal can serve. The bug lives in the fact
+that the two are **not persisted the same way**:
+
+| | written to disk |
+|---|---|
+| `contextCSN` | only at a syncprov checkpoint or a clean shutdown — and nobody configures a checkpoint on a log DB (not upstream's guide, not its own test fixtures, not Symas, not us — see `ITS-9398-HANDLING.md` §2) |
+| `minCSN` | eagerly, during normal operation |
+
+So on a running pod the on-disk `contextCSN` is routinely hours stale while the
+served value is current. Normally invisible: a clean shutdown writes it on the
+way out.
+
+### What purging is, and what it triggers
+
+The journal would grow without bound, so `logpurge` sweeps it — delete entries
+older than *maxage*, every *interval*. slaptain defaults to `7+00:00 1+00:00`
+(keep 7 days, sweep daily). It runs independently on **every pod**, against
+**that pod's own** journal.
+
+Deleting the oldest entries moves the journal's floor forward, so a sweep must
+update `minCSN` — and writes it to disk immediately. It does **not** write
+`contextCSN`. Measured:
+
+```
+before sweep   contextCSN …225946#001    minCSN …225946#001
+after  sweep   contextCSN …225946#001    minCSN …094304#001
+                        ↑ unchanged               ↑ advanced
+```
+
+Each sweep therefore ratchets the durable low-water mark forward while the
+durable high-water mark sits still. **That is the sense in which purging is the
+trigger** — not a cause of corruption, but the thing that drives on-disk
+`minCSN` past on-disk `contextCSN`.
+
+The resulting inversion is why nothing detects this: **in memory `contextCSN`
+leads `minCSN`; on disk `minCSN` leads `contextCSN`.** Every health check reads
+over LDAP, which is the in-memory view, which looks perfect.
+
+### The unclean stop, and which serverID matters
+
+A clean shutdown writes `contextCSN` and all of the above evaporates. A
+`kill -9`, an OOM kill, a node crash or a non-graceful node shutdown does not,
+so slapd restarts with `minCSN` ahead of `contextCSN`. Then:
+
+- a serverID **present** in `contextCSN` but lagging — **survivable**
+  (measured: one refresh, then quiet);
+- a serverID in `minCSN` and **absent from `contextCSN` altogether** —
+  **fatal**.
+
+Fatal because the provider decides "can I answer from the journal?" by looking
+`minCSN` up against its own vector. A serverID it holds *no high-water mark for
+at all* is not a stale window but an incoherent one, so it gives up and answers
+`e-syncRefreshRequired` (4096) — "your cookie is stale, re-read everything".
+
+The serverIDs that end up missing are the ones **new to that journal since the
+last `contextCSN` persist**: a remote site writing to a database for the first
+time, a rebuilt pod, a freshly created database.
+
+### Why it is a storm rather than a hiccup
+
+The consumer obeys and re-reads the whole directory. That **succeeds** — no
+data is lost; this is not a correctness bug. Then it tries delta-sync again,
+is refused again, re-reads again. There is **no backoff** on this path.
+Measured on a live mesh: 6968 stale answers per minute, five consumers in
+permanent full refresh, the provider pinned at 2380m CPU serving all of them.
+
+### Diagnosis and cure, and why the cure is addressed to a serverID
+
+**Diagnosis** is a set difference on the journal's root entry: the serverIDs in
+`minCSN` minus the serverIDs in `contextCSN`. Non-empty means broken. Nothing
+in the ecosystem computes this; `docs/its9398/its9398.sh diagnose` does.
+
+**Cure** is one trivial write — we set `description` on the data DB's suffix
+entry; the content is irrelevant — issued **on the pod that owns the missing
+serverID**. A write is stamped with the CSN of the server where it
+*originates*, so a write at serverID 201 produces a change `…#0c9#…`. That
+change replicates to the broken pod, lands in its data DB and its journal, and
+its syncprov advances `contextCSN` to include serverID 201 — which it
+previously had no entry for at all. `minCSN ⊆ contextCSN` holds again, the
+lookup succeeds, delta-sync resumes.
+
+Only a write *from that serverID* works. A write from any other server carries
+that other server's stamp and does nothing for the gap. This is the part that
+is easy to get wrong: on a mesh the missing serverID usually belongs to a
+**different site** than the broken pod.
+
+### Two consequences
+
+The exposure is **not continuous**. It is tied to purge sweeps, which at the
+slaptain default happen once a day. That moves the "how do we avoid this"
+question away from "checkpoint the log DB" — which no deployment anywhere does
+— and toward the purge interval, which every deployment already configures.
+
+And the whole condition is invisible to every monitoring tool in existence,
+including upstream's own, because all of them read the in-memory view of the
+*data* suffix. See `ITS-9398-HANDLING.md` §1.
+
 ## Upstream status: already filed, by a maintainer, open six years
 
 **ITS#9398** — *"Stale accesslog cookie due to unclean shutdown"*, Quanah
@@ -576,7 +718,11 @@ Until one of those lands, the honest statement is: **the bug is reproducible in
 four operations on two plain servers (podman), and has been observed repeatedly
 on Kubernetes, but we cannot yet summon it on Kubernetes on demand.**
 
-## Mechanism
+## Mechanism, as it was worked out
+
+From here on the document is in **discovery order**, wrong turns included. The
+settled version is "The mechanism, end to end" at the top; this is how it was
+established, and which explanations are therefore ruled out.
 
 ### Why the disk state is wrong on a healthy node
 

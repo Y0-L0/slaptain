@@ -58,6 +58,8 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── VERSIONING.md               # Where the `v` goes: git tags only; images/charts/appVersion bare
 │   ├── ITS-9398-REPRODUCTION.md    # Upstream-facing: the permanent stale-cookie loop on 2.7.1, in pure slapd terms
 │   ├── ITS-9398-HANDLING.md        # How the ecosystem copes (it doesn't), and our 8 mitigation options
+│   │                               #   its9398/repro.sh = podman 2-node repro (upstream-facing);
+│   │                               #   its9398/its9398.sh = diagnose|heal|break against a slaptain mesh
 │   ├── its9398/                    # Runnable repro + controls: write, write, SIGKILL, start (podman; no k8s)
 │   ├── TLS.md                      # Certificates: where they come from, and how clients come to trust them (ADR-029)
 │   ├── TUNING.md                   # Tuning & sizing guide: defaults, placement classes, lab→prod sizing (ADR-024)

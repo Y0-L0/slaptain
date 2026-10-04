@@ -172,6 +172,185 @@ reported green. Here the divergence is partial rather than total, so the
 exposure is not limited to a log DB that has never been checkpointed — a
 partially-written `contextCSN` is equally fatal.
 
+## What it looks like on a cluster: one sick node, five loud ones
+
+Measured on a live three-site mesh, 2026-10-04, while the condition had been
+running for hours. Topology: 3 sites × (3 read-write + 1 read-only), pod-routed
+cross-site replication, `replicasPerPeer: 1`, two databases.
+
+The headline: **the broken node is not the one that looks broken.** It is the
+quietest in its own logs about anything being wrong, and the loudest on CPU.
+
+| Site | Pod | CPU | `cookie is stale` /60 s | `lost sync` /60 s | Role |
+|---|---|---:|---:|---:|---|
+| s1 | **slapd-0** | **2380m** | **6968** | 0 | **the broken provider** |
+| s1 | slapd-1 | 688m | 0 | 4413 | consumer, local |
+| s1 | slapd-2 | 690m | 0 | 3442 | consumer, local |
+| s1 | readonly-0 | 612m | 0 | 3938 | consumer, local RO |
+| s2 | slapd-2 | 581m | 0 | 7608 | consumer, cross-site |
+| s3 | slapd-2 | 575m | 0 | 5077 | consumer, cross-site |
+| s2 | slapd-0, slapd-1, readonly-0 | 5-6m | 0 | 0 | unaffected |
+| s3 | slapd-0, slapd-1, readonly-0 | 6m | 0 | 0 | unaffected |
+
+**The two log signatures are disjoint, and that is the diagnostic.**
+`sync cookie is stale` is emitted **only** by the broken provider — it is what
+it answers. `delta-sync lost sync` is emitted **only** by its consumers. No pod
+produces both. So one grep identifies the culprit uniquely, across any number
+of sites:
+
+```bash
+# the one pod that answers stale cookies is the broken one
+kubectl logs -n <ns> <pod> -c slapd --since=60s | grep -c 'cookie is stale'
+```
+
+A pod at 147k log lines per minute where every other pod sits near zero is the
+same signal without parsing anything.
+
+### Why exactly three CPU levels
+
+The quantisation is not noise; it is the replication graph.
+
+- **~6-11m — not a consumer of the broken provider.** Six of twelve pods. They
+  are entirely healthy and their own replication is fine. Nothing about the
+  incident is visible here.
+- **~575-690m — one permanent refresh loop.** Each of these pods has exactly
+  one syncrepl stanza pointing at the broken provider, retries without backoff,
+  is told the cookie is stale, falls back to a **full DIT refresh**, succeeds,
+  and starts over. The cost is one refresh stream, so they all land on the same
+  number regardless of site. Note they are *not* broken: their data is correct
+  and their other stanzas work normally.
+- **~2380m — the provider serving all of them at once.** 2380 ÷ 5 ≈ 476m per
+  stream, against ~600m spent on the consumer side of the same stream. The
+  provider's load is the *sum* over its consumers, which is why it is the
+  outlier and why the number grows with mesh size rather than staying fixed.
+
+### The blast radius is a formula, not a mystery
+
+Exactly five consumers, and which five is fully determined by the topology. For
+a broken provider at a site with `N` read-write pods and `R` read-only
+replicas, in a mesh of `M` sites at `replicasPerPeer: 1`:
+
+```
+affected consumers = (N-1)      local read-write peers
+                   +  R         local read-only replicas (each consumes from ALL local masters)
+                   + (M-1)      exactly one pod per remote site
+```
+
+Here (3−1) + 1 + (3−1) = **5**, matching the measurement exactly.
+
+The cross-site term is the non-obvious one. At `replicasPerPeer: 1` with equal
+replica counts the cross-site wiring is a **bijection** — verified on this mesh,
+where site-2's pods map to site-1's by a rotation:
+
+| from | to |
+|---|---|
+| s2 `slapd-0` | s1 `slapd-1` |
+| s2 `slapd-1` | s1 `slapd-2` |
+| s2 `slapd-2` | s1 `slapd-0` ← the broken one |
+
+so each remote site contributes exactly **one** victim, never zero and never
+all three. Site-3 maps identically (`s3 slapd-2 → s1 slapd-0`). Raising
+`replicasPerPeer` multiplies this term, trading link redundancy for a wider
+blast radius when a provider goes bad.
+
+**Consequence for operators:** a sick pod at one site makes pods at *every other
+site* burn CPU, which is exactly the shape that gets misdiagnosed as a network
+or cross-site problem. The victims are spread across the mesh; the cause is one
+pod's local disk state.
+
+### The diagnosis is a set difference, and the cure is addressed to a serverID
+
+Read the broken pod's **accesslog** DB (`cn=accesslog-<database>`, rootDN
+`cn=admin,cn=config` per ADR-020 — the data rootDN is denied):
+
+```
+minCSN:     …#001…  …#002…  …#066…
+contextCSN: …#001…                      ← 002 and 066 missing
+```
+
+`minCSN \ contextCSN` **is** the fault, exactly. The serverIDs it yields are
+the ones that must write before the storm stops. Two properties of that set
+were measured the hard way on the live mesh, and both break the obvious fix:
+
+1. **It is per database, not per pod.** This cluster had two. `example-db` was
+   missing one serverID; `example-db2` was missing two and was the one actually
+   driving the storm. Healing the first changed nothing — the stale answers
+   kept coming from the other database's log DB. A per-pod check that stops at
+   the first database reports a cured cluster that is still down.
+
+2. **The serverID often lives at another site.** `example-db` was missing
+   `#066` = SID **102** = site-2's `slapd-1`. Writes from all three *local*
+   pods (SIDs 1, 2, 3) did nothing, because those were the SIDs already
+   present. Only the write issued at site-2 cleared it. In CSN text the
+   serverID is hex (`#066#` = 102) while `olcServerID` is decimal — convert, or
+   chase the wrong pod.
+
+The full cure for this incident was three writes: SID 102 into `example-db`,
+then SIDs 2 and 102 into `example-db2`. On the last one the stale rate went
+from ~2000 per 30 s to **0**, and CPU fell across all three sites.
+
+So "issue one modification to the producer" — the vendor's documented first
+rung — is right in shape and under-specified in practice: *which* database and
+*from which serverID* are both load-bearing, and neither is visible from the
+pod that is broken.
+
+### Tooling
+
+`docs/its9398/its9398.sh` does the three operations against a slaptain mesh.
+Pass `--context` once per site, because the healing write usually has to be
+issued at a different site from the broken pod:
+
+```bash
+./its9398.sh diagnose --context s1 --context s2 --context s3   # exit 2 if exposed
+./its9398.sh heal     --context s1 --context s2 --context s3
+./its9398.sh break    --context s1 --target 0 --yes            # SIGKILL arm
+./its9398.sh break    --context s1 --target 0 --graceful       # control arm
+```
+
+`diagnose` and `heal` are validated against a live broken mesh (the incident
+above: detected on both databases, healed by three writes, stale rate to zero).
+
+**`break` is not yet a reproduction, and this is a recorded negative.** The
+intended trigger is that `kubectl delete pod --grace-period=0 --force` is a
+SIGKILL — a supported operation, and what an OOM kill or node crash looks
+like, where a plain `kubectl delete pod` (SIGTERM, 30 s) is the control. On a
+*freshly healed, converged* pod that **did not reproduce it**: zero stale
+answers across all twelve pods for 60 s, and `diagnose` clean on all 18
+pod×database pairs afterwards.
+
+Ruled out as the explanation: the cluster is **not** quietly checkpointing its
+log DBs. Measured on the same pod —
+
+```
+olcDatabase={2}mdb (data)       olcSpCheckpoint: 500 15   olcSpSessionlog: 5000
+olcDatabase={3}mdb (accesslog)  olcSpNoPresent: TRUE      ← no checkpoint
+```
+
+— which is exactly the ecosystem-standard shape §2 describes, so the exposure
+should be present.
+
+Leading hypothesis, untested: an unclean stop is **necessary but not
+sufficient**. The violation needs a serverID that is in `minCSN` and *not
+recoverable* when `contextCSN` is rebuilt at startup — which is consistent with
+Chu's "the syncprov overlay always reads the largest entryCSN out of the
+database at startup". If startup can reconstruct the vector from surviving log
+entries, then a plain kill of a converged node is harmless, and the fatal case
+is one where the evidence is gone: entries aged out by `logpurge`, or a pod
+that came back with **no** accesslog at all. Note the real incident arose from
+an e2e run that replaces pods and wipes volumes (ADR-012 case 2), not from a
+plain restart — and ITS#10173 speaks of minCSN values "that don't correspond
+to entries present in the log".
+
+**Next experiment**, in order of cost: (1) `slapcat` the log DB on a
+freshly-killed pod via the `slctl debug` recipe in CLAUDE.md, to establish
+whether on-disk `contextCSN` was reconstructed or persisted; (2) kill a pod
+whose log has been purged of a dormant serverID; (3) the dataloss path, which
+is what produced the incident in the first place.
+
+Until one of those lands, the honest statement is: **the bug is reproducible in
+four operations on two plain servers (podman), and has been observed repeatedly
+on Kubernetes, but we cannot yet summon it on Kubernetes on demand.**
+
 ## Mechanism
 
 ### Why the disk state is wrong on a healthy node

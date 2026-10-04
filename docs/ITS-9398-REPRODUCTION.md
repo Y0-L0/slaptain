@@ -494,6 +494,44 @@ So the full recipe, and the reason a plain restart never showed it:
 
 All four are ordinary operation. None is fault injection.
 
+### The fatal state, summoned on demand and repaired — red/green
+
+The recipe was then executed deliberately, 2026-10-04, and it works. Site-3's
+`SID 201` had never written to `example-db2`, so its log DB's `contextCSN` had
+never heard of it:
+
+1. write to `example-db2` from `site-3/slapd-0` (SID 201);
+2. `accesslogPurge: "00:01 00:01"`, one sweep — `minCSN` persisted **with** 201;
+3. `kill -9` slapd on `site-1/slapd-0`;
+4. restart.
+
+`diagnose` on the restarted pod, across all 18 pod×database pairs:
+
+```
+site-1  slapd-0  example-db2    MISSING serverIDs: 201        ← the fatal shape
+(every other pair)              ok
+```
+
+`heal` then repaired it with the single write the mechanism predicts, issued at
+the site that owns the serverID, and re-verified:
+
+```
+example-db2 <- write from SID 201 (site-3/slapd-0)
+… all 18 pairs ok
+HEALED.
+```
+
+So the state is **reproducible on demand and repairable on demand**, which is
+what was needed to test any mitigation. Both directions are now exercised
+against a fault that was created rather than waited for.
+
+**What is still not on demand is the storm itself.** This arming produced the
+broken precondition without the 4096 flood inside a 60 s window — the flood
+needs consumers to actually re-present a cookie the provider will reject, and
+on an idle mesh with sessions already established that does not happen
+immediately. The incident earlier the same day had both, at 6968 stale answers
+per minute. So: precondition reproducible, consequence still opportunistic.
+
 ### Status of the Kubernetes reproduction, plainly
 
 Three attempts, increasingly targeted, **all clean**:

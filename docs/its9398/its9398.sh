@@ -19,7 +19,7 @@
 set -euo pipefail
 
 CONTEXTS=() ; NAMESPACE="slaptain-testing" ; CLUSTER="slapd"
-TARGET=0 ; OBSERVE=60 ; GRACEFUL=0 ; ASSUME_YES=0
+TARGET=0 ; OBSERVE=60 ; KILL=brutal ; ASSUME_YES=0 ; ALLOW_PRIV=0 ; PRIV_LABELED=0
 MODE="${1:-diagnose}" ; [ $# -gt 0 ] && shift || true
 
 die(){ echo "error: $*" >&2; exit 1; }
@@ -32,7 +32,9 @@ while [ $# -gt 0 ]; do
     --cluster)   CLUSTER="$2"; shift 2;;
     --target)    TARGET="$2"; shift 2;;
     --observe)   OBSERVE="$2"; shift 2;;
-    --graceful)  GRACEFUL=1; shift;;
+    --kill)      KILL="$2"; shift 2;;
+    --allow-privileged) ALLOW_PRIV=1; shift;;
+    --graceful)  KILL=graceful; shift;;
     --yes|-y)    ASSUME_YES=1; shift;;
     -h|--help)   sed -n '2,22p' "$0"; exit 0;;
     *) die "unknown argument: $1";;
@@ -152,24 +154,119 @@ storm_counts(){ # $1 window
 break_it(){
   local pod="${CLUSTER}-${TARGET}"
   kc "$SITE" get pod "$pod" >/dev/null || die "no pod $pod in $SITE/$NAMESPACE"
+  case "$KILL" in graceful|hard|brutal) ;; *) die "--kill must be graceful|hard|brutal";; esac
   if [ "$ASSUME_YES" = 0 ]; then
-    printf '\nAbout to %s delete %s in %s/%s.\n' \
-      "$( [ "$GRACEFUL" = 1 ] && echo 'GRACEFULLY' || echo 'SIGKILL (--grace-period=0 --force)')" \
-      "$pod" "$SITE" "$NAMESPACE"
-    [ "$GRACEFUL" = 1 ] || printf 'Expect a permanent stale-cookie storm until healed.\n'
+    printf '\nAbout to kill %s in %s/%s with mode=%s.\n' "$pod" "$SITE" "$NAMESPACE" "$KILL"
     printf 'Continue? [y/N] '; read -r a; case "$a" in y|Y) ;; *) echo aborted; exit 1;; esac
   fi
-  note "Writing from every mapped serverID first, so minCSN names them all"
-  build_sid_map; heal >/dev/null 2>&1 || true
-  if [ "$GRACEFUL" = 1 ]; then
-    note "Deleting $pod gracefully (SIGTERM — control arm)"; kc "$SITE" delete pod "$pod" --wait=true
-  else
-    note "Deleting $pod with --grace-period=0 --force (SIGKILL)"
-    kc "$SITE" delete pod "$pod" --grace-period=0 --force
-  fi
-  note "Waiting for $pod"; kc "$SITE" wait --for=condition=Ready "pod/$pod" --timeout=300s
+  note "Pre-state"; diagnose || true
+
+  case "$KILL" in
+    graceful)
+      note "kubectl delete pod (SIGTERM + grace) — the CONTROL arm"
+      kc "$SITE" delete pod "$pod" --wait=true
+      kc "$SITE" wait --for=condition=Ready "pod/$pod" --timeout=300s ;;
+    hard)
+      # NB: this is NOT a SIGKILL to slapd. It removes the API object without
+      # waiting; the kubelet still terminates the container its own way, so
+      # slapd generally gets SIGTERM and shuts down CLEANLY. Measured: it does
+      # not reproduce the bug. Kept because it is what people reach for.
+      note "kubectl delete --grace-period=0 --force (API-level only, NOT SIGKILL to slapd)"
+      kc "$SITE" delete pod "$pod" --grace-period=0 --force
+      kc "$SITE" wait --for=condition=Ready "pod/$pod" --timeout=300s ;;
+    brutal)
+      brutal_kill "$pod" ;;
+  esac
   note "Observing ${OBSERVE}s of idleness"; sleep "$OBSERVE"
-  storm_counts "$OBSERVE"; echo; diagnose || true
+  storm_counts "$OBSERVE"; echo; MISSING_REPORT=(); diagnose || true
+}
+
+# A real SIGKILL to slapd. Runs a hostPID helper on the SAME node, finds the
+# host PID whose namespaced PID is 1 inside the target container, and kills it.
+# The kubelet then restarts the container IN PLACE: same pod, same PVCs,
+# restartCount+1 — which is what an OOM kill or a crash actually looks like.
+restore_ps(){
+  [ "${PRIV_LABELED:-0}" = 1 ] || return 0
+  kubectl --context "$SITE" label ns "$NAMESPACE" \
+    pod-security.kubernetes.io/enforce- >/dev/null 2>&1 || true
+  PRIV_LABELED=0
+  echo "  (PodSecurity label on $NAMESPACE removed again)"
+}
+
+brutal_kill(){
+  local pod="$1" node cid short helper image rc0 rc1 phase i
+  node=$(kc "$SITE" get pod "$pod" -o jsonpath='{.spec.nodeName}')
+  cid=$(kc "$SITE" get pod "$pod" -o jsonpath='{.status.containerStatuses[?(@.name=="slapd")].containerID}')
+  cid="${cid##*://}"; short="${cid:0:12}"
+  image=$(kc "$SITE" get pod "$pod" -o jsonpath='{.spec.initContainers[0].image}')
+  rc0=$(kc "$SITE" get pod "$pod" -o jsonpath='{.status.containerStatuses[?(@.name=="slapd")].restartCount}')
+  helper="its9398-kill-${short}"
+  note "SIGKILL slapd in $pod (container $short) on node $node, restartCount=$rc0"
+
+  kc "$SITE" delete pod "$helper" --ignore-not-found >/dev/null 2>&1 || true
+
+  # A hostPID+privileged helper needs the namespace to permit it. Many
+  # clusters enforce 'baseline' by default, with no namespace label to show
+  # for it, so this is only discoverable by being refused.
+  if [ "$ALLOW_PRIV" = 1 ]; then
+    note "Relaxing PodSecurity on $NAMESPACE for the kill (restored afterwards)"
+    kc "$SITE" label ns "$NAMESPACE" \
+      pod-security.kubernetes.io/enforce=privileged --overwrite >/dev/null
+    PRIV_LABELED=1
+    trap 'restore_ps' EXIT
+  fi
+
+  cat <<EOF | kc "$SITE" apply -f - >/dev/null
+apiVersion: v1
+kind: Pod
+metadata: { name: $helper }
+spec:
+  hostPID: true
+  nodeName: $node
+  restartPolicy: Never
+  tolerations: [{ operator: Exists }]
+  containers:
+  - name: kill
+    image: $image
+    securityContext: { privileged: true, runAsUser: 0 }
+    command: ["sh","-c"]
+    args:
+    - |
+      ID=$short
+      for f in \$(grep -rl \$ID /proc/[0-9]*/cgroup 2>/dev/null); do
+        pid=\$(echo \$f | cut -d/ -f3)
+        nspid=\$(grep NSpid /proc/\$pid/status 2>/dev/null | awk '{print \$NF}')
+        [ "\$nspid" = "1" ] || continue
+        echo "killing host pid \$pid (container \$ID)"
+        kill -9 \$pid
+        exit 0
+      done
+      echo "container init not found for \$ID" >&2; exit 1
+EOF
+  for i in $(seq 1 30); do
+    phase=$(kc "$SITE" get pod "$helper" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    case "$phase" in Succeeded|Failed) break;; esac; sleep 2
+  done
+  echo "  helper: $(kc "$SITE" logs "$helper" 2>&1 | tr '\n' ' ')"
+  kc "$SITE" delete pod "$helper" --ignore-not-found >/dev/null 2>&1 || true
+  restore_ps
+  if [ "$phase" != "Succeeded" ]; then
+    echo
+    echo "The brutal kill needs a hostPID + privileged helper pod. If that was"
+    echo "refused by PodSecurity, re-run with --allow-privileged (which labels"
+    echo "the namespace for the duration and removes the label again), or do it"
+    echo "by hand:"
+    echo "  kubectl --context $SITE label ns $NAMESPACE pod-security.kubernetes.io/enforce=privileged --overwrite"
+    die "brutal kill failed (helper phase=${phase:-none})"
+  fi
+
+  note "Waiting for slapd to restart in place"
+  for i in $(seq 1 60); do
+    rc1=$(kc "$SITE" get pod "$pod" -o jsonpath='{.status.containerStatuses[?(@.name=="slapd")].restartCount}' 2>/dev/null || echo "$rc0")
+    [ "${rc1:-$rc0}" -gt "$rc0" ] && break; sleep 2
+  done
+  echo "  restartCount $rc0 -> ${rc1:-?}"
+  kc "$SITE" wait --for=condition=Ready "pod/$pod" --timeout=300s
 }
 
 case "$MODE" in

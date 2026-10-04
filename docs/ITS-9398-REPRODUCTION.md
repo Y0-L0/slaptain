@@ -310,13 +310,39 @@ issued at a different site from the broken pod:
 `diagnose` and `heal` are validated against a live broken mesh (the incident
 above: detected on both databases, healed by three writes, stale rate to zero).
 
-**`break` is not yet a reproduction, and this is a recorded negative.** The
-intended trigger is that `kubectl delete pod --grace-period=0 --force` is a
-SIGKILL — a supported operation, and what an OOM kill or node crash looks
-like, where a plain `kubectl delete pod` (SIGTERM, 30 s) is the control. On a
-*freshly healed, converged* pod that **did not reproduce it**: zero stale
-answers across all twelve pods for 60 s, and `diagnose` clean on all 18
-pod×database pairs afterwards.
+**`break` has three arms, and the middle one is a trap worth naming.**
+
+| `--kill` | what actually reaches slapd | reproduces? |
+|---|---|---|
+| `graceful` | `kubectl delete pod` → SIGTERM, 30 s grace | no (control) |
+| `hard` | `kubectl delete pod --grace-period=0 --force` | **no — measured** |
+| `brutal` | real `SIGKILL` to slapd's PID via a hostPID helper on the node | expected yes, **not yet run** |
+
+`--grace-period=0 --force` **is not a SIGKILL to the process.** It removes the
+*API object* immediately without waiting for the kubelet to confirm; the
+kubelet still terminates the container its own way, so slapd generally gets
+SIGTERM and shuts down **cleanly** — writing `contextCSN` on the way out, which
+is precisely what prevents the bug. The `hard` arm and the `graceful` arm are
+therefore close to the same experiment, which is why the first attempt came
+back clean: zero stale answers across all twelve pods for 60 s, and `diagnose`
+clean on all 18 pod×database pairs afterwards. (This matches hard-won
+experience in sibling projects: to truly crash a process under Kubernetes you
+have to `kill -9` it on the node.)
+
+Ruled out as the explanation for that negative: the cluster is **not** quietly
+checkpointing its log DBs — see the measurement below.
+
+The `brutal` arm does the real thing: a `hostPID`, privileged helper pod
+scheduled onto the **same node**, which finds the host PID whose namespaced PID
+is 1 inside the target container and `kill -9`s it. The kubelet then restarts
+the container **in place** — same pod, same PVCs, `restartCount+1` — which is
+exactly the shape of an OOM kill or a crash, and keeps the volumes whose state
+the bug lives in.
+
+It needs the namespace to permit `hostPID` + `privileged`. Clusters commonly
+enforce `baseline` with **no namespace label to show for it**, so this is only
+discoverable by being refused; `--allow-privileged` labels the namespace for
+the duration and removes the label again.
 
 Ruled out as the explanation: the cluster is **not** quietly checkpointing its
 log DBs. Measured on the same pod —
@@ -329,7 +355,7 @@ olcDatabase={3}mdb (accesslog)  olcSpNoPresent: TRUE      ← no checkpoint
 — which is exactly the ecosystem-standard shape §2 describes, so the exposure
 should be present.
 
-Leading hypothesis, untested: an unclean stop is **necessary but not
+Leading hypothesis, now secondary: an unclean stop may be **necessary but not
 sufficient**. The violation needs a serverID that is in `minCSN` and *not
 recoverable* when `contextCSN` is rebuilt at startup — which is consistent with
 Chu's "the syncprov overlay always reads the largest entryCSN out of the
@@ -341,11 +367,13 @@ an e2e run that replaces pods and wipes volumes (ADR-012 case 2), not from a
 plain restart — and ITS#10173 speaks of minCSN values "that don't correspond
 to entries present in the log".
 
-**Next experiment**, in order of cost: (1) `slapcat` the log DB on a
-freshly-killed pod via the `slctl debug` recipe in CLAUDE.md, to establish
-whether on-disk `contextCSN` was reconstructed or persisted; (2) kill a pod
-whose log has been purged of a dormant serverID; (3) the dataloss path, which
-is what produced the incident in the first place.
+**Next experiment**, in order of cost: (1) run the `brutal` arm — the simplest
+explanation for the negative is that no SIGKILL ever reached slapd;
+(2) `slapcat` the log DB on a freshly-killed pod via the `slctl debug` recipe
+in CLAUDE.md, to establish whether on-disk `contextCSN` was reconstructed or
+persisted; (3) kill a pod whose log has been purged of a dormant serverID;
+(4) the dataloss path, which is what produced the incident in the first
+place.
 
 Until one of those lands, the honest statement is: **the bug is reproducible in
 four operations on two plain servers (podman), and has been observed repeatedly

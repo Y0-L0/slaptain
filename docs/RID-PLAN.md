@@ -184,7 +184,10 @@ RID on every pod decodes to the provider its stanza names.
 **Goal.** Delete the field, its CEL rule, its `Maximum=949`, and both Helm
 uniqueness checks. `slctl`: `rid-uniqueness` stays, `rid-ledger-match` becomes
 ledger-and-coordinate agreement, and a `decode` surface appears — it costs
-nothing now that a RID is self-describing. `docs/UPGRADING.md` gets the entry.
+nothing now that a RID is self-describing. **`decode` must not simply surface
+`ridcoord`'s refusal**: a RID in 981..999 is inside slapd's band and outside
+the matrix, and a human pasting one off a pre-upgrade stanza needs that
+sentence, not an error (found by the M2 test author, 2026-10-05). `docs/UPGRADING.md` gets the entry.
 
 **Owns.** `operator/api/v1alpha1/slapddatabase_types.go`, `charts/**`,
 `tests/resources/**`, `operator/cmd/slctl/**`, `docs/UPGRADING.md`,

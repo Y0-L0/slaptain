@@ -383,6 +383,28 @@ column that reservation costs.
 Exceeding any axis is a refusal naming which one and what the ceiling is. It is
 never a wrap, never a silent collision.
 
+Three consequences of the arithmetic that an implementation has to get right
+and the formula alone does not state. They are here because the first reader to
+use this ADR as an executable spec found all three missing (M2 test author,
+2026-10-05):
+
+- **The matrix does not fill slapd's band.** The largest RID a layout can
+  produce is `C·M`, not 999: at the default that is 980, leaving 981..999
+  permanently unusable. A reader who assumes the band is the matrix will size
+  something wrong. A RID in that gap is not ours, and `Decode` refuses it —
+  which puts an obligation on `slctl`, below.
+
+- **A zero `Layout` must refuse, not divide.** Defaulting runs on the API
+  server's path and nowhere else, so a Go zero value, an unmarshalled CR or a
+  cluster with no `meshRef` can reach the arithmetic with `P = S = 0`.
+  `ColumnWidth` and `MaxColumns` answer 0 for an unusable layout, and every
+  coordinate function refuses with the invalid-layout error. The package holds
+  this line itself rather than trusting a caller to have defaulted.
+
+- **`P = 1` and `S = 1` are legal.** A single-pod standalone cluster is a
+  configuration, not a typo. The lower bound is "at least one usable column",
+  nothing stricter.
+
 ### 6. The ledger gates stanza convergence, and a withhold leaves stanzas alone
 
 A `SlapdDatabase` whose column is not yet in the ledger writes no stanzas and
@@ -440,10 +462,10 @@ so nothing has to land in a particular order.
   cleared by hand; the operator reallocates and rewrites every stanza. The
   provider coordinates are unaffected, so only the database axis moves.
 - **`slctl` can decode a RID**, at any site, with no cluster state. At the
-  default layout (`M = 20`): `317` → `316 = 15·20 + 16`, so column 15, offset
-  16 ≥ `P` = 8 → the link to peer site 8. A decode subcommand becomes worth
-  having, and it needs the cluster only to turn the column back into a database
-  name.
+  default layout (`M = 20`): `317` → `316 = 15·20 + 16`, so column 15 and
+  offset 16. The offset is not below `P`, so it is a remote slot, naming peer
+  site `16 − P` = 8. A decode subcommand becomes worth having, and it needs
+  the cluster only to turn the column back into a database name.
 - **Hazard 6 stops existing** for the RID path. The address-resolution hazard it
   rode on does not: a peer with no resolved addresses still yields a short
   stanza set, which `slapddatabase_controller.go:135` already handles by
@@ -461,6 +483,11 @@ so nothing has to land in a particular order.
 - **Two slots per column are structurally dead** — a pod's own ordinal in the
   local block, its own site in the remote block. The matrix stays uniform
   rather than dense, which is the trade decision 1 makes deliberately.
+- **A RID outside the matrix needs a softer answer in `slctl` than in the
+  operator.** `Decode` refuses 981..999 because they are not coordinates, which
+  is right for the operator and wrong for a diagnostic: a human pasting a RID
+  off a pre-upgrade stanza deserves "inside slapd's band, outside this mesh's
+  matrix", not an error. The obligation lands in M6.
 - **`replicasPerPeer >= 2` is refused** until ADR-032 replaces it (decision 9).
   The only shipped use is an e2e knob added 2026-09-28; the redundancy it was
   added for is what ADR-032's site-pair `R` provides.

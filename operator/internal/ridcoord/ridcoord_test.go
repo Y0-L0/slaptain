@@ -19,6 +19,7 @@ package ridcoord
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 )
@@ -472,5 +473,62 @@ func TestZeroKindIsNotAKind(t *testing.T) {
 	// about a value it does not know.
 	if got := Kind(0).String(); got == KindLocal.String() || got == KindRemote.String() {
 		t.Errorf("Kind(0).String() = %q, which collides with a real Kind", got)
+	}
+}
+
+// TestAxisLargeEnoughToOverflowTheSumIsRefused pins that each axis is bounded
+// against MaxRID BEFORE the two are added, so the addition cannot overflow.
+// Bounding first is free — 999 + 999 fits an int32 with room to spare — and
+// bounding only the sum is a guard that silently inverts: P = S = MaxInt32
+// sums to -2, which is not greater than 999, so the layout passes.
+//
+// The failure that follows is not a wrong RID, which is why the rest of this
+// suite does not see it. It is a wrong REFUSAL: ColumnWidth answers -2,
+// MaxColumns answers 999 / -2 = -499, and Local(0, 0) then refuses column 0
+// as "outside 0..-500" with ErrColumnOutOfRange — sending a human to look at
+// the column ledger when the layout is what is broken. A refusal that names
+// the wrong axis is worse than no refusal, because it is actionable and the
+// action is wrong.
+func TestAxisLargeEnoughToOverflowTheSumIsRefused(t *testing.T) {
+	tests := []struct {
+		name   string
+		layout Layout
+	}{
+		// MaxInt32 + MaxInt32 wraps to -2: positive axes, negative width.
+		{"both axes at MaxInt32 wrap the width to -2", Layout{PodsPerSite: math.MaxInt32, MaxSites: math.MaxInt32}},
+		// One huge axis is enough; MaxInt32 + 1 wraps to MinInt32.
+		{"one axis at MaxInt32 wraps the width to MinInt32", Layout{PodsPerSite: math.MaxInt32, MaxSites: 1}},
+		{"the other axis at MaxInt32 wraps it just the same", Layout{PodsPerSite: 1, MaxSites: math.MaxInt32}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			l := tc.layout
+
+			if err := l.Validate(); !errors.Is(err, ErrInvalidLayout) {
+				t.Errorf("Validate() on %+v = %v, want an error matching %v (the sum %d overflowed)",
+					l, err, ErrInvalidLayout, l.PodsPerSite+l.MaxSites)
+			}
+			if got := l.ColumnWidth(); got != 0 {
+				t.Errorf("ColumnWidth() on %+v = %d, want 0; an unusable layout must not report a width",
+					l, got)
+			}
+			if got := l.MaxColumns(); got != 0 {
+				t.Errorf("MaxColumns() on %+v = %d, want 0; a negative column count is not a ceiling",
+					l, got)
+			}
+
+			// The refusal must name the layout, not an axis of the matrix the
+			// layout failed to define. This is the half the defect actually
+			// breaks: it refuses, but as ErrColumnOutOfRange.
+			if _, err := l.Local(0, 0); !errors.Is(err, ErrInvalidLayout) {
+				t.Errorf("Local(0, 0) on %+v = %v, want an error matching %v", l, err, ErrInvalidLayout)
+			}
+			if _, err := l.Remote(0, 0); !errors.Is(err, ErrInvalidLayout) {
+				t.Errorf("Remote(0, 0) on %+v = %v, want an error matching %v", l, err, ErrInvalidLayout)
+			}
+			if _, err := l.Decode(1); !errors.Is(err, ErrInvalidLayout) {
+				t.Errorf("Decode(1) on %+v = %v, want an error matching %v", l, err, ErrInvalidLayout)
+			}
+		})
 	}
 }

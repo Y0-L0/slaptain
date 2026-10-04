@@ -72,19 +72,47 @@ func DefaultLayout() Layout {
 // both axes at least 1, and a column width that leaves room for a column
 // inside the 0..999 band. Returns an error wrapping ErrInvalidLayout.
 func (l Layout) Validate() error {
+	if l.PodsPerSite < 1 || l.MaxSites < 1 {
+		return fmt.Errorf("%w: podsPerSite=%d and maxSites=%d, both must be at least 1",
+			ErrInvalidLayout, l.PodsPerSite, l.MaxSites)
+	}
+	// Each axis is bounded on its own BEFORE the two are added, so the sum
+	// cannot overflow: 999 + 999 fits an int32 many times over. Bounding only
+	// the sum is a guard that inverts — podsPerSite = maxSites = MaxInt32 wraps
+	// to -2, which is not greater than 999, and every downstream quantity then
+	// goes quietly negative.
+	if l.PodsPerSite > MaxRID {
+		return fmt.Errorf("%w: podsPerSite=%d exceeds the 0..%d RID band on its own",
+			ErrInvalidLayout, l.PodsPerSite, MaxRID)
+	}
+	if l.MaxSites > MaxRID {
+		return fmt.Errorf("%w: maxSites=%d exceeds the 0..%d RID band on its own",
+			ErrInvalidLayout, l.MaxSites, MaxRID)
+	}
+	if m := l.PodsPerSite + l.MaxSites; m > MaxRID {
+		return fmt.Errorf("%w: column width %d (= %d + %d) leaves no column inside the 0..%d RID band",
+			ErrInvalidLayout, m, l.PodsPerSite, l.MaxSites, MaxRID)
+	}
 	return nil
 }
 
 // ColumnWidth is M = P + S. Zero for a layout whose axes are not positive.
 func (l Layout) ColumnWidth() int32 {
-	return 0
+	if l.Validate() != nil {
+		return 0
+	}
+	return l.PodsPerSite + l.MaxSites
 }
 
 // MaxColumns is C = floor(999 / M) — the number of databases the layout
 // admits. It is 999 and not 1000 because rid = 0 is reserved, which costs
 // exactly one column. Zero for an invalid layout; never divides by zero.
 func (l Layout) MaxColumns() int32 {
-	return 0
+	m := l.ColumnWidth()
+	if m == 0 {
+		return 0
+	}
+	return MaxRID / m
 }
 
 // Local is the RID of the provider at ordinal `ordinal` on this pod's own
@@ -93,7 +121,14 @@ func (l Layout) MaxColumns() int32 {
 // Refuses with ErrInvalidLayout, ErrColumnOutOfRange (0 <= column < C) or
 // ErrOrdinalOutOfRange (0 <= ordinal < P). Never wraps, never collides.
 func (l Layout) Local(column, ordinal int32) (int32, error) {
-	return 0, nil
+	if err := l.checkColumn(column); err != nil {
+		return 0, err
+	}
+	if ordinal < 0 || ordinal >= l.PodsPerSite {
+		return 0, fmt.Errorf("%w: pod ordinal %d is outside 0..%d (podsPerSite = %d)",
+			ErrOrdinalOutOfRange, ordinal, l.PodsPerSite-1, l.PodsPerSite)
+	}
+	return 1 + column*l.ColumnWidth() + ordinal, nil
 }
 
 // Remote is the RID of this pod's link to peer site `siteIndex`, for the
@@ -103,7 +138,29 @@ func (l Layout) Local(column, ordinal int32) (int32, error) {
 // Refuses with ErrInvalidLayout, ErrColumnOutOfRange (0 <= column < C) or
 // ErrSiteIndexOutOfRange (0 <= siteIndex < S).
 func (l Layout) Remote(column, siteIndex int32) (int32, error) {
-	return 0, nil
+	if err := l.checkColumn(column); err != nil {
+		return 0, err
+	}
+	if siteIndex < 0 || siteIndex >= l.MaxSites {
+		return 0, fmt.Errorf("%w: peer site index %d is outside 0..%d (maxSites = %d)",
+			ErrSiteIndexOutOfRange, siteIndex, l.MaxSites-1, l.MaxSites)
+	}
+	return 1 + column*l.ColumnWidth() + l.PodsPerSite + siteIndex, nil
+}
+
+// checkColumn is the layout check and the column check in the order they are
+// answerable: an unusable layout has no column ceiling to compare against. The
+// column is also the axis reported first when two are out of range at once —
+// it is the only allocated term, so it is the one a human can act on.
+func (l Layout) checkColumn(column int32) error {
+	if err := l.Validate(); err != nil {
+		return err
+	}
+	if c := l.MaxColumns(); column < 0 || column >= c {
+		return fmt.Errorf("%w: column %d is outside 0..%d (the layout admits %d columns)",
+			ErrColumnOutOfRange, column, c-1, c)
+	}
+	return nil
 }
 
 // Kind distinguishes the two blocks of a column.
@@ -150,5 +207,26 @@ type Coordinate struct {
 // Refuses with ErrInvalidLayout, or ErrRIDOutOfRange for anything below 1 or
 // above the last RID the layout can produce.
 func (l Layout) Decode(rid int32) (Coordinate, error) {
-	return Coordinate{}, nil
+	if err := l.Validate(); err != nil {
+		return Coordinate{}, err
+	}
+	m := l.ColumnWidth()
+	// The matrix stops at C·M, which is below slapd's 999 for every layout
+	// that does not divide it exactly. A RID in that tail is a legal syncrepl
+	// id that this layout never issued, so it decodes to no coordinate.
+	last := l.MaxColumns() * m
+	if rid < 1 || rid > last {
+		return Coordinate{}, fmt.Errorf("%w: rid %d is outside 1..%d, the range this layout can produce",
+			ErrRIDOutOfRange, rid, last)
+	}
+	offset := (rid - 1) % m
+	coord := Coordinate{Column: (rid - 1) / m}
+	if offset < l.PodsPerSite {
+		coord.Kind = KindLocal
+		coord.Ordinal = offset
+		return coord, nil
+	}
+	coord.Kind = KindRemote
+	coord.SiteIndex = offset - l.PodsPerSite
+	return coord, nil
 }

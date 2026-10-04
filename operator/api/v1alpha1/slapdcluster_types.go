@@ -828,6 +828,25 @@ const (
 	ReplicationUnreachable ExternalPeerReplicationState = "Unreachable"
 )
 
+// DiscoveredProvider is one remote pod that peer discovery found: the
+// StatefulSet ordinal that is its stable identity, and the address it
+// currently answers on.
+//
+// The two are deliberately separate facts. An address is what changes — a pod
+// is replaced, an IP is reassigned (ADR-016) — while the ordinal is declared
+// identity and does not. ADR-031 keys a syncrepl RID on the identity, so a
+// discovery result that carried only addresses would force the RID to move
+// every time the far end was rebuilt.
+type DiscoveredProvider struct {
+	// ordinal is the remote pod's StatefulSet ordinal, parsed from its name.
+	// +required
+	Ordinal int32 `json:"ordinal"`
+	// address is the IP the remote pod currently answers replication on:
+	// its primary pod IP in pod-routed mode, its Multus net1 IP otherwise.
+	// +required
+	Address string `json:"address"`
+}
+
 // ExternalPeerStatus reports the observed replication state of one external peer.
 type ExternalPeerStatus struct {
 	// name matches ExternalPeer.Name.
@@ -843,6 +862,12 @@ type ExternalPeerStatus struct {
 	// consumes these the same way as static podAddresses.
 	// +optional
 	DiscoveredAddresses []string `json:"discoveredAddresses,omitempty"`
+	// discoveredProviders lists the remote pods discovery found, each as an
+	// (ordinal, address) pair. Only populated for peers using discovery mode.
+	// Supersedes discoveredAddresses, which carries no provider identity
+	// (ADR-031).
+	// +optional
+	DiscoveredProviders []DiscoveredProvider `json:"discoveredProviders,omitempty"`
 	// replicationState reports the CSN convergence state of this peer, judged
 	// per database (a contextCSN vector is only comparable within one suffix).
 	// Synced: every database was read and each is within threshold of ours.

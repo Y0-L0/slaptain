@@ -387,6 +387,77 @@ reconstruction is weaker than per-serverID there, or something else differs
 between a two-node pair minutes old and a mesh hours old. **Unresolved**, and
 the honest state of the question.
 
+### The purge experiment: a third negative, and probably a cure in disguise
+
+The hypothesis above predicted that emptying the log would make the kill
+fatal, because there would be nothing left to reconstruct from. It was tested
+directly on 2026-10-04: `spec.replication.accesslogPurge: "00:05 00:01"` on
+`example-db2`, converged to `olcAccessLogPurge` on the pods, log allowed to
+drain.
+
+The purge behaved exactly as intended and gave one clean new fact:
+
+```
+before:  20 entries  (14 × SID 001, 3 × 002, 3 × 066)
+after:    0 entries
+         minCSN == contextCSN, all three SIDs, identical timestamps
+```
+
+So **`accesslog_purge` rewrites `minCSN` to match `contextCSN`** when it drains
+the log — the `accesslog_purge: updating minCSN with N values` line of
+ITS#10173, seen from the outside.
+
+Then the SIGKILL, into a log with **zero** entries — reconstruction is not
+merely weak, it is impossible — and the result was again **clean**:
+`contextCSN` came back byte-identical, `minCSN == contextCSN`, zero stale
+answers on any pod.
+
+That is decisive about one thing: **the log DB's `contextCSN` is being
+persisted to disk on 2.7.1 by something other than `syncprov-checkpoint`,**
+which this cluster does not set on log DBs. With an empty log there is nothing
+to rebuild from, so the vector can only have been read off the disk.
+
+The likeliest candidate is the purge itself. `accesslog_purge` modifies the log
+DB's root entry — that is how `minCSN` gets written eagerly — and if the same
+write persists `contextCSN`, then **purging is a checkpoint in disguise**. On
+that reading the experiment did not arm the trap; it sprang it harmlessly, and
+our 5-minute purge was applying mitigation A once a minute.
+
+If true, two things follow, and both are testable:
+
+- the real-world exposure window is the gap **between purges**, which at the
+  slaptain default (`7+00:00 1+00:00`) is up to a day; and
+- shortening `logpurge`'s *interval* would be a mitigation that needs no
+  unprecedented configuration — unlike option A, every deployment already sets
+  `logpurge`.
+
+**Decisive next test**, and it needs no kill: `slapcat` the log DB (the
+`slctl debug` recipe in CLAUDE.md) immediately before and after a purge sweep,
+and watch whether on-disk `contextCSN` advances with it. That separates
+"purge persists it" from "2.7 persists it eagerly for some other reason"
+without another 20-minute cycle.
+
+### Status of the Kubernetes reproduction, plainly
+
+Three attempts, increasingly targeted, **all clean**:
+
+| attempt | what was done | result |
+|---|---|---|
+| 1 | `--grace-period=0 --force` | clean — never a SIGKILL to slapd |
+| 2 | real `kill -9` on a converged pod | clean — `contextCSN` survived intact |
+| 3 | real `kill -9` with the log purged empty | clean — and probably self-cured |
+
+Yet the condition is real and was captured on this very cluster hours earlier:
+`minCSN ⊄ contextCSN` on two databases, 6968 stale answers per minute, five
+consumers in permanent refresh. So it *arises* — just not from an unclean stop
+on 2.7.1.
+
+What has never been tested is the path that actually produced it: that cluster
+had been through an e2e run, which wipes a pod's PVCs and lets it rejoin
+(ADR-012 case 2, `dataloss_recovery_test.go`) and scales the cluster to zero
+for a restore. **That is the next trigger to try**, and it is the one with
+circumstantial evidence behind it.
+
 Leading hypothesis, now secondary: an unclean stop may be **necessary but not
 sufficient**. The violation needs a serverID that is in `minCSN` and *not
 recoverable* when `contextCSN` is rebuilt at startup — which is consistent with

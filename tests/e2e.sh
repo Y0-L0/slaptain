@@ -598,6 +598,24 @@ setup_foundation() {
         kctl "$ctx" create namespace "$NAMESPACE_TESTING" --dry-run=client -o yaml \
             | kctl "$ctx" apply -f -
 
+        # The test namespace is a debugging vehicle, not a hardened tenant.
+        # Clusters commonly enforce PodSecurity 'baseline' cluster-wide with no
+        # namespace label to show for it, so it is invisible until it refuses
+        # something — and what it refuses is the tooling we debug WITH:
+        # `slctl debug` silently loses SYS_PTRACE and the live-FS view at
+        # /proc/1/root/ and degrades to read-only mounts, and the ITS#9398
+        # kill -9 helper (hostPID + privileged) is rejected outright.
+        # Teardown deletes this namespace, so without this a hand-applied
+        # label quietly disappears on every cycle.
+        #
+        # Deliberately NOT applied to $NAMESPACE: the operator has no business
+        # being privileged, and this must never drift into a production path.
+        log "[$ctx] Relaxing PodSecurity on $NAMESPACE_TESTING (debug lab, not a tenant)..."
+        kctl "$ctx" label namespace "$NAMESPACE_TESTING" --overwrite \
+            pod-security.kubernetes.io/enforce=privileged \
+            pod-security.kubernetes.io/warn=privileged \
+            pod-security.kubernetes.io/audit=privileged >/dev/null
+
         if [[ -f "$PULL_SECRET_FILE" ]]; then
             log "[$ctx] Applying image pull secret to $NAMESPACE and $NAMESPACE_TESTING..."
             kctl "$ctx" apply -n "$NAMESPACE" -f "$PULL_SECRET_FILE"

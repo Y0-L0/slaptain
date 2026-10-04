@@ -185,12 +185,22 @@ break_it(){
 # host PID whose namespaced PID is 1 inside the target container, and kills it.
 # The kubelet then restarts the container IN PLACE: same pod, same PVCs,
 # restartCount+1 — which is what an OOM kill or a crash actually looks like.
+# Put the namespace back the way we found it — which is NOT the same as
+# deleting the label. tests/e2e.sh sets enforce=privileged on the test
+# namespace deliberately, so blindly removing it here would silently undo that
+# and the next `slctl debug` would quietly lose its capabilities.
 restore_ps(){
   [ "${PRIV_LABELED:-0}" = 1 ] || return 0
-  kubectl --context "$SITE" label ns "$NAMESPACE" \
-    pod-security.kubernetes.io/enforce- >/dev/null 2>&1 || true
   PRIV_LABELED=0
-  echo "  (PodSecurity label on $NAMESPACE removed again)"
+  if [ -n "${PS_ENFORCE_WAS:-}" ]; then
+    kubectl --context "$SITE" label ns "$NAMESPACE" --overwrite \
+      "pod-security.kubernetes.io/enforce=$PS_ENFORCE_WAS" >/dev/null 2>&1 || true
+    echo "  (PodSecurity enforce on $NAMESPACE restored to '$PS_ENFORCE_WAS')"
+  else
+    kubectl --context "$SITE" label ns "$NAMESPACE" \
+      pod-security.kubernetes.io/enforce- >/dev/null 2>&1 || true
+    echo "  (PodSecurity label on $NAMESPACE removed again — there was none before)"
+  fi
 }
 
 brutal_kill(){
@@ -209,11 +219,17 @@ brutal_kill(){
   # clusters enforce 'baseline' by default, with no namespace label to show
   # for it, so this is only discoverable by being refused.
   if [ "$ALLOW_PRIV" = 1 ]; then
-    note "Relaxing PodSecurity on $NAMESPACE for the kill (restored afterwards)"
-    kc "$SITE" label ns "$NAMESPACE" \
-      pod-security.kubernetes.io/enforce=privileged --overwrite >/dev/null
-    PRIV_LABELED=1
-    trap 'restore_ps' EXIT
+    PS_ENFORCE_WAS=$(kc "$SITE" get ns "$NAMESPACE" \
+      -o 'jsonpath={.metadata.labels.pod-security\.kubernetes\.io/enforce}' 2>/dev/null || true)
+    if [ "$PS_ENFORCE_WAS" = "privileged" ]; then
+      echo "  (namespace is already enforce=privileged — nothing to relax)"
+    else
+      note "Relaxing PodSecurity on $NAMESPACE for the kill (restored afterwards)"
+      kc "$SITE" label ns "$NAMESPACE" --overwrite \
+        pod-security.kubernetes.io/enforce=privileged >/dev/null
+      PRIV_LABELED=1
+      trap 'restore_ps' EXIT
+    fi
   fi
 
   cat <<EOF | kc "$SITE" apply -f - >/dev/null

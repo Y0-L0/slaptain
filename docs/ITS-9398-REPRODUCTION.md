@@ -316,7 +316,7 @@ above: detected on both databases, healed by three writes, stale rate to zero).
 |---|---|---|
 | `graceful` | `kubectl delete pod` → SIGTERM, 30 s grace | no (control) |
 | `hard` | `kubectl delete pod --grace-period=0 --force` | **no — measured** |
-| `brutal` | real `SIGKILL` to slapd's PID via a hostPID helper on the node | expected yes, **not yet run** |
+| `brutal` | real `SIGKILL` to slapd's PID via a hostPID helper on the node | **no — measured** |
 
 `--grace-period=0 --force` **is not a SIGKILL to the process.** It removes the
 *API object* immediately without waiting for the kubelet to confirm; the
@@ -355,6 +355,38 @@ olcDatabase={3}mdb (accesslog)  olcSpNoPresent: TRUE      ← no checkpoint
 — which is exactly the ecosystem-standard shape §2 describes, so the exposure
 should be present.
 
+### The real SIGKILL also came back clean — which narrows the bug
+
+Run 2026-10-04 with the `brutal` arm: `slapd-0` went to
+`RESTARTS 1` at an unchanged pod age, i.e. the container was killed and
+restarted **in place**, PVCs intact. Afterwards:
+
+```
+cn=accesslog-example-db    minCSN {001,002,003,065,066} ⊆ contextCSN {001,002,003,065,066}
+cn=accesslog-example-db2   minCSN {001,002,066}         ⊆ contextCSN {001,002,066}
+stale answers in 60 s: 0
+```
+
+The `contextCSN` values came back **byte-identical to the pre-kill ones**. So
+on this cluster an uncatchable `SIGKILL` of a converged pod did not cost the
+log DB its vector, and **an unclean stop is necessary but not sufficient**.
+
+That is a real qualification of the ticket as filed: ITS#9398 is titled "Stale
+accesslog cookie due to unclean shutdown", and unclean shutdown alone does not
+do it. The missing ingredient is most plausibly Chu's startup behaviour — *"the
+syncprov overlay always reads the largest entryCSN out of the database at
+startup"* — meaning the vector is **reconstructed** from surviving log entries
+when it is not on disk. If so the fatal case is a serverID whose entries are no
+longer *in* the log to reconstruct from: aged out by `logpurge`, or a log that
+was replaced wholesale. ITS#10173's repair speaks in exactly those terms —
+minCSN values "that don't correspond to entries present in the log".
+
+Note this does not fit the podman reproduction, where two freshly-created
+servers storm after one `kill -9` with both SIDs' entries present. Either the
+reconstruction is weaker than per-serverID there, or something else differs
+between a two-node pair minutes old and a mesh hours old. **Unresolved**, and
+the honest state of the question.
+
 Leading hypothesis, now secondary: an unclean stop may be **necessary but not
 sufficient**. The violation needs a serverID that is in `minCSN` and *not
 recoverable* when `contextCSN` is rebuilt at startup — which is consistent with
@@ -367,12 +399,11 @@ an e2e run that replaces pods and wipes volumes (ADR-012 case 2), not from a
 plain restart — and ITS#10173 speaks of minCSN values "that don't correspond
 to entries present in the log".
 
-**Next experiment**, in order of cost: (1) run the `brutal` arm — the simplest
-explanation for the negative is that no SIGKILL ever reached slapd;
-(2) `slapcat` the log DB on a freshly-killed pod via the `slctl debug` recipe
+**Next experiment**, in order of cost: (1) `slapcat` the log DB on a freshly-killed pod via the `slctl debug` recipe
 in CLAUDE.md, to establish whether on-disk `contextCSN` was reconstructed or
-persisted; (3) kill a pod whose log has been purged of a dormant serverID;
-(4) the dataloss path, which is what produced the incident in the first
+persisted; (2) set an aggressive `accesslogPurge` (e.g. minutes), let a serverID's entries
+age out of the log, and only then SIGKILL — this is the hypothesis above, stated
+as an experiment; (3) the dataloss path, which is what produced the incident in the first
 place.
 
 Until one of those lands, the honest statement is: **the bug is reproducible in

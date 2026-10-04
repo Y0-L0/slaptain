@@ -46,16 +46,20 @@ type inspectJSON struct {
 }
 
 type externalPeerInfo struct {
-	Name                string   `json:"name"`
-	URI                 string   `json:"uri"`
-	PodAddresses        []string `json:"podAddresses,omitempty"`
-	DiscoveredAddresses []string `json:"discoveredAddresses,omitempty"`
-	ReplicasPerPeer     int32    `json:"replicasPerPeer,omitempty"`
-	Connected           *bool    `json:"connected,omitempty"` // nil = not tested (Multus/discovery)
-	LastError           string   `json:"lastError,omitempty"`
-	Multus              bool     `json:"multus,omitempty"` // true = podAddresses or discovery peer
-	ReplicationState    string   `json:"replicationState,omitempty"`
-	LagSeconds          string   `json:"lagSeconds,omitempty"`
+	Name         string   `json:"name"`
+	URI          string   `json:"uri"`
+	PodAddresses []string `json:"podAddresses,omitempty"`
+	// DiscoveredProviders replaced the former discoveredAddresses list: a
+	// discovery peer's pods are reported as (ordinal, address) pairs, in
+	// ordinal order, because position in an address list was never an
+	// identity (ADR-031).
+	DiscoveredProviders []ldapv1alpha1.DiscoveredProvider `json:"discoveredProviders,omitempty"`
+	ReplicasPerPeer     int32                             `json:"replicasPerPeer,omitempty"`
+	Connected           *bool                             `json:"connected,omitempty"` // nil = not tested (Multus/discovery)
+	LastError           string                            `json:"lastError,omitempty"`
+	Multus              bool                              `json:"multus,omitempty"` // true = podAddresses or discovery peer
+	ReplicationState    string                            `json:"replicationState,omitempty"`
+	LagSeconds          string                            `json:"lagSeconds,omitempty"`
 }
 
 type podJSON struct {
@@ -278,7 +282,7 @@ func inspectAndVerify(ctx context.Context, coreClient kubernetes.Interface, conf
 			c := eps.Connected
 			epi.Connected = &c
 			epi.LastError = eps.LastError
-			epi.DiscoveredAddresses = eps.DiscoveredAddresses
+			epi.DiscoveredProviders = eps.DiscoveredProviders
 			epi.ReplicationState = string(eps.ReplicationState)
 			epi.LagSeconds = eps.LagSeconds
 			break
@@ -291,7 +295,7 @@ func inspectAndVerify(ctx context.Context, coreClient kubernetes.Interface, conf
 		epi.ReplicasPerPeer = rpp
 		fanout := ""
 		if ep.Discovery != nil {
-			n := int32(len(epi.DiscoveredAddresses))
+			n := int32(len(epi.DiscoveredProviders))
 			if n > 0 && rpp > 1 {
 				selected := rpp
 				if selected > n {
@@ -299,10 +303,11 @@ func inspectAndVerify(ctx context.Context, coreClient kubernetes.Interface, conf
 				}
 				fanout = fmt.Sprintf(", rpp=%d/%d", selected, n)
 			}
-			if len(epi.DiscoveredAddresses) > 0 {
-				epi.URI = fmt.Sprintf("%d pod(s) via discovery%s", len(epi.DiscoveredAddresses), fanout)
+			if n > 0 {
+				epi.URI = fmt.Sprintf("pods %s via discovery%s",
+					providerOrdinalList(epi.DiscoveredProviders), fanout)
 			} else {
-				epi.URI = "discovery (no addresses yet)"
+				epi.URI = "discovery (no providers yet)"
 			}
 		} else if len(ep.PodAddresses) > 0 {
 			n := int32(len(ep.PodAddresses))
@@ -628,7 +633,7 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 		if ep.Discovery != nil {
 			for _, eps := range sc.Status.ExternalPeerStatuses {
 				if eps.Name == ep.Name {
-					addrCount = len(eps.DiscoveredAddresses)
+					addrCount = len(eps.DiscoveredProviders)
 					break
 				}
 			}
@@ -695,7 +700,7 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 			epOK := true
 			var epIssues []string
 			for _, ep := range sc.Status.ExternalPeerStatuses {
-				if len(ep.DiscoveredAddresses) > 0 {
+				if len(ep.DiscoveredProviders) > 0 {
 					continue // discovery peer — skip connectivity check
 				}
 				if !ep.Connected {
@@ -723,11 +728,11 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 				}
 				for _, eps := range sc.Status.ExternalPeerStatuses {
 					if eps.Name == ep.Name {
-						if len(eps.DiscoveredAddresses) > 0 {
-							details = append(details, fmt.Sprintf("%s: %d pod(s) discovered",
-								ep.Name, len(eps.DiscoveredAddresses)))
+						if len(eps.DiscoveredProviders) > 0 {
+							details = append(details, fmt.Sprintf("%s: pod(s) %s discovered",
+								ep.Name, providerOrdinalList(eps.DiscoveredProviders)))
 						} else {
-							details = append(details, fmt.Sprintf("%s: no addresses discovered",
+							details = append(details, fmt.Sprintf("%s: no providers discovered",
 								ep.Name))
 						}
 						break
@@ -752,7 +757,7 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 		// ── External peer syncrepl stanzas present on each RW pod ──
 		// For each ExternalPeer, check that at least one stanza references its
 		// URI (single-endpoint), podAddresses (static Multus), or
-		// DiscoveredAddresses (discovery mode).
+		// DiscoveredProviders (discovery mode).
 		epStanzaOK := true
 		epStanzaEvaluated := false
 		var epStanzaIssues []string
@@ -763,7 +768,7 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 				// Discovery mode: use resolved addresses from status.
 				for _, eps := range sc.Status.ExternalPeerStatuses {
 					if eps.Name == ep.Name {
-						needles = eps.DiscoveredAddresses
+						needles = providerAddressList(eps.DiscoveredProviders)
 						break
 					}
 				}
@@ -934,14 +939,14 @@ func printInspectResult(result inspectJSON) {
 			for _, suffix := range sortedKeysOf(pod.SyncReplBySuffix) {
 				// Classify stanzas into in-cluster and cross-site.
 				// Match against URI (NodePort), podAddresses (static Multus),
-				// or DiscoveredAddresses (discovery mode).
+				// or DiscoveredProviders (discovery mode).
 				var inCluster, crossSite []string
 				for _, sr := range pod.SyncReplBySuffix[suffix] {
 					matched := false
 					for _, ep := range result.ExternalPeers {
 						var needles []string
-						if len(ep.DiscoveredAddresses) > 0 {
-							needles = ep.DiscoveredAddresses
+						if len(ep.DiscoveredProviders) > 0 {
+							needles = providerAddressList(ep.DiscoveredProviders)
 						} else if ep.Multus {
 							needles = ep.PodAddresses
 						} else {
@@ -1211,7 +1216,7 @@ func externalPeerNeedles(sc *ldapv1alpha1.SlapdCluster) []string {
 		case ep.Discovery != nil:
 			for _, eps := range sc.Status.ExternalPeerStatuses {
 				if eps.Name == ep.Name {
-					needles = append(needles, eps.DiscoveredAddresses...)
+					needles = append(needles, providerAddressList(eps.DiscoveredProviders)...)
 					break
 				}
 			}
@@ -1309,5 +1314,15 @@ func sortedKeysOfString(m map[string]string) []string {
 		out = append(out, k)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// providerAddressList flattens discovered providers to their addresses, for
+// the checks that match a stanza's provider= against what discovery found.
+func providerAddressList(providers []ldapv1alpha1.DiscoveredProvider) []string {
+	out := make([]string, 0, len(providers))
+	for _, p := range providers {
+		out = append(out, p.Address)
+	}
 	return out
 }

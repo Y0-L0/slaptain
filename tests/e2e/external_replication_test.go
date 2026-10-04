@@ -441,13 +441,40 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 					"external peer %q should be connected (got lastError: %s)", ps.Name, ps.LastError)
 			}
 		} else if hasDiscoveryPeers {
-			// Discovery peers appear in ExternalPeerStatuses with DiscoveredAddresses.
+			// Discovery peers appear in ExternalPeerStatuses with DiscoveredProviders.
 			Expect(sc.Status.ExternalPeerStatuses).NotTo(BeEmpty(),
 				"status.externalPeerStatuses should be populated for discovery-mode peers")
 			for _, ps := range sc.Status.ExternalPeerStatuses {
 				Expect(ps.Name).NotTo(BeEmpty(), "peer status should have a name")
-				Expect(ps.DiscoveredAddresses).NotTo(BeEmpty(),
-					"discovery peer %q should have discovered addresses", ps.Name)
+				Expect(ps.DiscoveredProviders).NotTo(BeEmpty(),
+					"discovery peer %q should have discovered providers", ps.Name)
+
+				// ADR-031: discovery returns provider IDENTITY, not bare
+				// addresses, and orders the result by that identity. Before
+				// M1 this list was sorted with sort.Strings over IPs, so its
+				// position carried nothing — an unrelated remote pod blipping
+				// permuted it and every consumer that indexed into it pointed
+				// at a different provider than it had the pass before.
+				//
+				// Only a live mesh can show this. A unit test proves the
+				// reduction sorts a slice it was handed; it cannot prove that
+				// discovery against three real clusters hands it providers
+				// whose ordinals are the remote pods' real ones.
+				seen := map[int32]string{}
+				prev := int32(-1)
+				for _, dp := range ps.DiscoveredProviders {
+					Expect(dp.Ordinal).To(BeNumerically(">", prev),
+						"peer %q returned providers out of ordinal order (%v): ordinal %d follows %d, "+
+							"so list position is not provider identity and ADR-031's RID coordinate "+
+							"would move whenever a remote pod blipped",
+						ps.Name, ps.DiscoveredProviders, dp.Ordinal, prev)
+					Expect(seen).NotTo(HaveKey(dp.Ordinal),
+						"peer %q returned two providers claiming ordinal %d (%s and %s), so the pod "+
+							"list spans more than one fleet and the provider is ambiguous",
+						ps.Name, dp.Ordinal, seen[dp.Ordinal], dp.Address)
+					seen[dp.Ordinal] = dp.Address
+					prev = dp.Ordinal
+				}
 			}
 		} else if hasPodAddrPeers {
 			// Static podAddresses peers are omitted from ExternalPeerStatuses —

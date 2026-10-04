@@ -2496,24 +2496,31 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 			}
 		}
 
-		// Determine the list of addresses for podAddresses/discovery modes.
-		// URI mode falls through with podAddrs empty.
-		var podAddrs []string
+		// Determine this peer's providers. Every mode produces the same type
+		// (ADR-031): discovery parses the remote pods' ordinals, podAddresses
+		// takes list position as the ordinal, and a uri peer is one provider at
+		// ordinal 0 — built below, where the URI is used verbatim.
+		var providers []ldapv1alpha1.DiscoveredProvider
 		if ep.Discovery != nil {
 			for _, ps := range sc.Status.ExternalPeerStatuses {
 				if ps.Name == ep.Name {
-					podAddrs = ps.DiscoveredAddresses
+					providers = ps.DiscoveredProviders
 					break
 				}
 			}
-			if len(podAddrs) == 0 {
-				log.Info("skipping discovery peer: no addresses discovered yet",
+			if len(providers) == 0 {
+				log.Info("skipping discovery peer: no providers discovered yet",
 					"peer", ep.Name)
 				continue
 			}
-		} else if len(ep.PodAddresses) > 0 {
-			podAddrs = ep.PodAddresses
+		} else {
+			providers = providersFromPodAddresses(ep.PodAddresses)
 		}
+		// The addresses, in provider order. Selection downstream is the
+		// diagonal `(ordinal + k) % len(URIs)`, so the order of this slice is
+		// the order of the providers it came from — ascending by ordinal for a
+		// discovery peer, list order for a podAddresses one.
+		podAddrs := providerAddresses(providers)
 
 		rpp := resolveReplicasPerPeer(sc.Spec.Replication.ReplicasPerPeer, ep.ReplicasPerPeer)
 
@@ -2549,7 +2556,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 		} else {
 			externalPeers = append(externalPeers, resolvedExternalPeer{
 				Name:            ep.Name,
-				URIs:            []string{ep.URI},
+				URIs:            providerAddresses(providersFromURI(ep.URI)),
 				ReplicasPerPeer: 1,
 				BindDN:          bindDN,
 				Password:        bindPassword,

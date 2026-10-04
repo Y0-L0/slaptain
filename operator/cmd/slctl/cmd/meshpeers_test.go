@@ -54,7 +54,7 @@ func withPeerStatuses(sc *ldapv1alpha1.SlapdCluster, names ...string) *ldapv1alp
 				Name:                n,
 				Connected:           true,
 				ReplicationState:    ldapv1alpha1.ReplicationSynced,
-				DiscoveredAddresses: []string{"10.0.0.1"},
+				DiscoveredProviders: []ldapv1alpha1.DiscoveredProvider{{Ordinal: 0, Address: "10.0.0.1"}},
 			})
 	}
 	return sc

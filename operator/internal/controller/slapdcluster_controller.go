@@ -24,7 +24,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -393,12 +392,12 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		if ep.Discovery != nil {
 			// Dynamic discovery mode: query remote k8s API for pod Multus IPs.
-			addrs, err := r.discoverRemotePeerAddresses(ctx, sc, &ep)
+			providers, err := r.discoverRemotePeerProviders(ctx, sc, &ep)
 			if err != nil {
 				status.LastError = err.Error()
 				log.Info("remote peer discovery failed", "peer", ep.Name, "err", err)
 			} else {
-				status.DiscoveredAddresses = addrs
+				status.DiscoveredProviders = providers
 			}
 		} else if len(ep.PodAddresses) > 0 {
 			// Static podAddresses: addresses are in the spec directly.
@@ -1426,7 +1425,7 @@ func (r *SlapdClusterReconciler) checkPeerCSNConvergence(
 	// Determine remote addresses to query.
 	var addrs []string
 	if ep.Discovery != nil {
-		addrs = status.DiscoveredAddresses
+		addrs = providerAddresses(status.DiscoveredProviders)
 	} else if len(ep.PodAddresses) > 0 {
 		addrs = ep.PodAddresses
 	} else if ep.URI != "" {
@@ -1784,14 +1783,22 @@ func extractMultusIP(pod *corev1.Pod, nadName string) string {
 	return ""
 }
 
-// discoverRemotePeerAddresses queries a remote Kubernetes cluster's API to discover
-// Multus replication-network IPs of pods belonging to a remote SlapdCluster.
+// discoverRemotePeerProviders queries a remote Kubernetes cluster's API to
+// discover the pods of a remote SlapdCluster, and returns each as a provider:
+// its StatefulSet ordinal and the replication address it currently answers on
+// (the Multus net1 IP, or the primary pod IP in pod-routed mode).
+//
+// It returns identity rather than bare addresses because ADR-031 keys a
+// syncrepl RID on the provider. The reduction itself — the filters, the parse,
+// the refusals and the ordinal ordering — lives in providersFromPods; this
+// function is the remote-cluster plumbing around it.
+//
 // This implements the dynamic peer discovery described in ADR-007 amendment.
-func (r *SlapdClusterReconciler) discoverRemotePeerAddresses(
+func (r *SlapdClusterReconciler) discoverRemotePeerProviders(
 	ctx context.Context,
 	sc *ldapv1alpha1.SlapdCluster,
 	ep *ldapv1alpha1.ExternalPeer,
-) ([]string, error) {
+) ([]ldapv1alpha1.DiscoveredProvider, error) {
 	if sc.Spec.Replication.Network == nil {
 		return nil, fmt.Errorf("discovery requires spec.replication.network to be configured")
 	}
@@ -1852,29 +1859,15 @@ func (r *SlapdClusterReconciler) discoverRemotePeerAddresses(
 		return nil, fmt.Errorf("list remote pods (ns=%s, labels=%s): %w", remoteNS, labelSelector, err)
 	}
 
-	// Extract each remote pod's replication address. In multus mode this is the
-	// net1 IP from the pod's network-status annotation; in pod-routed mode (ADR-016)
-	// it is the pod's primary IP, reachable via cross-site pod-CIDR routing.
+	// Reduce the remote pods to providers. In multus mode the address is the
+	// net1 IP from the pod's network-status annotation; in pod-routed mode
+	// (ADR-016) it is the pod's primary IP, reachable via cross-site pod-CIDR
+	// routing. The result is ordered by ordinal, never by address.
 	podRouted := sc.NetworkMode() == ldapv1alpha1.NetworkModePodRouted
 	nadName := sc.Spec.Replication.Network.MultusNetwork
-	var addresses []string
-	for i := range podList.Items {
-		pod := &podList.Items[i]
-		// Skip pods that aren't running.
-		if pod.Status.Phase != corev1.PodRunning {
-			continue
-		}
-		var ip string
-		if podRouted {
-			ip = pod.Status.PodIP
-		} else {
-			ip = extractMultusIP(pod, nadName)
-		}
-		if ip != "" {
-			addresses = append(addresses, ip)
-		}
+	providers, err := providersFromPods(podList.Items, podRouted, nadName)
+	if err != nil {
+		return nil, fmt.Errorf("reduce remote pods (ns=%s, labels=%s): %w", remoteNS, labelSelector, err)
 	}
-
-	sort.Strings(addresses)
-	return addresses, nil
+	return providers, nil
 }

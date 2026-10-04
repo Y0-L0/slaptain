@@ -11,6 +11,11 @@ You may obtain a copy of the License at
 package controller
 
 import (
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+
 	corev1 "k8s.io/api/core/v1"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
@@ -54,7 +59,19 @@ import (
 // StatefulSet is named "slapd-" and no pod of one is named "slapd--1". The
 // prefix must therefore be non-empty AND not itself end in a dash.
 func podOrdinal(podName string) (int32, error) {
-	panic("not implemented: ADR-031 M1")
+	i := strings.LastIndex(podName, "-")
+	if i < 0 {
+		return 0, fmt.Errorf("pod name %q has no ordinal: no %q separator", podName, "-")
+	}
+	prefix, tail := podName[:i], podName[i+1:]
+	if prefix == "" || strings.HasSuffix(prefix, "-") {
+		return 0, fmt.Errorf("pod name %q has no ordinal: %q is not a StatefulSet name", podName, prefix)
+	}
+	n, err := strconv.ParseInt(tail, 10, 32)
+	if err != nil || n < 0 || strconv.FormatInt(n, 10) != tail {
+		return 0, fmt.Errorf("pod name %q has no ordinal: %q is not a canonical decimal ordinal", podName, tail)
+	}
+	return int32(n), nil
 }
 
 // providersFromPods reduces a remote pod list to the providers a peer offers.
@@ -85,5 +102,73 @@ func podOrdinal(podName string) (int32, error) {
 // pods are all restarting is legitimately offering nothing right now; the
 // caller's own short-set handling decides what that means.
 func providersFromPods(pods []corev1.Pod, podRouted bool, nadName string) ([]ldapv1alpha1.DiscoveredProvider, error) {
-	panic("not implemented: ADR-031 M1")
+	var providers []ldapv1alpha1.DiscoveredProvider
+	seen := map[int32]string{}
+	for i := range pods {
+		pod := &pods[i]
+		if pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		addr := pod.Status.PodIP
+		if !podRouted {
+			addr = extractMultusIP(pod, nadName)
+		}
+		if addr == "" {
+			continue
+		}
+		ordinal, err := podOrdinal(pod.Name)
+		if err != nil {
+			return nil, fmt.Errorf("remote provider cannot be identified: %w", err)
+		}
+		if other, dup := seen[ordinal]; dup {
+			return nil, fmt.Errorf(
+				"remote pods %q and %q both claim ordinal %d: the label selector matches more than one fleet",
+				other, pod.Name, ordinal)
+		}
+		seen[ordinal] = pod.Name
+		providers = append(providers, ldapv1alpha1.DiscoveredProvider{Ordinal: ordinal, Address: addr})
+	}
+	sort.Slice(providers, func(a, b int) bool { return providers[a].Ordinal < providers[b].Ordinal })
+	return providers, nil
+}
+
+// providersFromPodAddresses builds the providers of a static `podAddresses`
+// peer. That mode never goes through pod discovery, so there is no pod name to
+// parse and no identity to read: ADR-031 gives list position a documented
+// meaning instead — index i is provider ordinal i. Reordering the list
+// renumbers the providers, which is the price of a mode that declares
+// addresses and nothing else.
+func providersFromPodAddresses(addrs []string) []ldapv1alpha1.DiscoveredProvider {
+	providers := make([]ldapv1alpha1.DiscoveredProvider, 0, len(addrs))
+	for i, addr := range addrs {
+		providers = append(providers, ldapv1alpha1.DiscoveredProvider{Ordinal: int32(i), Address: addr})
+	}
+	return providers
+}
+
+// providersFromURI builds the providers of a `uri` peer: exactly one, at
+// ordinal 0. The URI is opaque — it may front a load balancer, a VIP or a
+// single server — so the peer offers one provider whatever stands behind it
+// (ADR-031). The address here is the full URI, not a bare IP, because nothing
+// downstream may assume a scheme or a port for it.
+func providersFromURI(uri string) []ldapv1alpha1.DiscoveredProvider {
+	if uri == "" {
+		return nil
+	}
+	return []ldapv1alpha1.DiscoveredProvider{{Ordinal: 0, Address: uri}}
+}
+
+// providerAddresses flattens providers to their addresses, preserving order.
+// It exists for the consumers that still speak in bare addresses (CSN
+// monitoring dials an address, the stanza builder formats one into a URI);
+// callers that need identity must not go through it.
+func providerAddresses(providers []ldapv1alpha1.DiscoveredProvider) []string {
+	if len(providers) == 0 {
+		return nil
+	}
+	addrs := make([]string, 0, len(providers))
+	for _, p := range providers {
+		addrs = append(addrs, p.Address)
+	}
+	return addrs
 }

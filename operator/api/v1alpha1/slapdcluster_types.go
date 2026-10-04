@@ -857,15 +857,10 @@ type ExternalPeerStatus struct {
 	// lastError is the last connection or discovery error, if any.
 	// +optional
 	LastError string `json:"lastError,omitempty"`
-	// discoveredAddresses lists Multus IPs discovered from the remote cluster's pods.
-	// Only populated for peers using discovery mode. The SlapdDatabase controller
-	// consumes these the same way as static podAddresses.
-	// +optional
-	DiscoveredAddresses []string `json:"discoveredAddresses,omitempty"`
 	// discoveredProviders lists the remote pods discovery found, each as an
-	// (ordinal, address) pair. Only populated for peers using discovery mode.
-	// Supersedes discoveredAddresses, which carries no provider identity
-	// (ADR-031).
+	// (ordinal, address) pair, ascending by ordinal. Only populated for peers
+	// using discovery mode. Replaced discoveredAddresses, a bare IP list whose
+	// order carried no provider identity (ADR-031).
 	// +optional
 	DiscoveredProviders []DiscoveredProvider `json:"discoveredProviders,omitempty"`
 	// replicationState reports the CSN convergence state of this peer, judged

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -173,19 +174,25 @@ func printStatusText(sc *ldapv1alpha1.SlapdCluster, peers peerResolution) {
 					continue
 				}
 				// Mode descriptor.
-				if len(eps.DiscoveredAddresses) > 0 {
+				if n := len(eps.DiscoveredProviders); n > 0 {
+					// Name the ordinals, not just the count: a gap in them
+					// ("pods 0,2") is the one thing a count cannot show, and
+					// it is what a human needs to see when a remote pod is
+					// away (ADR-031).
 					rpp := int32(1)
 					if ep.ReplicasPerPeer != nil && *ep.ReplicasPerPeer > 1 {
 						rpp = *ep.ReplicasPerPeer
 					}
 					if rpp > 1 {
 						sel := rpp
-						if sel > int32(len(eps.DiscoveredAddresses)) {
-							sel = int32(len(eps.DiscoveredAddresses))
+						if sel > int32(n) {
+							sel = int32(n)
 						}
-						modeStr = fmt.Sprintf("discovery (%d pod(s), rpp=%d/%d)", len(eps.DiscoveredAddresses), sel, len(eps.DiscoveredAddresses))
+						modeStr = fmt.Sprintf("discovery (pods %s, rpp=%d/%d)",
+							providerOrdinalList(eps.DiscoveredProviders), sel, n)
 					} else {
-						modeStr = fmt.Sprintf("discovery (%d pod(s))", len(eps.DiscoveredAddresses))
+						modeStr = fmt.Sprintf("discovery (pods %s)",
+							providerOrdinalList(eps.DiscoveredProviders))
 					}
 				} else if eps.Connected {
 					modeStr = "connected"
@@ -326,4 +333,15 @@ func phaseSymbol(phase ldapv1alpha1.SlapdClusterPhase) string {
 	default:
 		return strings.ToUpper(string(phase))
 	}
+}
+
+// providerOrdinalList renders discovered providers as their ordinals, e.g.
+// "0,1,2" — or "0,2" when the remote pod-1 is away, which is precisely the
+// state a bare count hides.
+func providerOrdinalList(providers []ldapv1alpha1.DiscoveredProvider) string {
+	parts := make([]string, 0, len(providers))
+	for _, p := range providers {
+		parts = append(parts, strconv.Itoa(int(p.Ordinal)))
+	}
+	return strings.Join(parts, ",")
 }

@@ -234,21 +234,53 @@ A coordinate that comes from *declared identity* has nothing to be stale about.
 ### 1. A RID is a coordinate in a static matrix
 
 ```
-rid = 1 + column·(S·P) + siteIndex·P + ordinal
+rid = 1 + column·M + offset              M = P + S
+
+offset <  P   →  a provider at MY OWN site, at pod ordinal `offset`
+offset >= P   →  MY LINK to peer site `offset − P`
 ```
 
 | term | meaning | source |
 |---|---|---|
 | `column` | which database | **allocated** — the only allocated quantity in the scheme |
-| `siteIndex` | which site the *provider* is at | declared: the `SlapdMesh` site's `serverIDIndex`, or `externalPeers[].siteIndex` off-mesh |
-| `ordinal` | which pod at that site is the provider | structural: the provider pod's StatefulSet ordinal |
-| `S`, `P` | max sites, max pods per site | compile-time constants (see 5) |
+| `offset` | which provider, in two blocks | structural (see below) |
+| `P` | max pods per site | mesh-scoped constant (see 5) |
+| `S` | max sites in a mesh | mesh-scoped constant (see 5) |
+
+The offset is two blocks, because a provider at your own site and a provider at
+another site are reached differently:
+
+- **The local block, `P` wide, indexed by pod ordinal.** A site is a full
+  in-cluster mesh, so every other pod is a distinct provider and the ordinal
+  names it. A pod's own slot is never written, and is not reclaimed — see
+  below.
+- **The remote block, `S` wide, indexed by the peer's `siteIndex`.** A pod holds
+  **at most one** syncrepl link to any peer site (decision 9), so one slot per
+  peer site is enough, and the peer's declared site index names it. Your own
+  site's entry in this block is dead space.
 
 `rid = 0` is never allocated, so a zero is always a bug and never a coordinate.
+That is not only our hygiene: `SLAPD_SYNC_RID2SYNCCONN(rid)` is the identity
+(`slap.h:1881`) and slapd already uses connid `0` for its own outbound client
+connections (`connection.c:437`, `CONN_IS_CLIENT`), which
+`SLAPD_SYNC_IS_SYNCCONN` then reports as a sync connection. Whether that is
+exploitable is unverified; reserving the value costs one column out of 49 and
+removes the question. The Go argument stands on its own anyway — `int32`'s zero
+value is what a forgotten assignment produces, and a scheme in which that is a
+legal coordinate cannot tell the two apart.
 
-The coordinate names a **provider**: the database being replicated, and the
-single remote server it is replicated from. It does not name the pod writing the
-stanza, the connection index within a fan-out, or an address.
+**What the coordinate names.** For a local provider, the database and the exact
+pod. For a remote one, the database and the **peer site** — not which pod at
+that site currently answers. That is deliberate: which remote pod serves a link
+is a runtime selection that changes when the far end is replaced or
+unavailable, and binding the RID to it would move the number every time. The
+stanza's own `provider=` says which pod; the RID says which link.
+
+Two slots per column are structurally dead — your own ordinal in the local
+block, your own site in the remote block. Reclaiming them would make the offset
+depend on who is reading, which is exactly the uniformity decision 2 is built
+on. Two slots out of twenty is the price of a decode that does not need to know
+where it is standing.
 
 ### 2. Everything dynamic stays out of it
 
@@ -268,9 +300,13 @@ This is the whole difference from Option 6, and three properties follow:
   remote pod blipping permutes the list and every local pod rewrites its whole
   stanza set. Under a provider coordinate, the stanza that names that provider
   gets a new `provider=` and nothing else moves.
-- **Fan-out is not a dimension.** `replicasPerPeer: 1 → 3` adds stanzas whose
-  RIDs are already determined. Nothing renumbers, and the allocator and the
-  stanza builder no longer have to agree on a connection count.
+- **Fan-out is not a dimension.** Wiring decides which cells of the matrix are
+  populated, never what a cell's coordinate is, so a topology change adds and
+  removes stanzas and renumbers nothing. The allocator and the stanza builder
+  no longer have to agree on a connection count.
+- **Which remote pod answers is not a dimension either.** The remote slot is
+  keyed by peer site, so reselecting the far end — it was replaced, it went
+  away, discovery saw it late — changes `provider=` and leaves the RID alone.
 
 ### 3. The ledger holds one map
 
@@ -304,29 +340,48 @@ API server refuses a duplicate.
 The local site's own index is `serverIDBase / 100` (ADR-017's decade), which is
 0 for a cluster that is not in a mesh.
 
-### 5. The envelope is a declared constant, and exceeding it is a refusal
+### 5. The envelope is mesh-scoped, and exceeding it is a refusal
 
-`S` and `P` are compile-time constants, not spec fields. A spec field would let
-two sites in one mesh disagree, and global legibility (decision 2) depends on
-every site computing the same number.
+`P` and `S` live on **`SlapdMesh.spec.ridLayout`**, defaulting to `P = 8`,
+`S = 12` → `M = 20`, `C = 49` databases.
 
-| `P` pods/site | `S` sites | `S·P` | databases |
+They are mesh-scoped and not operator-scoped, and that is the whole point.
+Decision 2's global legibility holds only if every site computes the same
+number for the same provider, so the layout must be one value that cannot
+differ per site. An operator flag is exactly a per-site fact (ADR-028 §4 keeps
+precisely one of those, `SITE_NAME`), so two sites could be deployed with
+different layouts and nothing would notice until a RID read at one site meant
+something else at another. A field on the mesh object is byte-identical at
+every site by construction, and ADR-028's existing parity check — existence
+plus a hash — already catches divergence. A cluster with no `meshRef` uses the
+defaults; its RIDs only have to be self-consistent, since cross-site agreement
+is a legibility property and not a correctness one.
+
+Changing the layout renumbers the mesh. That is permitted, not forbidden: it
+costs exactly what this ADR's own upgrade costs — one `cn=config` write per pod
+per database, no restart, no resync — and the field documents it. A change that
+would leave `C` below the number of databases already holding a column is
+refused instead.
+
+Because the column is `P + S` and not `P · S`, headroom on both axes is nearly
+free:
+
+| `P` | `S` | `M = P+S` | databases |
 |---|---|---|---|
-| 3 | 5 | 15 | 66 |
-| **4** | **6** | **24** | **41** |
-| 4 | 8 | 32 | 31 |
-| 5 | 8 | 40 | 25 |
+| 4 | 6 | 10 | 99 |
+| 6 | 10 | 16 | 62 |
+| **8** | **12** | **20** | **49** |
+| 8 | 16 | 24 | 41 |
 
-**Chosen: `P = 4`, `S = 6`, `C = 41`.** Four pods per site is one scale-up above
-the three-per-site N+2 the sizing guidance assumes; six sites is one above the
-five that the (N−1)/N single-site-loss arithmetic lands on. Databases are the
-axis least likely to grow — the lab runs two — so the headroom goes to topology.
+The last row is the argument in one line: the same column width that bought 4
+pods and 6 sites under a `P · S` layout buys 8 pods and 16 sites under this
+one.
+
+`C = floor(999 / M)`, not `1000 / M`, because `rid = 0` is reserved — the one
+column that reservation costs.
 
 Exceeding any axis is a refusal naming which one and what the ceiling is. It is
-never a wrap, never a silent collision. Raising a constant in a later release
-renumbers the mesh, which costs exactly what this ADR's upgrade costs (one
-`cn=config` write per pod per database, no restart, no resync) and gets an
-`UPGRADING.md` entry.
+never a wrap, never a silent collision.
 
 ### 6. The ledger gates stanza convergence, and a withhold leaves stanzas alone
 
@@ -354,6 +409,28 @@ requeues, by which point the informer has caught up.
 With no deployer-assigned number left, the field, its `Maximum=949` overflow,
 its CEL requirement, and the two Helm chart uniqueness checks all go.
 
+### 9. At most one syncrepl link per (pod, peer site, database)
+
+The remote block is `S` wide because a pod never opens two connections to the
+same peer site for one database. This is an invariant the operator enforces,
+not an assumption it makes: a configuration that would produce a second link is
+refused, naming the peer.
+
+It is satisfied by the topology as deployed today — `replicasPerPeer: 1` is
+exactly one link per pod per peer site — and violated only by
+`replicasPerPeer >= 2`, which is therefore refused until ADR-032 redefines the
+quantity as links per **site pair**, spread across distinct local pods. The
+redundancy `replicasPerPeer >= 2` was added for (ADR-028 amendment,
+2026-09-28: "a second route when the remote pod at the far end goes away") is
+obtained two better ways here: site-level `R` gives it without duplicating a
+pod's own WAN path, and a site-keyed remote slot means the far end going away
+costs a reselection and not a renumber.
+
+This is the one place where ADR-031 depends on a wiring decision. The
+dependency is one-directional and narrow — this ADR states the invariant,
+ADR-032 designs wiring that respects it — and the starting state satisfies it,
+so nothing has to land in a particular order.
+
 ## Consequences
 
 - **The upgrade renumbers every stanza once** — one `cn=config` write per pod
@@ -362,8 +439,11 @@ its CEL requirement, and the two Helm chart uniqueness checks all go.
 - **A lost ledger costs a renumber, not an outage.** The column map can be
   cleared by hand; the operator reallocates and rewrites every stanza. The
   provider coordinates are unaffected, so only the database axis moves.
-- **`slctl` can decode a RID**, at any site, with no cluster state: `317` →
-  column 13, site 1, ordinal 0. A decode subcommand becomes worth having.
+- **`slctl` can decode a RID**, at any site, with no cluster state. At the
+  default layout (`M = 20`): `317` → `316 = 15·20 + 16`, so column 15, offset
+  16 ≥ `P` = 8 → the link to peer site 8. A decode subcommand becomes worth
+  having, and it needs the cluster only to turn the column back into a database
+  name.
 - **Hazard 6 stops existing** for the RID path. The address-resolution hazard it
   rode on does not: a peer with no resolved addresses still yields a short
   stanza set, which `slapddatabase_controller.go:135` already handles by
@@ -378,9 +458,12 @@ its CEL requirement, and the two Helm chart uniqueness checks all go.
 - **Read replicas stay free.** They consume from the same providers, so their
   stanzas carry the same RIDs. An RO pod is never a provider, so its own ordinal
   never enters a coordinate.
-- **A pod's own coordinate is unused on itself.** Every pod skips its own
-  in-cluster stanza; that number is simply not written there. The matrix stays
-  uniform rather than dense, which is the trade decision 1 makes deliberately.
+- **Two slots per column are structurally dead** — a pod's own ordinal in the
+  local block, its own site in the remote block. The matrix stays uniform
+  rather than dense, which is the trade decision 1 makes deliberately.
+- **`replicasPerPeer >= 2` is refused** until ADR-032 replaces it (decision 9).
+  The only shipped use is an e2e knob added 2026-09-28; the redundancy it was
+  added for is what ADR-032's site-pair `R` provides.
 
 ## Scope
 

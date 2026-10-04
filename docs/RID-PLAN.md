@@ -12,14 +12,24 @@ on `feat/rid-allocation-ledger` and is **reference material, not a base** — se
 
 ## Seven hazards to read before writing any code
 
-1. **One coordinate function, not two.** `rid = 1 + column·(S·P) +
-   siteIndex·P + ordinal` is written once, in `internal/ridcoord`, and every
-   caller — the ledger's envelope check, the stanza builder, `slctl`'s decode —
-   goes through it. Two spellings do not fail to compile; they produce a stanza
-   carrying another provider's number, which slapd accepts in silence
-   (ADR-031, "What slapd actually requires").
+1. **One coordinate function, not two.**
 
-2. **Withhold means leave alone, not delete.** `olcSyncRepl` is installed with
+   ```
+   rid = 1 + column·M + offset          M = P + S
+   offset <  P   →  a provider at my own site, pod ordinal `offset`
+   offset >= P   →  my link to peer site `offset − P`
+   ```
+
+   | term | is | from |
+   |---|---|---|
+   | `column` | which database (0..C-1) | the ledger — the one allocated term |
+   | local block | `P` slots, indexed by the provider's pod ordinal | structural |
+   | remote block | `S` slots, indexed by the peer's `siteIndex` | `serverIDIndex`, or `externalPeers[].siteIndex` off-mesh |
+   | `P`, `S`, `C` | 8 pods/site, 12 sites, 49 databases | `SlapdMesh.spec.ridLayout`, defaulted |
+
+   `P + S`, not `P · S`: a pod holds at most one link per peer site
+   (ADR-031 decision 9), so the remote axis is sites and not site×pod. It is
+   written once, in `internal/ridcoord`, and every caller2. **Withhold means leave alone, not delete.** `olcSyncRepl` is installed with
    one atomic `modReq.Replace`, so a set shorter than the pod's current one is a
    deletion. Every refusal path — column unassigned, coordinate out of envelope,
    an unresolvable provider — must skip that pod's convergence entirely and
@@ -87,9 +97,10 @@ with the pod named, and nothing else changed behaviour.
 
 ### M2 — The coordinate (pure seam) — runs in parallel with M1
 
-**Goal.** `internal/ridcoord`: the formula, the constants `S=6` `P=4` `C=41`,
-`RID(column, siteIndex, ordinal) (int32, error)` refusing each axis separately,
-and `Decode(rid) (column, siteIndex, ordinal, error)` as its inverse.
+**Goal.** `internal/ridcoord`: the formula, the layout type (`P`, `S`, derived
+`M` and `C`) with its defaults 8/12, `Local(column, ordinal)` and
+`Remote(column, siteIndex)` refusing each axis separately, and `Decode(rid)`
+as their inverse — returning which block the offset fell in.
 
 **Owns.** `operator/internal/ridcoord/**` — a new package, no Kubernetes
 imports, no I/O.
@@ -97,7 +108,8 @@ imports, no I/O.
 **Red-first.** Everything here is pure. The properties to pin by name: round
 trip for every legal coordinate; `rid = 0` never produced; each axis refuses at
 its ceiling and the message names which axis; the maximum legal coordinate is
-≤ 999 (984 under the chosen constants).
+≤ 999 (980 at the default layout); `C = floor(999/M)` holds for every layout
+the bounds admit; a local and a remote coordinate never collide.
 
 **Roles.** test-author → implementer → reviewer (conformance against ADR
 decision 1 and 5).
@@ -212,17 +224,17 @@ because M5 is a gate rather than a step.
 
 ## Open questions to settle in flight
 
-**Provider selection under fan-out, when a remote pod is absent.** In-cluster
-stanzas are built for ordinals `0..replicas-1` regardless of pod health; the
-external path filters to `Running` and sorts by IP. Keeping the filter means a
-remote pod leaving `Running` reselects providers and changes RIDs — honest
-(a different server really is a different provider) but churny. Dropping it
-means a stanza for a provider with no known address, which cannot be written at
-all. **Recommendation:** select over providers that have a usable address,
-ordered by ordinal, diagonal from the local ordinal — accept reselection on
-disappearance, and note that the common ADR-016 case (pod replaced, same
-ordinal, new IP) keeps its RID, which is the churn that actually hurt. M1
-settles it and the ADR gets an amendment either way.
+**Settled, no longer open: what a remote provider's RID is keyed on.** The
+remote slot is keyed by **peer site**, not by remote pod, so reselecting which
+pod at that site answers — it was replaced, it was never `Running`, discovery
+saw it late — changes `provider=` and moves no RID. The earlier draft of this
+plan carried this as an open question about address availability; ADR-031
+decision 1 removes the question rather than answering it.
+
+What remains for M1 is unchanged and smaller: discovery must return
+`(ordinal, address)` so the diagonal `(localOrdinal + k) % remoteN` indexes
+identity instead of IP-sort position, and a pod name that will not parse is a
+refusal naming the pod.
 
 **Whether `slctl decode` needs the cluster at all.** Everything but `column` is
 globally declared; the column needs the ledger. A decode that prints

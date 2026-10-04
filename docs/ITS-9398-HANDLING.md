@@ -268,7 +268,9 @@ actively misleading.
 
 ## 4. Recovery — the vendor ladder
 
-**Vendor**, Symas "Solving Common Problems", verbatim:
+**Vendor**, Symas "Solving Common Problems"
+(<https://www.symas.com/kb/article.php?slug=solving-common-problems>), verbatim
+— quote and both rungs re-verified against the live page 2026-10-04:
 
 > "issue an modification to the Producer's primary MDB database which will
 > create a new and updated contextCSN attribute value. If this does not resolve
@@ -346,3 +348,69 @@ No recommendation; this is the menu for the decision.
 substitutes**. B and C only cover stops that go *through* the pod lifecycle. OOM
 kills, node crashes, and node shutdown on a default cluster bypass them
 entirely. **Only A survives those.**
+
+---
+
+## Sources
+
+Checked 2026-10-04 unless noted. Symas moved its KB: `kb.symas.com/<path>`
+now 301s to `www.symas.com/kb/article.php?slug=<slug>`, and
+`symas.helpjuice.com` (the backing SaaS) still serves the same pages. The
+canonical `www.symas.com` form is used here.
+
+**Upstream tickets** — all at `https://bugs.openldap.org/show_bug.cgi?id=<n>`:
+
+| ITS | Title (verbatim) | Status | Why it is here |
+|---|---|---|---|
+| [9398](https://bugs.openldap.org/show_bug.cgi?id=9398) | Stale accesslog cookie due to unclean shutdown | UNCONFIRMED | **Our bug.** Filed 2020 |
+| [9225](https://bugs.openldap.org/show_bug.cgi?id=9225) | back-mdb: Add support for PREPARE/2-phase commit | VERIFIED SUSPENDED | 9398's fix is blocked behind this |
+| [9580](https://bugs.openldap.org/show_bug.cgi?id=9580) | Refresh vs. accesslog in delta-MPR | IN_PROGRESS | **Not our bug** — the misattribution, see the ADR-021 amendment |
+| [9361](https://bugs.openldap.org/show_bug.cgi?id=9361) | accesslog logpurge generates new CSNs for its deletes | VERIFIED FIXED | Chu: logpurge made the log DB's contextCSN newer than the main DB's and sent NEW_COOKIE to all delta consumers — so a log DB's contextCSN demonstrably drives consumer behaviour |
+| [10173](https://bugs.openldap.org/show_bug.cgi?id=10173) | Accesslog bootstrap doesn't populate minCSN internally | VERIFIED FIXED (2.5.18) | Comment #3 is the canonical log-DB repair, and the only published minCSN health check |
+| [8607](https://bugs.openldap.org/show_bug.cgi?id=8607) | Second master in MMR config logging contextCSN changes to accesslog | VERIFIED FIXED | Fixed by *"slapo-syncprov not to log checkpoints to accesslog db"* — checkpoints and accesslog have interacted badly before |
+| [8100](https://bugs.openldap.org/show_bug.cgi?id=8100) | Empty accesslog causes issues with delta-syncrepl MMR configurations | VERIFIED FIXED | Upstream's answer to log-DB recovery was entry-level persistence, not a checkpoint |
+| [1227](https://www.openldap.org/lists/openldap-bugs/200107/msg00024.html) | BUG: Unclean shutdown on SIGTERM (Zeilenga, 2001, pre-Bugzilla) | — | The TERM→KILL window complaint, 25 years old |
+
+Titles and statuses read off bugs.openldap.org on 2026-10-04. NB a 200 from
+that host proves nothing — `?id=<nonsense>` also returns 200 — so these were
+verified by extracting each page's title, not by status code.
+
+**Maintainer statements**
+
+- Chu, openldap-technical 2011-12, *"checkpointing the CSN is only an optimization"* — <https://www.openldap.net/lists/openldap-technical/201112/msg00273.html>
+- Kuzník, openldap-technical 2023-02-28, *"should be monitored as such"* + the transplant caveat — <https://marc.info/?l=openldap-technical&m=167757941621578&w=2>
+- Quanah, openldap-technical 2021-07-06, *"I generally advise … monitoring on the CSNs"* — <https://lists.openldap.org/hyperkitty/list/openldap-technical@openldap.org/message/SNGEVZTZXLKJF6R64VHD53PXH23UN6Z6/>
+
+**Upstream documentation**
+
+- Admin Guide 2.6, delta-syncrepl example (identical in 2.4/2.5/2.7) — <https://www.openldap.org/doc/admin26/replication.html>
+- `slapo-syncprov(5)`, the shutdown-only persistence rule — <https://man7.org/linux/man-pages/man5/slapo-syncprov.5.html>
+- `slapd(8)`, `-c rid=` full-reload — <https://man7.org/linux/man-pages/man8/slapd.8.html>
+- `slapd-monitor(5)`, which mentions replication zero times — <https://man7.org/linux/man-pages/man5/slapd-monitor.5.html>
+- `syncmonitor`, read at `f2debe3` — <https://git.openldap.org/openldap/syncmonitor>
+
+**Vendor and distribution**
+
+- Symas, Solving Common Problems (the recovery ladder) — <https://www.symas.com/kb/article.php?slug=solving-common-problems>
+- Symas, Configure Delta-Syncrepl (*"Define only the syncprov overlay"*) — <https://www.symas.com/kb/article.php?slug=configure-delta-syncrepl>
+- Symas, Using the Accesslog Database (no checkpoint, no contextCSN) — <https://www.symas.com/kb/article.php?slug=using-the-accesslog-database>
+- Symas, Replication Primer (*"sync logs … the only way"*) — <https://www.symas.com/kb/article.php?slug=replication-primer>
+- Symas Helm chart: no `terminationGracePeriodSeconds`, `lifecycleHooks: {}` — <https://github.com/symas/helm-openldap>
+- Debian `slapd.service` (no `TimeoutStopSec`; new in trixie) — <https://sources.debian.org/src/openldap/2.6.14%2Bdfsg-2/debian/slapd.service/>
+- Debian `slapd.init` (`--retry TERM/10`, never escalates) — <https://sources.debian.org/src/openldap/2.6.14%2Bdfsg-2/debian/slapd.init/>
+- Fedora/RHEL `slapd.service` (also no stop settings) — <https://src.fedoraproject.org/rpms/openldap/raw/rawhide/f/slapd.service>
+
+**Community**
+
+- Poliakoff 2006, origin of the "one write" cure; the follow-up names the segfault — <https://www.openldap.org/lists/openldap-software/200605/msg00065.html> and `…/msg00068.html`
+- 2023 *"contextCSN via slapcat outdated, despite having set syncprov-checkpoint"* — <https://lists.openldap.org/hyperkitty/list/openldap-technical@openldap.org/thread/FG7PBHP7EVL4QRPCQOIV4KIQ42V2QJA3/>
+- Zytrax accesslog chapter (no syncprov directives at all) — <https://www.zytrax.com/books/ldap/ch6/accesslog.html>
+- LTB `check_ldap_syncrepl_status` — <https://ltb-project.org/documentation/check_ldap_syncrepl_status.html>
+- `check_syncrepl_extended` — <https://exchange.nagios.org/directory/plugins/network-protocols/ldap/check_syncrepl_extended/details/>
+
+**Kubernetes**
+
+- Graceful node shutdown is **off by default** (`shutdownGracePeriod: 0`) — <https://kubernetes.io/docs/concepts/cluster-administration/node-shutdown/>
+
+**Deliberately absent.** The widely-repeated *"Symas gives slapd 30 s and
+recommends 60 s+"* has no locatable primary source and is **not** cited above.

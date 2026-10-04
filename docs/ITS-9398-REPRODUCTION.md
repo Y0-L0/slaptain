@@ -689,8 +689,9 @@ requesting deltas.
 `cn=accesslog-example-db2` on the killed pod was missing **two** serverIDs from
 `contextCSN` that `minCSN` named (`0c9`=201, `0ca`=202).
 
-**Result 2 — no storm. A different error entirely.** Over 200 s with live write
-traffic: **0** `err=4096`, **0** `sync cookie is stale`, CPU flat at 4-6m. What
+**Result 2 — no storm. A different error entirely.** Sampled every 20 s for
+**420 s** (21 samples, T+0 to T+404) with live write traffic throughout:
+**every sample 0 stale-cookie answers**, 0 `err=4096`, CPU flat at 4-6m. What
 appeared instead, at a steady ~30/min:
 
 ```
@@ -745,7 +746,9 @@ The second has a much better shape for an operator:
 storm. The armed state reproduced the broken CSN relation and the `err=53` face
 of it, with live write traffic, and never produced a single stale-cookie answer.
 So the set difference is necessary for the storm but not sufficient, and the
-missing ingredient is still unidentified.
+missing ingredient is still unidentified. The negative is a flat line across
+the whole window, not a short look: 21 consecutive samples at zero while the
+broken relation was verified present and writes were flowing.
 
 ### Status of the Kubernetes reproduction, plainly
 

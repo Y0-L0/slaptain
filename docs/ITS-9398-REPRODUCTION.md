@@ -252,6 +252,48 @@ consumers). On a production DIT it is an outage. And because nothing breaks
 functionally, every replication health check keeps passing — which is why this
 survived so long unnoticed.
 
+### Why the monitoring does not catch it
+
+That last sentence is checkable, and it holds for upstream's own tool.
+
+Every published check we examined — LTB's `check_ldap_syncrepl_status`,
+`check_syncrepl_extended`, the Prometheus exporters — compares *data-suffix*
+`contextCSN` across servers. In this failure those values agree, because the
+data really is converging. `slapd-monitor(5)` exposes no replication state at
+all, so `cn=Monitor` is not a route in either.
+
+The Project's own [`syncmonitor`](https://git.openldap.org/openldap/syncmonitor)
+is the interesting case, because it is the one tool that necessarily *sees* the
+symptom: it runs as a real syncrepl consumer. Read at `f2debe3`, it treats the
+signal as unremarkable by number — `environment.py`:
+
+```python
+except ldap0.LDAPError as e:
+    result = e.args[0]['result']
+    if result not in (ldap0.TIMELIMIT_EXCEEDED, ldap0.SIZELIMIT_EXCEEDED, 0x1000):
+        logger.warning("Search to %r finished with %r, "
+                       "waiting before reconnection", self.uri, e)
+...
+if result == 0x1000:
+    self.cookie = SyncreplCookie()
+    self.cookie_updated(None)
+await self.set_up()
+```
+
+`0x1000` is 4096, `e-syncRefreshRequired`. It is listed among the outcomes that
+do not even emit a warning, alongside time- and size-limit exceeded; the cookie
+is then discarded and the session re-established. `syncrepl_observer.py` does
+the same on the in-flight path (*"Refresh required (cookie was rejected), forget
+it before we propagate"*). Pointed at a provider in this state, syncmonitor
+reports **In-sync** indefinitely and logs nothing; its only `BROKEN` state comes
+from a 30-second no-progress watchdog that an idle directory trips anyway.
+
+This is not a criticism of the tool — discarding a rejected cookie and
+reconnecting is the correct client behaviour, and a consumer cannot distinguish
+one legitimate refresh from a provider that will reject every cookie forever.
+It is offered as an explanation of the silence: the condition is only visible as
+a *rate*, from the provider side, and nothing in the ecosystem measures that.
+
 ## Controls
 
 | Scenario | disk `contextCSN` at stop | after restart |

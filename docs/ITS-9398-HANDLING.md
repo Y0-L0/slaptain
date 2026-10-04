@@ -65,11 +65,21 @@ e-syncRefreshRequired - 4096"*, and notes in passing that transplanting an
 accesslog is *"safe **if** server was shut down cleanly and everything was
 flushed into both"* — a maintainer acknowledging the durability dependency.
 
-**Documented absence.** Every shipped tool checks the **data** suffix only:
-LTB's `check_ldap_syncrepl_status`, `check_syncrepl_extended`, the OpenLDAP
-Project's own `syncmonitor`, the Prometheus exporters. `slapd-monitor(5)`
-mentions syncrepl, replication state and CSNs **zero times**, so `cn=Monitor` is
-not a route in. **No tool anywhere reads `minCSN`.**
+**Documented absence.** Every shipped tool whose source or docs we read checks
+the **data** suffix only: LTB's `check_ldap_syncrepl_status`,
+`check_syncrepl_extended`, the Prometheus exporters (which read `cn=Monitor`
+counters plus explicitly configured `--replicationObject` DNs — nothing stops
+you listing an accesslog suffix, but none ships it). `slapd-monitor(5)` mentions
+syncrepl, replication state and CSNs **zero times**, so `cn=Monitor` is not a
+route in. **No tool anywhere reads `minCSN`.**
+
+**One gap, stated rather than papered over:** the OpenLDAP Project's own
+[`syncmonitor`](https://git.openldap.org/openldap/syncmonitor) is the tool most
+likely to be an exception, and **we have not read its source** — the GitHub
+mirror 404s and the canonical repo is on git.openldap.org. What we actually
+checked is Symas's page describing it, which does not mention the accesslog.
+That is weaker evidence than the rest of this row. Read the source before
+repeating the claim.
 
 **Maintainer**, Quanah, ITS#10173 comment #3 — the only published `minCSN`
 health check in existence, and it checks *cardinality*, not our ⊆ relationship:

@@ -291,10 +291,40 @@ part in deciding the provider's number.
 
 This is the whole difference from Option 6, and three properties follow:
 
-- **`rid=317` names the same (database, provider) at every site in the mesh.**
-  Every term but `column` is globally declared, and `column` is per cluster but
-  derived from a database name that ADR-028 requires to be identical at every
-  site. Correlating a RID across sites during an incident needs no decoder.
+- **The provider half of a RID is globally identical.** `siteIndex` and
+  `ordinal` are declared, so the part of the number naming *which server* means
+  the same thing at every site in the mesh.
+
+  **The column half is not, and an earlier draft of this decision claimed it
+  was** — "derived from a database name that ADR-028 requires to be identical
+  at every site". It is not derived from the name; decision 3 makes it
+  *allocated*, lowest-free, from that cluster's own history. Two sites holding
+  the same database set can hold different columns, because allocation order
+  followed deletions that happened at different times. Worked example, from the
+  M3 conformance review (2026-10-05): site A creates `a, b, x` → `{a:0, b:1,
+  x:2}`, deletes `a`, adds `c` → `{c:0, b:1, x:2}`; site B joins later and
+  allocates the same set from scratch → `{b:0, c:1, x:2}`. Database `b` on its
+  own pod 0 is `rid=21` at A and `rid=1` at B.
+
+  In the common case they agree: a fresh allocation over a sorted key set is
+  canonical, so sites deployed together from one chart, with no database ever
+  deleted, produce identical columns. The divergence needs a delete-then-add,
+  or a site that joined late. So this is a property to *verify*, never to
+  assume.
+
+  What follows for tooling: `slctl` must resolve a column through that
+  cluster's own `status.ridColumns` and must never decode a column to a
+  database name using another site's ledger. Correlating the provider half
+  across sites needs no decoder; correlating the database half needs that
+  site's map.
+
+  **Rejected fix: assign columns by canonical order of the database names.**
+  It would make the column globally identical, and it would renumber every
+  later database whenever one is inserted or removed — turning a routine
+  database add into a `cn=config` write on every pod for every database, which
+  is the cost this ADR's own upgrade pays once and should not pay repeatedly.
+  Stability of an existing assignment is worth more than cross-site equality of
+  a number that can be looked up.
 - **Remote churn stops rewriting `cn=config`.** Today `discoverRemotePeerAddresses`
   drops non-`Running` pods and sorts the survivors by IP string, so an unrelated
   remote pod blipping permutes the list and every local pod rewrites its whole
@@ -379,8 +409,18 @@ differ per site. An operator flag is exactly a per-site fact (ADR-028 §4 keeps
 precisely one of those, `SITE_NAME`), so two sites could be deployed with
 different layouts and nothing would notice until a RID read at one site meant
 something else at another. A field on the mesh object is byte-identical at
-every site by construction, and ADR-028's existing parity check — existence
-plus a hash — already catches divergence. A cluster with no `meshRef` uses the
+every site by construction.
+
+**That is the argument, not yet the mechanism.** An earlier draft of this
+decision said ADR-028's parity check — existence plus a hash — "already catches
+divergence". It does not: the parity signal is still unimplemented (ADR-028
+Phase 6), so today two sites of one mesh can be deployed with different
+`ridLayout` and nothing notices. The consequence is worse than a different
+`C`: a different `M` makes every RID at one site decode to a different
+coordinate at the other. Until parity lands, identical layout is a deployment
+discipline — which is exactly what the `slapd-mesh` chart exists to enforce,
+since the field is set once in one values file. Recorded by the M3 conformance
+review, 2026-10-05. A cluster with no `meshRef` uses the
 defaults; its RIDs only have to be self-consistent, since cross-site agreement
 is a legibility property and not a correctness one.
 

@@ -240,6 +240,44 @@ focused WIP commits, reviewed as a series, never pushed to a remote.
 **Done when** a three-site mesh converges, `slctl inspect` is clean, and every
 RID on every pod decodes to the provider its stanza names.
 
+**First run, 2026-10-05 — the headline claim holds, the gate does not yet.**
+72/72 stanzas across 9 RW pods × 2 databases × 3 sites decode to the provider
+they name, verified by hand and corroborated from a second source (each remote
+stanza's `tls_cacert=…/peers/<site>/` path agrees with the site its RID
+decodes to). `slctl inspect` 18/18 at every site, before and after the suite.
+Measured wins: a replaced remote pod moved only its own stanza's `provider=`
+in **22 s**, against ADR-016's historical 130–268 s for the same event under a
+whole-set rewrite; and a stanza set polled across 503 s and two pod
+replacements never went short. Both ADR-031 refusals fired live with legible
+reasons and **left all 8 stanzas intact while refusing** — hazard 2 confirmed
+on real `cn=config` for the first time.
+
+**But the run failed its own gate.** The stale pre-ADR-031 assertion in
+`external_replication_test.go` is first in an `Ordered` container, so its
+failure skipped five more external-replication specs — including *"removing a
+site from the SlapdMesh removes that peer's syncrepl stanza"*, the only spec
+that watches a remote block slot being **vacated**. Those five are untested,
+not green. Rewrite the assertion, then re-run.
+
+**Not demonstrated by this run, and recorded rather than assumed:**
+
+- **M4a's release gate.** The mesh left `spec.ridLayout` unset throughout, so
+  `ridLayoutFor` only ever ran its default branch. "It must actually read the
+  mesh's layout" is unit-tested and **unexercised live**.
+- `uri` and `podAddresses` peers — untestable through `tests/e2e.sh` since
+  ADR-028 Phase 7, and ADR-031 puts new requirements on both.
+- A permanently unresolvable peer — the behaviour change ADR-031 calls the most
+  likely to surprise. Every peer resolved for the whole run.
+- Any ceiling: the matrix ran 3 sites × 3 pods × 2 databases against
+  `P=8, S=12, C=49`. No refusal-at-the-ceiling path fired on real hardware.
+
+**And a correction to the brief, found by the tester rather than assumed:** the
+lab's prior build (`660f016`) was *not* the pre-ADR-031 `ridBase` scheme as the
+brief claimed — it is from the ITS#9398 line and already carried the withdrawn
+ledger, with no `ridBase` field at all. So this lab holds **no live predecessor
+state for M6's upgrade path**: rehearsing the renumber needs an old build
+installed first.
+
 ### M6 — Remove `ridBase`, and the tooling that reads RIDs
 
 **Goal.** The `ridBase` → `ridSegment` rename lands in M3; M6 is what follows

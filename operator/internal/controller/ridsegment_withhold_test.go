@@ -239,6 +239,52 @@ var _ = Describe("RID segment withhold (ADR-031 decision 6)", func() {
 		expectAccepted(f.get(ctx, "bravo"))
 	})
 
+	// R2. The condition is published inside the replication branch, so a
+	// database that STOPS replicating keeps whatever verdict it last had.
+	// That is the documented escape from a collision — "set
+	// replication.enabled=false to exclude this database" is the text of the
+	// refusal itself and of the CEL message — so this is the path the message
+	// sends people down, and it leaves them with a False condition naming a
+	// database they already stopped colliding with, beside Ready=True and
+	// phase=Running. The only tell is a stale observedGeneration.
+	//
+	// tunablesConvergedCondition is set unconditionally at the top of every
+	// pass for exactly this reason; this condition has to follow it.
+	It("does not leave a stale refusal on a database that stops replicating", func() {
+		f := newRIDFixture(ctx)
+		Expect(f.createDB(ctx, "alpha", ptrInt32(4))).To(Succeed())
+		Expect(f.createDB(ctx, "bravo", ptrInt32(4))).To(Succeed())
+
+		f.reconcile(ctx, "alpha")
+		expectRefusal(f.get(ctx, "alpha"), reasonRIDSegmentCollision, "bravo")
+
+		// Take the escape the refusal itself recommends.
+		alpha := f.get(ctx, "alpha")
+		disabled := false
+		alpha.Spec.Replication.Enabled = &disabled
+		Expect(k8sClient.Update(ctx, alpha)).To(Succeed())
+
+		f.reconcile(ctx, "alpha")
+
+		alpha = f.get(ctx, "alpha")
+		c := ridCondition(alpha)
+		if c == nil {
+			// Clearing the condition outright is an acceptable answer: a
+			// database that does not replicate has no segment to judge, and
+			// absence cannot be stale.
+			return
+		}
+		Expect(string(c.Status)).NotTo(Equal(string(metav1.ConditionFalse)),
+			"%s still reads False/%s — %q — on a database that no longer replicates. "+
+				"The refusal names a collision that cannot exist any more, beside Ready=%v and phase=%s",
+			ridSegmentConditionType, c.Reason, c.Message,
+			readyStatus(alpha), alpha.Status.Phase)
+		Expect(c.ObservedGeneration).To(Equal(alpha.Generation),
+			"%s was not re-evaluated this pass: it carries generation %d while the object is at %d, "+
+				"which is the only trace a stale condition leaves",
+			ridSegmentConditionType, c.ObservedGeneration, alpha.Generation)
+	})
+
 	It("refuses a segment the CRD admits but the layout does not", func() {
 		f := newRIDFixture(ctx)
 		// 60 passes the CRD's Maximum=499 — proven by the Create succeeding —
@@ -281,3 +327,14 @@ var _ = Describe("RID segment withhold (ADR-031 decision 6)", func() {
 })
 
 func ptrInt32(v int32) *int32 { return &v }
+
+// readyStatus is for failure messages: the point of R2 is that a stale refusal
+// sits NEXT TO a healthy Ready, which is what makes it unreadable.
+func readyStatus(sd *ldapv1alpha1.SlapdDatabase) string {
+	for i := range sd.Status.Conditions {
+		if sd.Status.Conditions[i].Type == "Ready" {
+			return fmt.Sprintf("%s/%s", sd.Status.Conditions[i].Status, sd.Status.Conditions[i].Reason)
+		}
+	}
+	return "<absent>"
+}

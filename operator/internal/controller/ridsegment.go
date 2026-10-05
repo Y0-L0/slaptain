@@ -50,6 +50,15 @@ const (
 	// segment, so no segment is in range and the question of which one was
 	// declared does not arise.
 	reasonRIDLayoutInvalid = "RIDLayoutInvalid"
+	// reasonRIDSegmentUnverified — uniqueness could not be ESTABLISHED: the
+	// read that would have answered it failed. The withhold is identical to a
+	// collision's (RID-PLAN hazard 3: unknown withholds), but the reason must
+	// not be, because a reason is a diagnosis. RIDSegmentCollision tells a
+	// human to go edit a CR; here there may be nothing wrong with any CR, and
+	// the thing to look at is the API server, RBAC or the cache. Alerting and
+	// slctl key on the reason, so conflating the two makes a real collision
+	// during an apiserver blip indistinguishable from the blip.
+	reasonRIDSegmentUnverified = "RIDSegmentUnverified"
 )
 
 // ridSegmentVerdict is the per-database answer: may this database's stanzas

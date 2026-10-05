@@ -325,3 +325,105 @@ func TestJudgeRIDSegmentCeilingTracksTheLayout(t *testing.T) {
 		}
 	}
 }
+
+// ── The legacy bridge (M3's safety claim) ────────────────────────────────────
+//
+// M3 renames a field and changes no RID on any pod. That claim rests entirely
+// on legacyRIDBase: it converts a declared segment into the base address the
+// pre-ADR-031 stanza builder still consumes, and it must produce exactly what
+// `ridBase` held under the documented convention — segment × 100, i.e. the
+// `ridBase: 100` that database 1 carried before this commit.
+//
+// Nothing else asserts this. A future edit that "simplifies" the conversion —
+// to segment × M, say, which is where M4 is going — would silently renumber
+// every stanza on every pod of every cluster, and the only symptom is RIDs
+// changing in logs nobody is reading at the time. These are the tests that
+// make that edit loud.
+
+// TestLegacyRIDBaseMatchesThePreADR031Convention pins the whole stanza set, not
+// just the base: the old scheme derived in-cluster peer i as ridBase + i + 1
+// and external peer j as ridBase + 50 + j + 1, and both have to land where
+// they always did.
+func TestLegacyRIDBaseMatchesThePreADR031Convention(t *testing.T) {
+	for segment := int32(0); segment <= legacyRIDBaseBridgeMax; segment++ {
+		// What the CR used to carry for this database, under the convention
+		// docs/ADR-003 documented and every fixture followed.
+		wantBase := segment * 100
+
+		base, v := legacyRIDBase(ridSegmentVerdict{OK: true, Reason: reasonRIDSegmentOK, Segment: segment})
+		if !v.OK {
+			t.Fatalf("segment %d: the bridge refused a segment the judge accepted: %s", segment, v.Message)
+		}
+		if base != wantBase {
+			t.Fatalf("segment %d: bridge base = %d, want %d — this renumbers every stanza on every pod. "+
+				"M3's claim is that it renames a field and changes no RID; that claim is now false",
+				segment, base, wantBase)
+		}
+
+		// In-cluster peer i → ridBase + i + 1.
+		for i := int32(0); i < 3; i++ {
+			if got, want := base+i+1, segment*100+i+1; got != want {
+				t.Errorf("segment %d, in-cluster peer %d: rid = %d, want %d", segment, i, got, want)
+			}
+		}
+		// External peer j → ridBase + 50 + j + 1.
+		for j := int32(0); j < 3; j++ {
+			if got, want := base+50+j+1, segment*100+50+j+1; got != want {
+				t.Errorf("segment %d, external peer %d: rid = %d, want %d", segment, j, got, want)
+			}
+		}
+	}
+}
+
+// TestLegacyRIDBaseRefusesABridgeOverflow pins the ceiling the bridge inherits
+// from the scheme it bridges to. The judge admits 0..48 at the default layout;
+// the old builder cannot express a tenth database at all, because segment 10
+// puts an external stanza at 1051 and slapd rejects a RID above 999 outright.
+// Emitting it would be worse than withholding — see ADR-031's note that slapd
+// accepts a DUPLICATE rid in silence, so arithmetic that walks off the end is
+// not reliably loud.
+func TestLegacyRIDBaseRefusesABridgeOverflow(t *testing.T) {
+	for _, segment := range []int32{legacyRIDBaseBridgeMax + 1, 20, 48} {
+		base, v := legacyRIDBase(ridSegmentVerdict{OK: true, Reason: reasonRIDSegmentOK, Segment: segment})
+		if v.OK {
+			t.Errorf("segment %d: the bridge produced base %d instead of refusing; "+
+				"external peer 0 would take rid %d, past slapd's %d ceiling",
+				segment, base, base+51, ridcoord.MaxRID)
+			continue
+		}
+		if v.Reason != reasonRIDSegmentOutOfRange {
+			t.Errorf("segment %d: reason = %q, want %q", segment, v.Reason, reasonRIDSegmentOutOfRange)
+		}
+		if !strings.Contains(v.Message, strconv.Itoa(int(legacyRIDBaseBridgeMax))) {
+			t.Errorf("segment %d: message %q does not name the bridge's ceiling (%d), "+
+				"so a human cannot tell it apart from the layout's own range refusal",
+				segment, v.Message, legacyRIDBaseBridgeMax)
+		}
+	}
+}
+
+// TestLegacyRIDBaseGuardIsOneSided is a TRIPWIRE, not a defect report.
+//
+// legacyRIDBase checks Segment > legacyRIDBaseBridgeMax and not Segment < 0, so
+// called directly with -3 it answers base -300 and OK = true. That is
+// UNREACHABLE today: its only caller is the SlapdDatabase reconcile, which
+// calls it on a verdict judgeRIDSegment already accepted, and the judge refuses
+// a negative segment before the bridge ever sees it (see the
+// "a negative segment is out of range" case above).
+//
+// It is pinned anyway because the bridge's signature advertises no such
+// precondition, and the cost of a second caller is a stanza set with negative
+// RIDs — which slapd parses with lutil_atoi and does not bounce the way it
+// bounces 1000. The implementer adds the guard; when that lands, this test
+// flips to expecting a refusal and the comment above becomes wrong, which is
+// the point of writing it down.
+func TestLegacyRIDBaseGuardIsOneSided(t *testing.T) {
+	base, v := legacyRIDBase(ridSegmentVerdict{OK: true, Reason: reasonRIDSegmentOK, Segment: -3})
+	if v.OK && base < 0 {
+		t.Logf("TRIPWIRE INTACT: legacyRIDBase(-3) = %d, OK — the guard is still one-sided. "+
+			"Unreachable through the judge, which refuses a negative segment first.", base)
+		return
+	}
+	t.Logf("TRIPWIRE CLEARED: legacyRIDBase(-3) now answers OK=%v reason=%q. "+
+		"The guard is two-sided; rewrite this test to assert the refusal and delete the tripwire.", v.OK, v.Reason)
+}

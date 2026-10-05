@@ -233,7 +233,10 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			"SlapdMesh can be read (ADR-031 decision 5)",
 			"database", sd.Name, "meshRef", sc.Spec.MeshRef, "err", ridLayoutErr)
 	}
-	ridSegment, ridRefusal := r.reconcileRIDSegment(ctx, sc, sd, ridLayout)
+	// The error travels WITH the layout: downstream the two failure modes are
+	// a zero Layout either way, and only the error distinguishes "could not be
+	// read" from "declares something unusable" (judgeRIDLayout).
+	ridSegment, ridRefusal := r.reconcileRIDSegment(ctx, sc, sd, ridLayout, ridLayoutErr)
 
 	// RW pods.
 	for i := int32(0); i < replicas; i++ {
@@ -2683,7 +2686,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 			return true, nil
 		}
 
-		desired := buildDatabaseSyncRepl(
+		desired, err := buildDatabaseSyncRepl(
 			sc.Name, headlessSvc, sc.Namespace, r.ClusterDomain, sd.Spec.Suffix, sd.Name,
 			replicas, i, replPassword,
 			tlsEnabled, inClusterRIDs,
@@ -2694,6 +2697,15 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 			replNetIPs,
 			consumerOnly,
 		)
+		if err != nil {
+			// A builder refusal is the whole pass's: every pod would refuse
+			// identically, and writing the ones judged first would leave the
+			// site half-converged.
+			log.Info("syncrepl stanzas withheld: the stanza set for this pod could not be "+
+				"completed (ADR-031); the pods keep the stanzas they have",
+				"database", sd.Name, "pod", podName, "err", err)
+			return true, nil
+		}
 
 		if err := r.applySyncreplToPod(ctx, host, configPW, sd.Spec.Suffix, desired, multiProvider); err != nil {
 			log.Info("replication reconcile skipped for pod (will retry)",
@@ -2731,7 +2743,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 				return true, nil
 			}
 
-			desired := buildDatabaseSyncReplRO(
+			desired, err := buildDatabaseSyncReplRO(
 				sc.Name, headlessSvc, sc.Namespace, r.ClusterDomain, sd.Spec.Suffix, sd.Name,
 				replicas, replPassword,
 				tlsEnabled, inClusterRIDs,
@@ -2739,6 +2751,12 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 				useDeltaSync,
 				replNetIPs,
 			)
+			if err != nil {
+				log.Info("syncrepl stanzas withheld for read-only pod: its stanza set could "+
+					"not be completed (ADR-031); the pod keeps the stanzas it has",
+					"database", sd.Name, "pod", podName, "err", err)
+				return true, nil
+			}
 
 			if err := r.applySyncreplToPod(ctx, host, configPW, sd.Spec.Suffix, desired, ""); err != nil {
 				log.Info("replication reconcile skipped for read-only pod (will retry)",
@@ -2832,7 +2850,7 @@ func buildDatabaseSyncRepl(
 	externalPeers []resolvedExternalPeer,
 	replNetIPs map[string]string,
 	consumerOnly bool,
-) []string {
+) ([]string, error) {
 	var stanzas []string
 
 	peerScheme := "ldap"
@@ -2883,11 +2901,12 @@ func buildDatabaseSyncRepl(
 		if i == ordinal {
 			continue
 		}
-		// The caller's map is this pod's complete in-cluster set; a provider
-		// missing from it was skipped there, not here.
-		coord, known := inClusterRIDs[i]
-		if !known {
-			continue
+		// A miss is a refusal, never a skip: the map is meant to be this pod's
+		// COMPLETE in-cluster set, and a set short of one provider is that
+		// link's deletion under the atomic Replace (RID-PLAN hazard 2).
+		coord, err := stanzaRIDFor(inClusterRIDs, i)
+		if err != nil {
+			return nil, fmt.Errorf("in-cluster syncrepl stanza for pod %s-%d: %w", clusterName, ordinal, err)
 		}
 		rid := fmt.Sprintf("%03d", coord)
 		peerPodName := fmt.Sprintf("%s-%d", clusterName, i)
@@ -2974,7 +2993,7 @@ func buildDatabaseSyncRepl(
 		stanzas = append(stanzas, stanza)
 	}
 
-	return stanzas
+	return stanzas, nil
 }
 
 // buildDatabaseSyncReplRO computes syncrepl stanzas for a read-only replica.
@@ -2988,7 +3007,7 @@ func buildDatabaseSyncReplRO(
 	retryInterval, keepalive string,
 	deltaSync bool,
 	replNetIPs map[string]string,
-) []string {
+) ([]string, error) {
 	var stanzas []string
 
 	peerScheme := "ldap"
@@ -3021,9 +3040,15 @@ func buildDatabaseSyncReplRO(
 		// consumes from the same providers and is never one itself, so its
 		// caller passes a nil selfOrdinal and nothing is skipped (ADR-031
 		// Consequences, "read replicas stay free").
-		coord, known := inClusterRIDs[i]
-		if !known {
-			continue
+		//
+		// A miss refuses rather than skipping, and this is the builder where
+		// that mattered: a consumer-only cluster has no in-cluster providers,
+		// so every lookup missed, every stanza was skipped, and the pod's whole
+		// set was Replace()d with nothing. judgeClusterFleet now refuses that
+		// cluster shape outright; this is the second belt.
+		coord, err := stanzaRIDFor(inClusterRIDs, i)
+		if err != nil {
+			return nil, fmt.Errorf("read-only syncrepl stanza for provider %s-%d: %w", clusterName, i, err)
 		}
 		rid := fmt.Sprintf("%03d", coord)
 		peerPodName := fmt.Sprintf("%s-%d", clusterName, i)
@@ -3052,7 +3077,7 @@ func buildDatabaseSyncReplRO(
 		stanzas = append(stanzas, stanza)
 	}
 
-	return stanzas
+	return stanzas, nil
 }
 
 // applySyncreplToPod applies syncrepl + mirrormode to one pod's database entry.

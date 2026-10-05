@@ -13,6 +13,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -316,7 +317,38 @@ const (
 // Pure. Only OK, Reason and Message are meaningful; Segment is not a
 // cluster-level quantity and stays zero.
 func judgeClusterFleet(sc *ldapv1alpha1.SlapdCluster, layout ridcoord.Layout) ridSegmentVerdict {
-	panic("not implemented")
+	// 1. The fleet against the local block. Zero reads as one, the same way
+	//    every other reader of spec.replicas treats it.
+	replicas := sc.Spec.Replicas
+	if replicas == 0 {
+		replicas = 1
+	}
+	if replicas > layout.PodsPerSite {
+		return ridSegmentVerdict{
+			Reason: reasonRIDPodsPerSiteExceeded,
+			Message: fmt.Sprintf(
+				"spec.replicas is %d and the RID layout in force admits podsPerSite=%d, so pod ordinals %d..%d have no slot in the local block. Every syncrepl stanza of every database is withheld until the fleet fits: scale back to at most %d read-write pods, or widen spec.ridLayout.podsPerSite on the SlapdMesh (which renumbers the whole mesh once). Read replicas are not counted — an RO pod is never a provider.",
+				replicas, layout.PodsPerSite, layout.PodsPerSite, replicas-1, layout.PodsPerSite),
+		}
+	}
+
+	// 2. Read-only pods on a consumer-only cluster. They would be handed an
+	//    empty local block — no provider to consume from, and the read-only
+	//    builder writes no external stanzas — and an empty stanza set is
+	//    installed with one atomic Replace, which deletes whatever the pod had.
+	//    Admission already refuses the combination; so does this, because a CR
+	//    can reach a controller without passing admission and the cost of
+	//    trusting it here is that deletion.
+	if sc.IsConsumerOnly() && sc.Spec.ReadReplicas > 0 {
+		return ridSegmentVerdict{
+			Reason: reasonConsumerOnlyReadReplicas,
+			Message: fmt.Sprintf(
+				"spec.readReplicas is %d on a consumer-only cluster: a consumer-only cluster runs no in-cluster mesh (ADR-010), so its read-only pods have no provider to consume from and no stanza this operator could write for them. Set readReplicas to 0, or give the cluster a replication mode that makes its read-write pods providers.",
+				sc.Spec.ReadReplicas),
+		}
+	}
+
+	return ridSegmentVerdict{OK: true, Reason: reasonRIDSegmentOK}
 }
 
 // reasonRIDLayoutUnresolved — the layout could not be READ, so it is unknown
@@ -353,7 +385,23 @@ const reasonRIDLayoutUnresolved = "RIDLayoutUnresolved"
 // at the top of reconcileRIDSegment, which takes ridLayoutFor's error alongside
 // the layout, and its refusal is published and returned exactly like any other.
 func judgeRIDLayout(sc *ldapv1alpha1.SlapdCluster, layout ridcoord.Layout, err error) *ridSegmentVerdict {
-	panic("not implemented")
+	if err != nil {
+		return &ridSegmentVerdict{
+			Reason: reasonRIDLayoutUnresolved,
+			Message: fmt.Sprintf(
+				"the RID layout could not be read from SlapdMesh %q, so it is unknown rather than wrong: %v. Syncrepl stanzas are withheld until the read succeeds — defaulting a layout the mesh may have narrowed would renumber every stanza at this site and no other. Nothing here says a CR is wrong: look at the API server, the operator's RBAC and its cache.",
+				sc.Spec.MeshRef, err),
+		}
+	}
+	if verr := layout.Validate(); verr != nil {
+		return &ridSegmentVerdict{
+			Reason: reasonRIDLayoutInvalid,
+			Message: fmt.Sprintf(
+				"the RID layout in force admits no segment: %v. Fix spec.ridLayout on the SlapdMesh (podsPerSite and maxSites must each be at least 1, and their sum at most %d).",
+				verr, ridcoord.MaxRID),
+		}
+	}
+	return nil
 }
 
 // stanzaRIDFor is the one lookup into a resolved RID map, and it REFUSES a
@@ -375,5 +423,23 @@ func judgeRIDLayout(sc *ldapv1alpha1.SlapdCluster, layout ridcoord.Layout, err e
 // The error names the ordinal and the map it was not in, because the question a
 // human then has is "who was supposed to put it there".
 func stanzaRIDFor(rids map[int32]int32, ordinal int32) (int32, error) {
-	panic("not implemented")
+	rid, known := rids[ordinal]
+	if !known {
+		return 0, fmt.Errorf(
+			"no RID for provider ordinal %d: the resolved set holds %d ordinal(s) %v. "+
+				"A stanza set short of one provider is a deletion of that link under olcSyncRepl's atomic Replace, so the build stops here rather than emitting the rest",
+			ordinal, len(rids), sortedOrdinals(rids))
+	}
+	return rid, nil
+}
+
+// sortedOrdinals renders a RID map's keys in a stable order, so a refusal
+// message does not depend on Go's map iteration.
+func sortedOrdinals(rids map[int32]int32) []int32 {
+	out := make([]int32, 0, len(rids))
+	for ordinal := range rids {
+		out = append(out, ordinal)
+	}
+	slices.Sort(out)
+	return out
 }

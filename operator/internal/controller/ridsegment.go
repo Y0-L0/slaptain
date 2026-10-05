@@ -251,17 +251,34 @@ func (r *SlapdDatabaseReconciler) reconcileRIDSegment(
 	sc *ldapv1alpha1.SlapdCluster,
 	sd *ldapv1alpha1.SlapdDatabase,
 	layout ridcoord.Layout,
+	layoutErr error,
 ) (int32, *ridSegmentVerdict) {
 	if !sc.Spec.Replication.Enabled || !sd.ReplicationEnabled() {
 		meta.RemoveStatusCondition(&sd.Status.Conditions, ridSegmentConditionType)
 		return 0, nil
 	}
 
+	// The layout first, and WITH the error that produced it. A failed read and
+	// a declared-but-unusable ridLayout both arrive here as a zero Layout, and
+	// publishing "fix spec.ridLayout" for the first sends a human to a field
+	// that may be perfectly correct — see judgeRIDLayout.
+	if lv := judgeRIDLayout(sc, layout, layoutErr); lv != nil {
+		setCondition(&sd.Status.Conditions, ridSegmentCondition(sd, *lv))
+		refusal := *lv
+		return 0, &refusal
+	}
+
 	v := r.resolveRIDSegment(ctx, sd, layout)
 	if v.OK {
-		// The peer list is judged only once the segment is usable: a refusal
-		// naming a peer's siteIndex while the segment itself has no run of
-		// RIDs would send a human to the wrong field.
+		// Then the cluster's own shape, then the peer list — in the order a
+		// human can act on them, and each only once the question before it is
+		// answered. A refusal naming a peer's siteIndex while the segment has
+		// no run of RIDs at all would send them to the wrong field.
+		if fv := judgeClusterFleet(sc, layout); !fv.OK {
+			v = fv
+		}
+	}
+	if v.OK {
 		if pv := judgeExternalPeers(sc, layout); !pv.OK {
 			v = pv
 		}

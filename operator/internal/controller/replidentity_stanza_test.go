@@ -41,7 +41,7 @@ func TestSyncReplStanzasBindAsNodeLocalIdentity(t *testing.T) {
 	rwRIDs, _ := inClusterStanzaRIDs(layout, 1, 3, i32(0))
 	extRID, _ := externalStanzaRID(layout, 1, 0)
 	roRIDs, _ := inClusterStanzaRIDs(layout, 2, 3, nil)
-	rw := buildDatabaseSyncRepl(
+	rw, rwErr := buildDatabaseSyncRepl(
 		cluster, headless, ns, domain, suffix, dbName,
 		3, 0, "pw", false, rwRIDs, "60 +", "", true,
 		ldapv1alpha1.AccesslogSuffix(dbName),
@@ -51,10 +51,13 @@ func TestSyncReplStanzasBindAsNodeLocalIdentity(t *testing.T) {
 		}},
 		nil, false,
 	)
-	ro := buildDatabaseSyncReplRO(
+	ro, roErr := buildDatabaseSyncReplRO(
 		cluster, headless, ns, domain, suffix, dbName,
 		3, "pw", false, roRIDs, "60 +", "", true, nil,
 	)
+	if rwErr != nil || roErr != nil {
+		t.Fatalf("builder refused: rw=%v ro=%v", rwErr, roErr)
+	}
 
 	if len(rw) != 3 {
 		t.Fatalf("expected 2 in-cluster + 1 external stanza, got %d: %q", len(rw), rw)

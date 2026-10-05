@@ -93,13 +93,17 @@ func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 
 	build := func(ordinal int32, peers []resolvedExternalPeer) []string {
 		rids, _ := inClusterStanzaRIDs(ridcoord.DefaultLayout(), ridSegment, replicas, &ordinal)
-		return buildDatabaseSyncRepl(
+		stanzas, err := buildDatabaseSyncRepl(
 			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
 			replicas, ordinal, replPW,
 			true, rids, retry, keepalive, deltaSync,
 			ldapv1alpha1.AccesslogSuffix(dbName),
 			peers, nil, false,
 		)
+		if err != nil {
+			t.Fatalf("builder refused: %v", err)
+		}
+		return stanzas
 	}
 
 	t.Run("rpp=1 yields 1:1 diagonal", func(t *testing.T) {
@@ -197,13 +201,16 @@ func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 			Password:        "pw",
 			PlainSyncRepl:   true,
 		}}
-		stanzas := buildDatabaseSyncRepl(
+		stanzas, err := buildDatabaseSyncRepl(
 			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
 			replicas, 0, replPW,
 			true, nil, retry, keepalive, deltaSync,
 			ldapv1alpha1.AccesslogSuffix(dbName),
 			peers, nil, true, // consumerOnly=true
 		)
+		if err != nil {
+			t.Fatalf("builder refused: %v", err)
+		}
 		// No in-cluster peers means no slapd-1 or slapd-2 references.
 		for _, s := range stanzas {
 			if strings.Contains(s, headlessSvc) {
@@ -253,13 +260,16 @@ func TestBuildDatabaseSyncRepl_PerDatabaseLogbase(t *testing.T) {
 	t.Run("in-cluster stanzas carry the per-database logbase", func(t *testing.T) {
 		sd := &ldapv1alpha1.SlapdDatabase{}
 		sd.Name = dbName
-		stanzas := buildDatabaseSyncRepl(
+		stanzas, err := buildDatabaseSyncRepl(
 			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
 			replicas, 0, replPW,
 			true, rwRIDs, retry, keepalive, true,
 			ldapv1alpha1.ExternalLogBase(sd),
 			nil, nil, false,
 		)
+		if err != nil {
+			t.Fatalf("builder refused: %v", err)
+		}
 		if len(stanzas) == 0 {
 			t.Fatalf("no stanzas emitted")
 		}
@@ -271,12 +281,15 @@ func TestBuildDatabaseSyncRepl_PerDatabaseLogbase(t *testing.T) {
 	})
 
 	t.Run("RO stanzas carry the same per-database logbase", func(t *testing.T) {
-		stanzas := buildDatabaseSyncReplRO(
+		stanzas, err := buildDatabaseSyncReplRO(
 			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
 			replicas, replPW,
 			true, roRIDs, retry, keepalive, true,
 			nil,
 		)
+		if err != nil {
+			t.Fatalf("builder refused: %v", err)
+		}
 		if len(stanzas) == 0 {
 			t.Fatalf("no stanzas emitted")
 		}
@@ -299,13 +312,17 @@ func TestBuildDatabaseSyncRepl_PerDatabaseLogbase(t *testing.T) {
 		}}
 	}
 	buildExt := func(sd *ldapv1alpha1.SlapdDatabase, plain bool) []string {
-		return filterExternal(buildDatabaseSyncRepl(
+		stanzas, err := buildDatabaseSyncRepl(
 			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
 			replicas, 0, replPW,
 			true, rwRIDs, retry, keepalive, true,
 			ldapv1alpha1.ExternalLogBase(sd),
 			mkExternal(plain), nil, false,
-		), "10.9.9.9")
+		)
+		if err != nil {
+			t.Fatalf("builder refused: %v", err)
+		}
+		return filterExternal(stanzas, "10.9.9.9")
 	}
 
 	t.Run("delta external peer without override uses the derived suffix", func(t *testing.T) {
@@ -413,20 +430,25 @@ func TestBuildDatabaseSyncRepl_StanzaTimeouts(t *testing.T) {
 		Password:        "epw",
 	}}
 
+	rwStanzas, rwErr := buildDatabaseSyncRepl(
+		clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
+		replicas, 0, replPW,
+		true, rwRIDs, retry, keepalive, true,
+		ldapv1alpha1.ExternalLogBase(sd),
+		external, nil, false,
+	)
+	roStanzas, roErr := buildDatabaseSyncReplRO(
+		clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
+		replicas, replPW,
+		true, roRIDs, retry, keepalive, true,
+		nil,
+	)
+	if rwErr != nil || roErr != nil {
+		t.Fatalf("builder refused: rw=%v ro=%v", rwErr, roErr)
+	}
 	groups := map[string][]string{
-		"RW (in-cluster + external)": buildDatabaseSyncRepl(
-			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
-			replicas, 0, replPW,
-			true, rwRIDs, retry, keepalive, true,
-			ldapv1alpha1.ExternalLogBase(sd),
-			external, nil, false,
-		),
-		"read-only replica": buildDatabaseSyncReplRO(
-			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
-			replicas, replPW,
-			true, roRIDs, retry, keepalive, true,
-			nil,
-		),
+		"RW (in-cluster + external)": rwStanzas,
+		"read-only replica":          roStanzas,
 	}
 
 	for what, stanzas := range groups {

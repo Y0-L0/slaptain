@@ -64,6 +64,12 @@ const (
 	reasonSiteNotSelected       = "SiteNotSelected"
 	reasonMeshSitesInvalid      = "MeshSitesInvalid"
 	reasonServerIDCeiling       = "ServerIDCeilingExceeded"
+	// reasonSiteIndexPastLayout: a site's serverIDIndex is at or above this
+	// mesh's ridLayout.maxSites, so no syncrepl RID can address it (ADR-028
+	// amendment 2026-10-05). Its own reason, not ServerIDCeilingExceeded: that
+	// one names slapd's immovable 4095, this one names a field the deployer can
+	// widen.
+	reasonSiteIndexPastLayout = "SiteIndexPastRIDLayout"
 )
 
 // meshWiring is what a mesh contributes to one cluster at one site. A nil
@@ -113,6 +119,16 @@ func deriveClusterWiring(mesh *ldapv1alpha1.SlapdMeshSpec, spec ldapv1alpha1.Sla
 
 	if err := checkMeshSpecConflicts(mesh, spec); err != nil {
 		return nil, err
+	}
+
+	// ADR-028's amendment of 2026-10-05: ADR-031's layout governs the site
+	// index, and this ADR yields. Admission refuses an out-of-range index on
+	// the SlapdMesh itself; this refuses a mesh that reached the cluster
+	// another way, because the alternative is a cluster deriving a peer whose
+	// cross-site stanzas judgeExternalPeers will then refuse one layer down,
+	// with a message about a field the deployer never typed.
+	if err := validateSiteIndicesAgainstLayout(mesh.Sites, meshRIDLayout(mesh)); err != nil {
+		return nil, meshDerivationError(spec.MeshRef, err)
 	}
 
 	base, err := serverIDBaseForSite(mesh.Sites, identity)
@@ -255,6 +271,8 @@ func meshDerivationError(meshRef string, err error) error {
 		reason = reasonSiteNotInMesh
 	case errors.Is(err, errServerIDCeiling):
 		reason = reasonServerIDCeiling
+	case errors.Is(err, errSiteIndexPastLayout):
+		reason = reasonSiteIndexPastLayout
 	case errors.Is(err, errMeshSites):
 		reason = reasonMeshSitesInvalid
 	}

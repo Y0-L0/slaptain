@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
+	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/ridcoord"
 )
 
 // The mesh derivations of ADR-028 §4: from a SlapdMesh's site list plus this
@@ -64,6 +65,14 @@ var (
 	// errServerIDCeiling: the decade-per-site scheme has run out of room. See
 	// maxSiteIndex.
 	errServerIDCeiling = errors.New("site index exceeds the serverID decade ceiling")
+	// errSiteIndexPastLayout: a site declares a serverIDIndex at or above the
+	// mesh's own ridLayout.maxSites, so the remote block of every segment has
+	// no slot for it and no syncrepl RID can address that site (ADR-028
+	// amendment 2026-10-05, ADR-031 decision 4). The CEL rule on SlapdMeshSpec
+	// refuses it at admission; this is the same refusal for a mesh that
+	// reached the cluster another way — an object older than the rule, a
+	// restore, validation turned off.
+	errSiteIndexPastLayout = errors.New("site index has no slot in the RID layout")
 )
 
 const (
@@ -232,6 +241,65 @@ func serverIDBaseForSite(sites []ldapv1alpha1.MeshSite, identity string) (int32,
 			errServerIDCeiling, normalizeSiteName(identity), idx, maxSiteIndex)
 	}
 	return idx * serverIDDecade, nil
+}
+
+// validateSiteIndicesAgainstLayout refuses any site whose declared
+// serverIDIndex cannot be addressed, under the two ceilings that bound it.
+//
+// They are checked in that order on purpose. slapd's decade ceiling is a
+// property of the server and cannot be widened, so an index past it gets the
+// reason that says so; the layout's maxSites is configurable, so an index past
+// only that one gets a reason naming the field a human can actually change.
+//
+// The whole mesh is validated, not just this site: a peer whose index has no
+// remote slot breaks the stanza this cluster would write FOR that peer, and
+// the admission rule refuses the SlapdMesh object wholesale for the same
+// reason. Sites that declare no index are left to meshSiteIndex, which refuses
+// them with the message that question deserves.
+//
+// layout is the mesh's own, defaulted per axis — the same resolution
+// ridLayoutFor performs, repeated here rather than plumbed because this
+// derivation is pure and must stay so.
+func validateSiteIndicesAgainstLayout(sites []ldapv1alpha1.MeshSite, layout ridcoord.Layout) error {
+	for _, s := range sites {
+		if s.ServerIDIndex == nil {
+			continue
+		}
+		idx := *s.ServerIDIndex
+		if idx > maxSiteIndex {
+			return fmt.Errorf("%w: site %q declares serverIDIndex %d; the decade-per-site "+
+				"scheme allows at most %d before olcServerID's 4095 limit",
+				errServerIDCeiling, normalizeSiteName(s.Name), idx, maxSiteIndex)
+		}
+		if idx >= layout.MaxSites {
+			return fmt.Errorf("%w: site %q declares serverIDIndex %d and this mesh's "+
+				"spec.ridLayout.maxSites is %d, so a peer's RID slot (podsPerSite + %d) falls "+
+				"outside the %d-wide remote block and no syncrepl RID can address that site. "+
+				"Declare an index in 0..%d, or widen spec.ridLayout.maxSites — which renumbers "+
+				"the mesh once",
+				errSiteIndexPastLayout, normalizeSiteName(s.Name), idx, layout.MaxSites,
+				idx, layout.MaxSites, layout.MaxSites-1)
+		}
+	}
+	return nil
+}
+
+// meshRIDLayout is the layout a SlapdMesh spec declares, defaulted per axis.
+// The twin of ridLayoutFor's tail, for the pure derivation path which holds the
+// spec already and must do no I/O. A zero axis is unset rather than unusable,
+// because API-server defaulting runs only on the API server's path.
+func meshRIDLayout(mesh *ldapv1alpha1.SlapdMeshSpec) ridcoord.Layout {
+	layout := ridcoord.DefaultLayout()
+	if mesh == nil || mesh.RIDLayout == nil {
+		return layout
+	}
+	if mesh.RIDLayout.PodsPerSite != 0 {
+		layout.PodsPerSite = mesh.RIDLayout.PodsPerSite
+	}
+	if mesh.RIDLayout.MaxSites != 0 {
+		layout.MaxSites = mesh.RIDLayout.MaxSites
+	}
+	return layout
 }
 
 // externalPeersForSite derives the cross-site peer set for one site: every

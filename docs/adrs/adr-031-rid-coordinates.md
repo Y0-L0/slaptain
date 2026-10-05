@@ -505,7 +505,7 @@ use this ADR as an executable spec found all three missing (M2 test author,
 - **A zero `Layout` must refuse, not divide.** Defaulting runs on the API
   server's path and nowhere else, so a Go zero value, an unmarshalled CR or a
   cluster with no `meshRef` can reach the arithmetic with `P = S = 0`.
-  `ColumnWidth` and `MaxColumns` answer 0 for an unusable layout, and every
+  `SegmentWidth` and `MaxSegments` answer 0 for an unusable layout, and every
   coordinate function refuses with the invalid-layout error. The package holds
   this line itself rather than trusting a caller to have defaulted.
 
@@ -643,7 +643,11 @@ so nothing has to land in a particular order.
   would have fallen between two milestones.
 - **`podAddresses` mode gains a documented meaning for list position**: index =
   provider ordinal. Reordering the list renumbers.
-- **`uri` mode** is one opaque provider: its own `siteIndex`, ordinal 0.
+- **`uri` mode** is one opaque provider: ordinal 0, and — like `podAddresses` —
+  a `siteIndex` typed by hand, since neither mode is derived from a mesh and
+  nothing else can supply the remote block's index. Both modes are untested
+  (`docs/BACKLOG.md`), so this requirement reaches a user before it reaches a
+  test.
 - **Read replicas stay free.** They consume from the same providers, so their
   stanzas carry the same RIDs. An RO pod is never a provider, so its own ordinal
   never enters a coordinate.

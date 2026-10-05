@@ -80,6 +80,29 @@ itself guarded only by prose.
 
 ---
 
+## `spec.replicas` above the RID layout's `P` has no cluster-level diagnosis
+
+ADR-031 decision 5 says exceeding an axis is "a refusal naming which one and
+what the ceiling is". The pod axis is only ever checked per *coordinate*, deep
+in a stanza derivation — so a cluster scaled to 9 pods under `podsPerSite: 8`
+surfaces as **every database withholding every stanza**, with an
+`ErrOrdinalOutOfRange` buried in a log line, and nothing on the `SlapdCluster`
+naming `podsPerSite` as the thing to change.
+
+The refusal itself is correct and tested; it is the diagnosis that is missing,
+and the symptom points at the databases rather than at the cluster that caused
+it.
+
+**Fix:** a `SlapdCluster` condition checking `spec.replicas` and the mesh's
+`readReplicas` against the layout's `P`, named so the message says which to
+change — the replica count or the layout. Red-first: a cluster at `replicas: 9`
+under `P = 8` reports it on the cluster, not only as a per-database withhold.
+
+Found 2026-10-05 by the M4a test author, turning ADR-031 decision 5 into cases.
+It belongs to no milestone in `docs/RID-PLAN.md`.
+
+---
+
 ## A discovery refusal is invisible outside the operator log
 
 `reconcileExternalPeerStatuses` writes a discovery error into

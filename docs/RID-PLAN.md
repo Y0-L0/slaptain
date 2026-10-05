@@ -172,7 +172,10 @@ which lifts the temporary 0..9 ceiling back to `0..C-1`.
 
 **Owns.** `operator/internal/controller/slapddatabase_controller.go` (the
 stanza builders and their callers), `operator/internal/controller/ridsegment.go`
-(the bridge's grave, and `ridLayoutFor`),
+(the bridge's grave, and `ridLayoutFor`), `externalPeersForSite` in
+`operator/internal/controller/mesh_derive.go` — the derived peers must carry
+their site's `serverIDIndex` as `siteIndex`, or a mesh cluster's cross-site
+stanzas have no remote coordinate at all —
 `operator/api/v1alpha1/slapdcluster_types.go` (`externalPeers[].siteIndex` and
 its CEL rule), the generated CRDs, and their tests.
 

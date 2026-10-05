@@ -422,9 +422,23 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				"database", sd.Name)
 			pendingWork = true
 		default:
-			skipped, err := r.reconcileReplication(ctx, sc, sd, configPW, healthyPods, ridLayout, ridSegment)
+			skipped, peerRefusal, err := r.reconcileReplication(ctx, sc, sd, configPW, healthyPods, ridLayout, ridSegment)
 			if err != nil {
 				return ctrl.Result{}, fmt.Errorf("reconcileReplication: %w", err)
+			}
+			// A peer that could not be resolved is a REFUSAL, not the ordinary
+			// deferral `skipped` carries: it withholds every stanza of this
+			// database, in-cluster ones included, and a human has to be able to
+			// read why. It is published on the same condition and routed into
+			// the same phase as a refused segment, because it is the same
+			// withhold (ADR-031 decision 6) — the two are told apart only by
+			// the reason, which is the thing alerting and slctl key on.
+			if peerRefusal != nil {
+				log.Info("syncrepl configuration withheld: an external peer of this cluster "+
+					"could not be resolved (ADR-031); the pods keep the stanzas they have",
+					"database", sd.Name, "reason", peerRefusal.Reason, "message", peerRefusal.Message)
+				setCondition(&sd.Status.Conditions, ridSegmentCondition(sd, *peerRefusal))
+				ridRefusal = peerRefusal
 			}
 			if skipped {
 				pendingWork = true
@@ -2474,7 +2488,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 	healthyPods map[string]bool,
 	layout ridcoord.Layout,
 	segment int32,
-) (bool, error) {
+) (bool, *ridSegmentVerdict, error) {
 	log := logf.FromContext(ctx)
 
 	replicas := sc.Spec.Replicas
@@ -2490,7 +2504,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 	hasInClusterMesh := replicas > 1
 	hasExternalPeers := len(sc.Spec.Replication.ExternalPeers) > 0
 	if !sc.Spec.Replication.Enabled || (!hasInClusterMesh && !hasExternalPeers) {
-		return false, nil
+		return false, nil, nil
 	}
 
 	headlessSvc := sc.Name + "-headless"
@@ -2498,15 +2512,28 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 
 	replPassword, err := r.getDatabaseReplPassword(ctx, sd)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 
 	// Resolve external peers. PodAddresses- and discovery-mode peers carry a list of
 	// per-pod URIs and a ReplicasPerPeer fan-out factor; URI-mode peers carry a single
 	// URI. Diagonal-first selection (URIs[(ordinal + k) % len(URIs)]) is applied
 	// per-local-pod inside buildDatabaseSyncRepl.
+	//
+	// One peerResolution is recorded per DECLARED peer, failures included: a
+	// peer that drops out of this loop without an outcome is the short set one
+	// level up, and judgePeerResolutions refuses it as unknown rather than
+	// approving the deletion it describes (ADR-031 decision 6, RID-PLAN
+	// hazard 2).
 	var externalPeers []resolvedExternalPeer
+	outcomes := make([]peerResolution, 0, len(sc.Spec.Replication.ExternalPeers))
 	for _, ep := range sc.Spec.Replication.ExternalPeers {
+		outcome := peerResolution{
+			Name:               ep.Name,
+			Discovery:          ep.Discovery != nil,
+			BindPasswordSecret: ep.BindPasswordSecretName,
+		}
+
 		// The link's coordinate, before anything about the far end is
 		// resolved: the RID names the LINK to this peer SITE, not the remote
 		// pod that happens to answer it (ADR-031 decision 1), so reselecting
@@ -2521,13 +2548,13 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 		if ep.SiteIndex == nil {
 			log.Info("syncrepl stanzas withheld: external peer declares no siteIndex, "+
 				"so its link has no RID (ADR-031 decision 4)", "peer", ep.Name)
-			return true, nil
+			return true, nil, nil
 		}
 		peerRID, err := externalStanzaRID(layout, segment, *ep.SiteIndex)
 		if err != nil {
 			log.Info("syncrepl stanzas withheld: no RID for the link to this peer site",
 				"peer", ep.Name, "siteIndex", *ep.SiteIndex, "err", err)
-			return true, nil
+			return true, nil, nil
 		}
 
 		tlsCACertPath := ""
@@ -2541,8 +2568,12 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 			if err := r.Get(ctx, client.ObjectKey{
 				Name: ep.BindPasswordSecretName, Namespace: sc.Namespace,
 			}, secret); err != nil {
-				log.Info("skipping external peer: cannot read bind password secret",
-					"peer", ep.Name, "err", err)
+				// NOT a skip. The credential is unknown, and a stanza set
+				// built without this peer is a deletion of its links on every
+				// pod. The outcome is recorded and judged after the loop,
+				// which withholds the whole pass.
+				outcome.SecretErr = err
+				outcomes = append(outcomes, outcome)
 				continue
 			}
 			password = string(secret.Data["password"])
@@ -2563,11 +2594,11 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 					break
 				}
 			}
-			if len(providers) == 0 {
-				log.Info("skipping discovery peer: no providers discovered yet",
-					"peer", ep.Name)
-				continue
-			}
+			// An empty provider list is deliberately NOT skipped here: it
+			// falls through to the address count below, where
+			// judgePeerResolutions turns it into a withhold naming this peer.
+			// M1 publishes an unparseable remote pod name and a duplicate
+			// remote ordinal as exactly this state.
 		} else {
 			providers = providersFromPodAddresses(ep.PodAddresses)
 		}
@@ -2583,6 +2614,11 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 		bindDN, bindPassword := externalBindIdentity(
 			ep.BindDN, ep.BindPasswordSecretName, password, sd.Name, replPassword)
 
+		// The peer's addresses, as the URIs a stanza would carry. A uri-mode
+		// peer contributes exactly one, verbatim; a podAddresses or discovery
+		// peer contributes one per provider, with this cluster's scheme and
+		// port.
+		var uris []string
 		if len(podAddrs) > 0 {
 			port := ep.Port
 			if port == 0 {
@@ -2595,32 +2631,50 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 					port = 1024
 				}
 			}
-			uris := make([]string, len(podAddrs))
+			uris = make([]string, len(podAddrs))
 			for i, addr := range podAddrs {
 				uris[i] = fmt.Sprintf("%s://%s:%d", scheme, addr, port)
 			}
-			externalPeers = append(externalPeers, resolvedExternalPeer{
-				Name:            ep.Name,
-				RID:             peerRID,
-				URIs:            uris,
-				ReplicasPerPeer: rpp,
-				BindDN:          bindDN,
-				Password:        bindPassword,
-				TLSCACertPath:   tlsCACertPath,
-				PlainSyncRepl:   ep.SyncMode == "plain",
-			})
 		} else {
-			externalPeers = append(externalPeers, resolvedExternalPeer{
-				Name:            ep.Name,
-				RID:             peerRID,
-				URIs:            providerAddresses(providersFromURI(ep.URI)),
-				ReplicasPerPeer: 1,
-				BindDN:          bindDN,
-				Password:        bindPassword,
-				TLSCACertPath:   tlsCACertPath,
-				PlainSyncRepl:   ep.SyncMode == "plain",
-			})
+			uris = providerAddresses(providersFromURI(ep.URI))
+			// A uri peer is one provider, so the fan-out does not apply.
+			rpp = 1
 		}
+
+		outcome.Addresses = len(uris)
+		outcomes = append(outcomes, outcome)
+		if len(uris) == 0 {
+			// Judged after the loop, with every other peer's outcome, so that
+			// the condition names all of them at once.
+			continue
+		}
+
+		externalPeers = append(externalPeers, resolvedExternalPeer{
+			Name:            ep.Name,
+			RID:             peerRID,
+			URIs:            uris,
+			ReplicasPerPeer: rpp,
+			BindDN:          bindDN,
+			Password:        bindPassword,
+			TLSCACertPath:   tlsCACertPath,
+			PlainSyncRepl:   ep.SyncMode == "plain",
+		})
+	}
+
+	// The last of RID-PLAN hazard 2's three short-set paths. Every declared
+	// peer has to have resolved before ANY stanza is written, because
+	// olcSyncRepl is installed with one atomic Replace: a set omitting one
+	// peer deletes that peer's links from every pod of the site rather than
+	// leaving them alone. So the refusal returns from HERE — before the first
+	// applySyncreplToPod — rather than skipping the peer and converging the
+	// rest, and it returns as a verdict rather than as the plain `skipped`
+	// bool the unhealthy-pod path uses, so the caller can publish it on
+	// SyncreplStanzasReady and tell the two apart. ADR-031's Consequences
+	// state the price: a permanently broken peer now blocks this database's
+	// in-cluster stanzas too, and the message is the whole mitigation.
+	if v := judgePeerResolutions(sc.Spec.Replication.ExternalPeers, outcomes); !v.OK {
+		refusal := v
+		return true, &refusal, nil
 	}
 
 	skipped := false
@@ -2683,7 +2737,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 			log.Info("syncrepl stanzas withheld: no RID for this cluster's in-cluster "+
 				"providers (ADR-031); the pods keep the stanzas they have",
 				"database", sd.Name, "segment", segment, "err", err)
-			return true, nil
+			return true, nil, nil
 		}
 
 		desired, err := buildDatabaseSyncRepl(
@@ -2704,7 +2758,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 			log.Info("syncrepl stanzas withheld: the stanza set for this pod could not be "+
 				"completed (ADR-031); the pods keep the stanzas they have",
 				"database", sd.Name, "pod", podName, "err", err)
-			return true, nil
+			return true, nil, nil
 		}
 
 		if err := r.applySyncreplToPod(ctx, host, configPW, sd.Spec.Suffix, desired, multiProvider); err != nil {
@@ -2740,7 +2794,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 				log.Info("syncrepl stanzas withheld for read-only pods: no RID for this "+
 					"cluster's in-cluster providers (ADR-031)",
 					"database", sd.Name, "segment", segment, "err", err)
-				return true, nil
+				return true, nil, nil
 			}
 
 			desired, err := buildDatabaseSyncReplRO(
@@ -2755,7 +2809,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 				log.Info("syncrepl stanzas withheld for read-only pod: its stanza set could "+
 					"not be completed (ADR-031); the pod keeps the stanzas it has",
 					"database", sd.Name, "pod", podName, "err", err)
-				return true, nil
+				return true, nil, nil
 			}
 
 			if err := r.applySyncreplToPod(ctx, host, configPW, sd.Spec.Suffix, desired, ""); err != nil {
@@ -2766,7 +2820,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 		}
 	}
 
-	return skipped, nil
+	return skipped, nil, nil
 }
 
 // externalBindIdentity returns the bind DN and password an external peer's
@@ -2952,9 +3006,19 @@ func buildDatabaseSyncRepl(
 			}
 		}
 
+		// Unreachable since M4b: reconcileReplication refuses the whole pass
+		// when any declared peer resolves to no address, and appends only
+		// peers that carry at least one URI. It is kept as an ERROR rather
+		// than deleted or left as the `continue` it was, because the
+		// consequence of being wrong about that is silent: skipping the peer
+		// here hands applySyncreplToPod a set short of this link, and the
+		// atomic Replace deletes it from the pod (RID-PLAN hazard 2). A
+		// builder error withholds the pass; a continue converges a deletion.
 		n := int32(len(ep.URIs))
 		if n == 0 {
-			continue
+			return nil, fmt.Errorf(
+				"external peer %q resolved to no provider URI: a stanza set short of this peer's link is a deletion of it under olcSyncRepl's atomic Replace, so the build stops here rather than emitting the rest",
+				ep.Name)
 		}
 
 		// Per-peer delta opts: omit logbase / syncdata=accesslog when the peer

@@ -11,6 +11,9 @@ You may obtain a copy of the License at
 package controller
 
 import (
+	"fmt"
+	"strings"
+
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
@@ -157,6 +160,85 @@ type peerResolution struct {
 // Only OK, Reason and Message are meaningful in the returned verdict; Segment
 // is not a peer-level quantity and stays zero.
 func judgePeerResolutions(peers []ldapv1alpha1.ExternalPeer, outcomes []peerResolution) ridSegmentVerdict {
-	// Not implemented: M4b's implementer fills this in.
-	return ridSegmentVerdict{}
+	// Outcomes are matched to peers BY NAME, not by position. A caller that
+	// still skipped a peer produces a shorter slice, and a positional read
+	// would then attribute peer 3's outcome to peer 2 — judging the wrong
+	// thing rather than noticing the gap. First entry wins on a duplicate
+	// name: a second outcome for one peer is the same pass reporting twice,
+	// and the first is the one the resolution loop acted on.
+	byName := make(map[string]*peerResolution, len(outcomes))
+	for i := range outcomes {
+		if _, seen := byName[outcomes[i].Name]; !seen {
+			byName[outcomes[i].Name] = &outcomes[i]
+		}
+	}
+
+	// Peer-major, in DECLARED order: the first failing peer decides the
+	// reason, every failing peer is named. Mirrors the live loop, which
+	// encounters these three faults peer by peer.
+	reason := ""
+	var clauses []string
+	for i := range peers {
+		r, clause := judgeOnePeerResolution(peers[i], byName[peers[i].Name])
+		if r == "" {
+			continue
+		}
+		if reason == "" {
+			reason = r
+		}
+		clauses = append(clauses, clause)
+	}
+	if reason == "" {
+		return ridSegmentVerdict{OK: true, Reason: reasonRIDSegmentOK}
+	}
+
+	// The second sentence is the whole mitigation ADR-031 promises for this
+	// decision's behaviour change: a human whose in-cluster replication
+	// stopped after declaring a peer has to learn from this one condition
+	// that the two are connected, not infer it from a log line.
+	return ridSegmentVerdict{
+		Reason: reason,
+		Message: fmt.Sprintf(
+			"%s. Every syncrepl stanza of this database is withheld this pass, the in-cluster ones included: olcSyncRepl is installed with one atomic Replace, so a set omitting a peer's links deletes them from every pod (ADR-031 decision 6). The pods keep the stanzas they have, and the withhold lifts by itself once the peer resolves.",
+			strings.Join(clauses, "; ")),
+	}
+}
+
+// judgeOnePeerResolution is the per-peer half: the reason this peer could not
+// be resolved, and the clause naming it, or ("", "") when it resolved.
+//
+// Order within the peer is deliberate and is the one thing a second reader is
+// likely to get wrong: an unreadable Secret outranks an empty address list. A
+// peer can fail both ways at once, and reporting the empty provider list would
+// send a human to the remote cluster when it is the LOCAL Secret that failed —
+// and discovery may never have been attempted at all.
+func judgeOnePeerResolution(peer ldapv1alpha1.ExternalPeer, outcome *peerResolution) (string, string) {
+	// No outcome at all: unknown, which withholds (RID-PLAN hazard 3). This is
+	// the short set caught one level up — a resolution loop that `continue`s
+	// past a peer drops its stanzas AND its outcome, and a judge inspecting
+	// only what it was handed would approve the deletion that describes.
+	if outcome == nil {
+		return reasonPeerResolutionIncomplete, fmt.Sprintf(
+			"external peer %q produced no resolution outcome this pass, so whether its cross-site link resolved is unknown rather than good; the resolution loop skipped it",
+			peer.Name)
+	}
+
+	if outcome.SecretErr != nil {
+		return reasonPeerBindPasswordUnreadable, fmt.Sprintf(
+			"external peer %q names bind-password Secret %q and it could not be read: %v (an unreadable Secret is not an empty password — look at the Secret and at the operator's RBAC for it)",
+			outcome.Name, outcome.BindPasswordSecret, outcome.SecretErr)
+	}
+
+	if outcome.Addresses > 0 {
+		return "", ""
+	}
+
+	if outcome.Discovery {
+		return reasonPeerProvidersUndiscovered, fmt.Sprintf(
+			"external peer %q has discovered no provider: on a first bringup discovery simply has not answered yet, and it is also what a bad kubeconfig, a remote RBAC denial, a remote cluster with no Running pods, or a remote pod the operator refused to index all look like from here — go look at the remote cluster and at the kubeconfig Secret that reaches it",
+			outcome.Name)
+	}
+	return reasonPeerAddressesEmpty, fmt.Sprintf(
+		"external peer %q resolved to no address at all: it declares neither uri nor podAddresses, nor discovery, so there is nothing for a stanza to connect to and nothing that resolves on a later pass — fix the peer on the SlapdCluster",
+		outcome.Name)
 }

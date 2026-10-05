@@ -779,7 +779,7 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 			}
 
 			// Per database: a peer is reached from EVERY replicated database,
-			// each with its own stanza (its own ridBase, its own logbase —
+			// each with its own stanza (its own ridSegment, its own logbase —
 			// ADR-003, ADR-019 R9). Reading one database's stanzas here meant a
 			// database whose cross-site wiring was missing entirely reported
 			// clean as long as another database's was present.

@@ -28,7 +28,7 @@ errcheck 40, lll 31, modernize 15, goconst 13, prealloc 13, gocyclo 9, unused 4,
 unparam 2, revive 1 (uncapped counts, unchanged by this change). Worth a separate
 sweep.
 
-## Three paths hand `Replace("olcSyncRepl")` a short set with no error
+## ~~Three paths hand `Replace("olcSyncRepl")` a short set with no error~~ — DONE (2026-10-05, ADR-031 M4b)
 
 `olcSyncRepl` is installed with one atomic
 `modReq.Replace("olcSyncRepl", desired)`, so a set shorter than the pod's
@@ -77,6 +77,21 @@ the pod.
 **Related:** the same review found `syncreplMatch` and `applySyncreplToPod` have
 no test coverage at all, so the atomic `Replace` that makes this dangerous is
 itself guarded only by prose.
+
+**CLOSED by ADR-031 M4b.** All three paths now withhold the database's whole
+stanza convergence and report, instead of skipping the peer: an unreadable
+bind-password Secret, a discovery peer with no providers, and a peer that
+resolved to no address, each with its own reason so a human is told which to
+fix. The builder's `len(URIs) == 0` guard became unreachable and was converted
+to an error rather than deleted, because being wrong about unreachability is
+silent in one direction and loud in the other.
+
+Two things the fix carried with it, both worth knowing. The refusal now blocks
+**in-cluster** stanzas too, so a permanently broken peer stops more than its own
+links — recorded in ADR-031's Consequences, with the "preserve the unresolved
+peer's stanzas" refinement in this file as the follow-up. And the related gap
+above is unchanged: `syncreplMatch` and `applySyncreplToPod` still have no
+tests, so the atomic `Replace` remains guarded by prose.
 
 ---
 

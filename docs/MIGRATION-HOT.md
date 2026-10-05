@@ -45,7 +45,7 @@ admin on the source cluster runs it.
 **Two implementation gaps to know before you start:**
 
 1. **ServerID collision validation is not shipped.** Only
-   `spec.replication.serverIDBase` (SlapdCluster) and `spec.replication.ridBase` (per
+   `spec.replication.serverIDBase` (SlapdCluster) and `spec.replication.ridSegment` (per
    SlapdDatabase) exist; there is no webhook that rejects a slaptain ServerID overlapping
    the source's. Pick `serverIDBase` **by hand** to clear the source's ServerIDs and
    verify it manually (§2) — getting this wrong silently stops replication (ADR-011 §3,
@@ -86,8 +86,8 @@ webhook is not shipped, plan and verify ServerIDs by hand.
 
 RIDs need no coordination at all — a `rid` is a consumer's *local* handle for one syncrepl
 directive and never crosses the wire, so slaptain and the source number their own stanzas
-independently and cannot collide (ADR-011). `ridBase` remains slaptain's *internal* per-DB
-concern (below), unaffected by the source.
+independently and cannot collide (ADR-011). `ridSegment` remains slaptain's *internal*
+per-DB concern (below), unaffected by the source.
 
 **Record the source's ServerIDs** (from `MIGRATION-LEGACY-SOURCE.md §5`):
 
@@ -110,9 +110,12 @@ spec:
     serverIDBase: 500          # slaptain pods get 501, 502, 503, 504 — clear of 1xx/2xx
 ```
 
-`ridBase` is independent of the source. Give each slaptain database a distinct `ridBase`
-(the conventional defaults `100`/`200`/`300` are fine) so slaptain's *own* databases don't
-overlap each other — there is nothing to coordinate with the source here.
+`ridSegment` is independent of the source. Give each slaptain database a distinct
+`ridSegment` — `0`, `1`, `2`, … — so slaptain's *own* databases do not overlap each other;
+there is nothing to coordinate with the source here. Since ADR-031 the operator refuses a
+duplicate at reconcile and the charts refuse to render one, so a collision is reported
+rather than silently shared. If you are converting a pre-ADR-031 manifest, the segment is
+the old base divided by 100: `100 → 1`, `200 → 2`.
 
 **Verification (manual, since there's no webhook):** write the source ServerIDs and the
 computed slaptain range into your per-cutover runbook and eyeball that they're disjoint.
@@ -434,7 +437,7 @@ harmless" before bothering.
 | `SlapdCluster.spec.replication.serverIDBase` | Shifts pod ServerIDs to `base+ordinal+1`. Set to avoid source collision. |
 | `SlapdCluster.spec.replication.externalPeers[].syncMode` | `delta` (default) or `plain`. Use `plain` for a source that doesn't run delta-syncrepl. |
 | `SlapdCluster.spec.replication.externalPeers[].{uri,bindDN,bindPasswordSecretName,tlsSecretName}` | Source connection. |
-| `SlapdDatabase.spec.replication.ridBase` | Per-DB RID base — slaptain-internal uniqueness only; independent of the source. |
+| `SlapdDatabase.spec.replication.ridSegment` | Per-DB RID segment (ADR-031) — slaptain-internal uniqueness only; independent of the source. |
 
 | Status / condition | Meaning |
 |---|---|

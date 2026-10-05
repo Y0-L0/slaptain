@@ -10,62 +10,56 @@ on `feat/rid-allocation-ledger` and is **reference material, not a base** — se
 
 ---
 
-## Seven hazards to read before writing any code
+## Five hazards to read before writing any code
+
+The list was seven. Three of them — release gated on database absence, the
+stale-read renumber, and a failed List reading as an empty database set — were
+properties of allocating the segment into status, and went away with it
+(ADR-031 Option 7). What is left is what the scheme needs regardless.
 
 1. **One coordinate function, not two.**
 
    ```
-   rid = 1 + column·M + offset          M = P + S
+   rid = 1 + segment·M + offset          M = P + S
    offset <  P   →  a provider at my own site, pod ordinal `offset`
    offset >= P   →  my link to peer site `offset − P`
    ```
 
    | term | is | from |
    |---|---|---|
-   | `column` | which database (0..C-1) | the ledger — the one allocated term |
+   | `segment` | which database | `spec.replication.ridSegment`, declared |
    | local block | `P` slots, indexed by the provider's pod ordinal | structural |
    | remote block | `S` slots, indexed by the peer's `siteIndex` | `serverIDIndex`, or `externalPeers[].siteIndex` off-mesh |
-   | `P`, `S`, `C` | 8 pods/site, 12 sites, 49 databases | `SlapdMesh.spec.ridLayout`, defaulted |
+   | `P`, `S`, `C` | 8 pods/site, 12 sites, 49 segments | `SlapdMesh.spec.ridLayout`, defaulted |
 
-   `P + S`, not `P · S`: a pod holds at most one link per peer site
-   (ADR-031 decision 9), so the remote axis is sites and not site×pod. It is
-   written once, in `internal/ridcoord`, and every caller2. **Withhold means leave alone, not delete.** `olcSyncRepl` is installed with
-   one atomic `modReq.Replace`, so a set shorter than the pod's current one is a
-   deletion. Every refusal path — column unassigned, coordinate out of envelope,
-   an unresolvable provider — must skip that pod's convergence entirely and
-   leave its stanzas untouched. ADR-027's identity gate has the right shape.
+   Written once, in `internal/ridcoord`, and every caller goes through it —
+   the stanza builder, the validator, `slctl decode`. Two spellings do not fail
+   to compile; they produce a stanza carrying another provider's number, which
+   slapd accepts in silence.
 
-3. **A column may only be released when the database is gone.** Reusing a
-   column whose predecessor's stanzas still sit on a pod hands the new database
-   the old one's RIDs. ADR-005's finalizer guarantees teardown precedes release,
-   so the rule is: free a column when the `SlapdDatabase` is absent from the
-   List, never on `deletionTimestamp`, never on `suspend`, never on
-   `replication.enabled: false`.
+2. **Withhold means leave alone, not delete.** `olcSyncRepl` is installed with
+   one atomic `modReq.Replace`, so a set shorter than the pod's current one is
+   a deletion. Every refusal — a colliding segment, a segment outside the
+   layout, an unresolvable provider — must skip that pod's convergence entirely
+   and leave its stanzas untouched. ADR-027's identity gate has the shape.
 
-4. **A stale read of the column map renumbers the cluster.** An empty read of a
-   populated map reads as "fresh cluster", and allocating from it reassigns
-   every column. Unlike every other status field here, the map is derived from
-   its own previous value, so the write carries the `resourceVersion` it was
-   derived from and a 409 requeues.
+3. **An unprovable uniqueness is not a proven one.** The collision check reads
+   the cluster's other `SlapdDatabase`s. If that read fails, uniqueness is
+   unknown — and unknown must withhold, not converge. Treating a failed List as
+   "no siblings, therefore no collision" is how two databases end up writing
+   stanzas that share RIDs, which slapd accepts in silence.
 
-5. **A failed List is not an empty database set.** A transient list error must
-   requeue with the ledger untouched. Treating it as "no databases" frees every
-   column of the databases it failed to see — hazard 3 at fleet scale.
+4. **Parse the ordinal, never infer it from list position.** Discovery drops
+   non-`Running` pods and (before M1) sorted by IP string, so position carries
+   no identity. The ordinal comes from the StatefulSet pod name; a name that
+   will not parse is a refusal naming the pod. Landed in M1.
 
-6. **Parse the ordinal, never infer it from list position.** Discovery today
-   drops non-`Running` pods and sorts the survivors by IP string, so position
-   carries no identity at all. The ordinal comes from the StatefulSet pod name;
-   a name that will not parse is a **refusal naming the pod**, never a
-   positional fallback. This is the hazard that makes hazard 1 reachable.
-
-7. **The local site's own index must not collide with a declared peer's.**
+5. **The local site's own index must not collide with a declared peer's.**
    Under `meshRef` both come from `serverIDIndex` and ADR-028 enforces
    uniqueness. Off-mesh, self is `serverIDBase / 100` while peers declare
-   `siteIndex` directly, so a hand-set `serverIDBase` that is not a multiple of
-   100 — or simply equal to a peer's decade — silently puts two providers in one
-   row. Refuse at the point where both are known.
-
----
+   `siteIndex`, so a hand-set base that is not a multiple of 100 — or simply
+   equal to a peer's decade — silently puts two providers in one slot. Refuse
+   where both are known.
 
 ## Milestones
 
@@ -124,38 +118,56 @@ decision 1 and 5).
 **Done when** the package is green and the envelope arithmetic is proven by
 test rather than by comment.
 
-### M3 — The column ledger
+### M3 — `spec.replication.ridSegment`, and the collision refusal
 
-**Goal.** `SlapdCluster.status.ridColumns`, allocated lowest-free by the
-SlapdCluster controller, released only on database absence (hazard 3), guarded
-on `resourceVersion` (hazard 4), requeue-on-list-failure (hazard 5),
-`RIDLedgerHealthy` condition with reasons that name the human action.
+**Goal.** The declared field, its bounds and CEL, the chart validation that
+follows it, and the pure detector that refuses two databases sharing a segment
+or a segment outside the layout.
 
-**Owns.** `operator/api/v1alpha1/slapdcluster_types.go` (status field — after
-M1 has landed), `operator/internal/controller/slapdcluster_ridledger.go` (new),
-the one call site in `slapdcluster_controller.go`, the `applyStatusAt` helper,
-and their tests.
+**Owns.** `operator/api/v1alpha1/slapddatabase_types.go` (the field, replacing
+`ridBase`), `operator/api/v1alpha1/slapdmesh_types.go` (`ridLayout`),
+`operator/internal/controller/ridsegment.go` (new — the detector and the layout
+lookup), `charts/slapd/templates/_helpers.tpl` and
+`charts/slapd-mesh/templates/_helpers.tpl` (the rule survives, renamed), the
+generated CRDs, and their tests.
 
-**Depends on** M2 (envelope refusal), M1 (file ownership only).
+**Where the check lives: the SlapdDatabase controller, not the cluster.** It is
+the controller that writes stanzas, so it is the one that must refuse to. A
+database lists its siblings, finds any that declare its own segment, and
+withholds its own convergence — symmetric, so both sides of a collision stall
+and neither wins. No cross-controller state, no condition to read, no ordering.
+A cluster-level summary condition is worth having later and is in
+`docs/BACKLOG.md`, not here.
 
-**Salvage.** `applyStatusAt` and its doc comment lift almost verbatim from the
-withdrawn branch; move it next to `applyStatus` rather than leaving it in
-`slapdcluster_restore.go`. The condition-reason shape lifts too; the reason set
-shrinks.
+**Red-first.** The detector is pure: given this database, its siblings, and the
+layout, return a verdict. Cases: a clean set; two databases colliding (named,
+both); a segment at `C` and above; a negative; a database of another cluster
+ignored; `replication.enabled: false` siblings still counted, because their
+stanzas may exist from before the flag flipped.
 
-**Roles.** test-author → implementer → **two reviewers** (conformance and
-correctness). This milestone carries hazards 3, 4 and 5 — the silent ones.
+**Salvage.** `internal/ridcoord` is unchanged and already green. The three
+reason constants and the withhold shape lift from the withdrawn M3; the
+allocator, the status field, `applyStatusAt` and the two envtest specs do not.
 
-**Done when** a column survives unrelated reconciles, a deleted database frees
-its column, a list error changes nothing, and a stale-read write 409s.
+**Roles.** test-author → implementer → reviewer (correctness). One reviewer,
+not two: the hazards that justified a second axis went with the ledger.
+
+**Done when** a colliding pair both report `Degraded` naming each other and
+neither writes a stanza, a clean set converges, and `ridBase` is gone from the
+API, the charts and the fixtures.
 
 ### M4 — Consumption, the gate, and off-mesh site indices
 
-**Goal.** Stanzas take their RID from `ridcoord` keyed on the provider;
-`externalPeers[].siteIndex` added with a CEL uniqueness rule over the peer list;
-self index derived from `serverIDBase / 100` with the collision refusal
-(hazard 7); the gate withholds a database whose column is unassigned and leaves
-its stanzas alone (hazard 2).
+**Goal.** Stanzas take their RID from `ridcoord`, keyed on the database's
+declared segment and the provider's identity; `externalPeers[].siteIndex` added
+with a CEL uniqueness rule over the peer list; self index derived from
+`serverIDBase / 100` with the collision refusal (hazard 5); the withhold from
+M3's detector wired into stanza convergence, leaving existing stanzas alone
+(hazard 2).
+
+**Also M4's, and it is the release gate** named below: the three pre-existing
+paths that hand `Replace` a short set (`docs/BACKLOG.md`). M1 added two triggers
+to one of them; nothing ships until this closes.
 
 **Owns.** `operator/api/v1alpha1/slapdcluster_types.go` (the peer field),
 `operator/internal/controller/slapddatabase_controller.go`,
@@ -196,8 +208,8 @@ RID on every pod decodes to the provider its stanza names.
 
 ### M6 — Remove `ridBase`, and the tooling that reads RIDs
 
-**Goal.** Delete the field, its CEL rule, its `Maximum=949`, and both Helm
-uniqueness checks. `slctl`: `rid-uniqueness` stays, `rid-ledger-match` becomes
+**Goal.** The `ridBase` → `ridSegment` rename lands in M3; M6 is what follows
+it through the docs and the tooling. `slctl`: `rid-uniqueness` stays, `rid-ledger-match` becomes
 ledger-and-coordinate agreement, and a `decode` surface appears — it costs
 nothing now that a RID is self-describing. **`decode` must not simply surface
 `ridcoord`'s refusal**: a RID in 981..999 is inside slapd's band and outside

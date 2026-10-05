@@ -186,6 +186,20 @@ the regenerated CRDs.
 **Roles.** test-author → implementer → reviewer (correctness, with hazard 2 as
 the named target: prove that every refusal path leaves `olcSyncRepl` untouched).
 
+**Two structural moves M4 should make while it is in this file**, both raised
+by M3 and both production code the test author could describe but not write:
+
+- **Lift the phase selection into a pure function** — `databasePhase(pendingWork,
+  appliedPods, ridRefusal)` or similar. It is currently inline in `Reconcile`,
+  so the precedence it encodes (a RID refusal outranks `PartiallyApplied` but
+  never `NoPodsReachable`) cannot be unit-tested and is asserted nowhere. This
+  is the plan's own design corollary — push the decision into a thin pure
+  function so the e2e stays an integration shell.
+- **Delete `legacyRIDBase`.** M3's bridge keeps RIDs byte-identical by computing
+  `base = segment × 100` and refuses segments above 9 to stay inside slapd's
+  band. M4 replaces the arithmetic with `ridcoord` and the bridge goes with it,
+  which is also what lifts the temporary 0..9 ceiling back to `0..C-1`.
+
 **Release gate, not optional (added 2026-10-05).** M1's correctness review
 confirmed that a discovery refusal reaches the atomic `Replace` as a short set,
 and that the same path opens a one-pass window on operator upgrade. Both are

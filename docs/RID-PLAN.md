@@ -165,6 +165,13 @@ with a CEL uniqueness rule over the peer list; self index derived from
 M3's detector wired into stanza convergence, leaving existing stanzas alone
 (hazard 2).
 
+**Also M4's: resolving the layout.** `ridLayoutFor(ctx, cluster)` in the
+SlapdDatabase controller — under `meshRef` it reads `SlapdMesh.spec.ridLayout`,
+otherwise it returns the defaults and does no I/O. Its failure mode is
+hazard 3's shape: an unreadable mesh means the layout is **unknown**, and
+unknown withholds rather than converging. `judgeRIDSegment` deliberately takes
+the layout as a parameter, which is what keeps it testable without a client.
+
 **Also M4's, and it is the release gate** named below: the three pre-existing
 paths that hand `Replace` a short set (`docs/BACKLOG.md`). M1 added two triggers
 to one of them; nothing ships until this closes.

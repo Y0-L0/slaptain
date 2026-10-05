@@ -84,6 +84,20 @@ Invoked once, from slapdmesh.yaml, which is always rendered.
   {{- end -}}
 {{- end -}}
 
+{{- /* A site index with no slot in the RID matrix. ADR-028 yields to ADR-031
+       here: a peer's RID slot is podsPerSite + serverIDIndex, so an index at or
+       above maxSites has nowhere to live. The API server refuses it too, but
+       only once the object reaches a site — and this chart's whole point is
+       that what it renders is applied everywhere, so catching it at render time
+       costs nothing and fails before any site is touched. */}}
+{{- $maxSites := 12 -}}
+{{- with .Values.mesh.ridLayout }}{{- with .maxSites }}{{- $maxSites = . -}}{{- end }}{{- end }}
+{{- range $i, $s := $sites -}}
+  {{- if ge (int $s.serverIDIndex) (int $maxSites) -}}
+  {{- fail (printf "slapd-mesh: site %q declares serverIDIndex %v, and this mesh's ridLayout.maxSites is %v, so a peer's RID slot (podsPerSite + %v) falls outside the remote block. Declare an index in 0..%v, or widen mesh.ridLayout.maxSites — which renumbers the mesh once (ADR-031 decision 5)." $s.name $s.serverIDIndex $maxSites $s.serverIDIndex (sub (int $maxSites) 1)) -}}
+  {{- end -}}
+{{- end -}}
+
 {{- $multiSite := gt (len $sites) 1 -}}
 {{- $ridSegments := list -}}
 {{- range $i, $db := .Values.databases -}}

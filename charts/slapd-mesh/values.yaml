@@ -31,6 +31,28 @@
 
 # -- The SlapdMesh: the sites and the fabric between them, and nothing else.
 mesh:
+  # ridLayout — the shape of the RID matrix (ADR-031 decision 5). Omit it to take
+  # the operator's defaults, which is what almost every mesh should do.
+  #
+  # It lives here, once, because it is MESH-SCOPED: every site must compute the
+  # same number for the same provider, so a layout that differed between sites
+  # would make the same rid mean different things at each. This chart is applied
+  # unchanged everywhere, which is what makes that true — ADR-031 decision 5
+  # relies on exactly that, since the operator-side parity check is not built yet.
+  #
+  # podsPerSite bounds a site's read-write pod count; maxSites bounds a site's
+  # serverIDIndex (NOT the number of sites — indices are retired rather than
+  # reused, so a long-lived mesh spends them). A segment is podsPerSite+maxSites
+  # wide and the space is 999, so the two also set how many databases fit:
+  # 8+12 → 49, 4+6 → 99, 8+16 → 41.
+  #
+  # Changing it renumbers the mesh: one cn=config write per pod per database, no
+  # restart, no resync.
+  #
+  # ridLayout:
+  #   podsPerSite: 8
+  #   maxSites: 12
+
   # -- Name of the SlapdMesh object. Referenced by the SlapdCluster's meshRef.
   name: slapd-mesh
 

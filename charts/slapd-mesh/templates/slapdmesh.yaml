@@ -33,6 +33,24 @@ spec:
       {{- end }}
     {{- end }}
 
+  {{- /* ridLayout — the RID matrix's shape (ADR-031 decision 5). Mesh-scoped
+         because every site must compute the same number for the same provider,
+         so it is set ONCE here and applied unchanged everywhere, which is the
+         parity the decision relies on this chart to provide. Omit it entirely
+         to take the operator's defaults (podsPerSite 8, maxSites 12); a
+         half-filled object is fine, since the API server defaults each axis
+         on its own. Changing it renumbers the mesh — one cn=config write per
+         pod per database, no restart and no resync. */}}
+  {{- with .Values.mesh.ridLayout }}
+  ridLayout:
+    {{- with .podsPerSite }}
+    podsPerSite: {{ . }}
+    {{- end }}
+    {{- with .maxSites }}
+    maxSites: {{ . }}
+    {{- end }}
+  {{- end }}
+
   {{- with .Values.mesh.network }}
   network:
     {{- with .mode }}

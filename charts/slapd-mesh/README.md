@@ -137,7 +137,7 @@ site:
 - `cluster.sites` (the subset selector) names only sites the mesh declares
 - every database has a name and a suffix
 - a seeded database on a multi-site mesh names a `seed.site`, and that site exists
-- no two databases share a `ridBase` (ADR-003)
+- no two databases share a `ridSegment` (ADR-031)
 
 ## What it does not do
 

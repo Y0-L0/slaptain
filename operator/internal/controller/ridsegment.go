@@ -17,6 +17,12 @@ limitations under the License.
 package controller
 
 import (
+	"context"
+	"fmt"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/ridcoord"
 )
@@ -81,6 +87,176 @@ type ridSegmentVerdict struct {
 // everything this judgement needs is on sd, and an unused argument is an
 // invitation to make it load-bearing later, inconsistently.
 func judgeRIDSegment(sd *ldapv1alpha1.SlapdDatabase, siblings []ldapv1alpha1.SlapdDatabase, layout ridcoord.Layout) ridSegmentVerdict {
-	_, _, _ = sd, siblings, layout
-	return ridSegmentVerdict{}
+	// 1. The layout, first. A layout that admits no segment has no ceiling to
+	//    compare a declared segment against, so every later question is
+	//    unanswerable and a reason naming the segment would send a human to
+	//    change the wrong field.
+	if err := layout.Validate(); err != nil {
+		return ridSegmentVerdict{
+			Reason: reasonRIDLayoutInvalid,
+			Message: fmt.Sprintf(
+				"the RID layout in force admits no segment: %v. Fix spec.ridLayout on the SlapdMesh (podsPerSite and maxSites must each be at least 1, and their sum at most %d).",
+				err, ridcoord.MaxRID),
+		}
+	}
+	maxSegments := layout.MaxSegments()
+
+	// 2. Declared at all. nil is absence, never the int32 zero: reading it as
+	//    0 makes every undeclared database collide with segment 0.
+	if sd.Spec.Replication.RIDSegment == nil {
+		return ridSegmentVerdict{
+			Reason: reasonRIDSegmentMissing,
+			Message: fmt.Sprintf(
+				"spec.replication.ridSegment is not declared. Declare a segment in 0..%d, or set spec.replication.enabled=false to exclude this database from replication.",
+				maxSegments-1),
+		}
+	}
+	segment := *sd.Spec.Replication.RIDSegment
+
+	// 3. In range for THIS layout. The ceiling is the layout's C, not a
+	//    constant and not the CRD's Maximum: a mesh-wide layout change is
+	//    exactly the same CR getting a different verdict (ADR-031 decision 5).
+	if segment < 0 || segment >= maxSegments {
+		return ridSegmentVerdict{
+			Reason: reasonRIDSegmentOutOfRange,
+			Message: fmt.Sprintf(
+				"spec.replication.ridSegment %d is outside 0..%d: the RID layout in force (podsPerSite=%d, maxSites=%d) admits %d segments. Declare a segment in that range, or widen spec.ridLayout on the SlapdMesh.",
+				segment, maxSegments-1, layout.PodsPerSite, layout.MaxSites, maxSegments),
+		}
+	}
+
+	// 4. Unique among the databases that share a pod with this one, which is
+	//    what clusterRef names. The scan is symmetric by construction — it
+	//    asks only "does anyone else declare my number" — so both sides of a
+	//    collision refuse and neither wins the race to write stanzas.
+	if other := collidingSibling(sd, siblings, segment); other != "" {
+		return ridSegmentVerdict{
+			Reason: reasonRIDSegmentCollision,
+			Message: fmt.Sprintf(
+				"spec.replication.ridSegment %d is also declared by SlapdDatabase %q of cluster %q. Both databases withhold their syncrepl stanzas until one of them declares a different segment; the operator never reassigns.",
+				segment, other, sd.Spec.ClusterRef),
+		}
+	}
+
+	return ridSegmentVerdict{
+		OK:      true,
+		Reason:  reasonRIDSegmentOK,
+		Segment: segment,
+	}
+}
+
+// collidingSibling names the lowest-named other SlapdDatabase of sd's cluster
+// declaring `segment`, or "" when none does.
+//
+// Lowest-named rather than first-seen so that a refusal message does not
+// depend on the order the API server happened to return the List in: a
+// condition whose text flaps between two equally correct names reads as
+// churn.
+//
+// A sibling is counted regardless of its own replication.enabled. ADR-031
+// decision 3 ties segment reuse to the other database's stanzas being GONE
+// from the pods, and flipping a flag to false removes nothing from cn=config.
+func collidingSibling(sd *ldapv1alpha1.SlapdDatabase, siblings []ldapv1alpha1.SlapdDatabase, segment int32) string {
+	found := ""
+	for i := range siblings {
+		other := &siblings[i]
+		// The caller hands over a plain List, so sd is in it. Matching on
+		// name+namespace rather than assuming a pre-filtered slice: a judge
+		// that collided with itself would stall every database forever.
+		if other.Name == sd.Name && other.Namespace == sd.Namespace {
+			continue
+		}
+		// A RID is unique per SERVER (ADR-031, slapd's connid band). Two
+		// clusters share no pod, so their segments cannot collide.
+		if other.Spec.ClusterRef != sd.Spec.ClusterRef {
+			continue
+		}
+		if other.Spec.Replication.RIDSegment == nil || *other.Spec.Replication.RIDSegment != segment {
+			continue
+		}
+		if found == "" || other.Name < found {
+			found = other.Name
+		}
+	}
+	return found
+}
+
+// ── Wiring ───────────────────────────────────────────────────────────────────
+
+// resolveRIDSegment is judgeRIDSegment plus the one read it needs: the
+// same-namespace SlapdDatabases it is compared against.
+//
+// RID-PLAN hazard 3: an unprovable uniqueness is not a proven one. A failed
+// List is not "no siblings, therefore no collision" — it is "unknown", and
+// unknown withholds. The refusal it returns is deliberately the collision
+// reason, because that is the question that went unanswered and the withhold it
+// triggers is the same one.
+func (r *SlapdDatabaseReconciler) resolveRIDSegment(
+	ctx context.Context,
+	sd *ldapv1alpha1.SlapdDatabase,
+	layout ridcoord.Layout,
+) ridSegmentVerdict {
+	var siblings ldapv1alpha1.SlapdDatabaseList
+	if err := r.List(ctx, &siblings, client.InNamespace(sd.Namespace)); err != nil {
+		return ridSegmentVerdict{
+			Reason: reasonRIDSegmentCollision,
+			Message: fmt.Sprintf(
+				"could not list the SlapdDatabases of namespace %q, so this database's ridSegment cannot be shown to be unique: %v. Syncrepl stanzas are withheld until the read succeeds — an unproven uniqueness is not a proven one.",
+				sd.Namespace, err),
+		}
+	}
+	return judgeRIDSegment(sd, siblings.Items, layout)
+}
+
+// legacyRIDBaseBridgeMax is the highest segment the pre-ADR-031 stanza builder
+// can still express. See legacyRIDBase.
+const legacyRIDBaseBridgeMax = 9
+
+// legacyRIDBase converts a validated segment into the base address the stanza
+// builder still takes.
+//
+// TODO(M4, docs/RID-PLAN.md "M4 — Consumption"): delete this. The builder
+// consumes a coordinate then — ridcoord.Local for an in-cluster provider,
+// ridcoord.Remote for a peer site — and no base address exists any more.
+//
+// Until then the arithmetic is deliberately the pre-ADR-031 one (segment ×
+// 100, which is exactly what ridBase held under the documented convention), so
+// M3 renames a field and changes no RID on any pod. The cost is that the old
+// scheme's own ceiling comes with it: segment 10 would put an external stanza's
+// RID past slapd's 999, which slapd rejects outright. That is refused here
+// rather than emitted, because the one thing worse than a withheld stanza set
+// is a silently wrong one.
+func legacyRIDBase(v ridSegmentVerdict) (int32, ridSegmentVerdict) {
+	if v.Segment > legacyRIDBaseBridgeMax {
+		return 0, ridSegmentVerdict{
+			Reason: reasonRIDSegmentOutOfRange,
+			Message: fmt.Sprintf(
+				"spec.replication.ridSegment %d is not usable yet: the syncrepl stanza builder still addresses RIDs by the pre-ADR-031 base (segment × 100), and a segment above %d walks past slapd's %d ceiling. Declare a segment in 0..%d until the coordinate builder lands (docs/RID-PLAN.md, M4).",
+				v.Segment, legacyRIDBaseBridgeMax, ridcoord.MaxRID, legacyRIDBaseBridgeMax),
+		}
+	}
+	return v.Segment * 100, v
+}
+
+// ridSegmentConditionType is where a human looks for the verdict after the
+// phase has moved on to something else.
+const ridSegmentConditionType = "RIDSegmentValid"
+
+// ridSegmentCondition renders a verdict as the condition that carries it.
+func ridSegmentCondition(sd *ldapv1alpha1.SlapdDatabase, v ridSegmentVerdict) metav1.Condition {
+	status := metav1.ConditionFalse
+	msg := v.Message
+	if v.OK {
+		status = metav1.ConditionTrue
+		msg = fmt.Sprintf("ridSegment %d is in range and declared by no other database of cluster %q",
+			v.Segment, sd.Spec.ClusterRef)
+	}
+	return metav1.Condition{
+		Type:               ridSegmentConditionType,
+		Status:             status,
+		Reason:             v.Reason,
+		Message:            msg,
+		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: sd.Generation,
+	}
 }

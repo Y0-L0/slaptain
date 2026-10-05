@@ -8,8 +8,8 @@
 # makes it expressible. Keep both databases replicated.
 #
 # Deliberately kept minimal next to database.yaml: its own suffix (NOT a subtree
-# of the primary's), its own ridBase (ADR-003 requires a unique one per
-# database; 100 is taken, the CRD caps at 949), a userPassword-restricting ACL
+# of the primary's), its own ridSegment (ADR-031 requires a unique one per
+# database; 1 is taken, and the layout in force caps the rest), a userPassword-restricting ACL
 # so ADR-020's "the journal hands out what the data DB denies" is a live concern
 # here too, and just enough seed to write into.
 apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
@@ -33,7 +33,7 @@ spec:
       by * read
 
   replication:
-    ridBase: 200
+    ridSegment: 2
     deltaSync: true
     syncprovCheckpoint: "500 15"
     # accesslogPurge deliberately left unset: this database is the fixture's

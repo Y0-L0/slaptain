@@ -120,7 +120,7 @@ spec:
     - "entryUUID eq"
 
   replication:
-    ridBase: 100
+    ridSegment: 1
     deltaSync: true
     syncprovCheckpoint: "500 15"
 
@@ -293,8 +293,9 @@ The `discovery` form is what the e2e suite exercises; `uri` and static
 `podAddresses` lost their end-to-end coverage when the mesh became the only test
 path, and are carried as open items in [`docs/BACKLOG.md`](docs/BACKLOG.md).
 
-RID scheme: each `SlapdDatabase` declares a `ridBase`. In-cluster peers use RIDs
-`ridBase+1..ridBase+49`, external peers `ridBase+51..ridBase+99`. See
+RID scheme: each `SlapdDatabase` declares a `ridSegment` — the contiguous run of
+replica IDs it owns. Within that run the first slots name pods at the local
+site and the rest name peer sites, so `rid = 1 + segment·(P+S) + offset`. See
 [ADR-003](docs/adrs/adr-003-operator-owns-syncrepl.md).
 
 ## Backup & Restore

@@ -96,7 +96,7 @@ images:
 
 # -- Replication. N-way multi-master delta-syncrepl.
 # Set enabled=true together with replicas>1 to activate.
-# Per-database replication settings (deltaSync, ridBase, etc.) are on SlapdDatabase CRs.
+# Per-database replication settings (deltaSync, ridSegment, etc.) are on SlapdDatabase CRs.
 #
 # FOR A MULTI-SITE MESH, USE THE slapd-mesh CHART INSTEAD. This chart writes one
 # site's SlapdCluster by hand; the mesh chart describes the sites once and lets
@@ -194,9 +194,9 @@ retainOnUninstall: true
 # single-site chart being poorer made the upgrade path rewrite your objects
 # rather than add a mesh: block.
 #
-# The chart refuses to render two databases sharing a replication.ridBase
-# (ADR-003). That is a render-time convenience, not the enforcement: a CR
-# applied by hand bypasses it.
+# The chart refuses to render two databases sharing a replication.ridSegment
+# (ADR-031). That is the first of two layers, not the enforcement on its own: a CR
+# applied by hand bypasses it; the operator refuses the same collision at reconcile.
 databases: []
 #  - name: example-db
 #    spec:
@@ -204,7 +204,7 @@ databases: []
 #      rootDN: cn=admin,dc=example,dc=org
 #      replication:
 #        deltaSync: true
-#        ridBase: 100
+#        ridSegment: 1
 #      seed:
 #        entries:
 #          - |

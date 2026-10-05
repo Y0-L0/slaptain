@@ -65,7 +65,7 @@ databases:
           to *
           by * read
       replication:
-        ridBase: 100
+        ridSegment: 1
         deltaSync: true
         syncprovCheckpoint: "500 15"
         accesslogPurge: "2+00:00 1+00:00"
@@ -119,7 +119,7 @@ databases:
           to *
           by * read
       replication:
-        ridBase: 200
+        ridSegment: 2
         deltaSync: true
         syncprovCheckpoint: "500 15"
       indices:

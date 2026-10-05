@@ -41,8 +41,8 @@ Four classes, all of them failures the API server cannot catch for us:
      one pod ends up with a permanent hidden glue suffix — invisible to ordinary
      searches, clean on every CSN health read, and making every backup from that
      pod unrestorable. The failure this chart exists to make unreachable.
-  4. Two databases sharing a ridBase. ADR-003 requires one per database; slapd
-     silently confuses the stanzas otherwise.
+  4. Two databases sharing a ridSegment. ADR-031 gives each database one segment
+     of the RID space; slapd silently confuses the stanzas otherwise.
 
 Invoked once, from slapdmesh.yaml, which is always rendered.
 */}}
@@ -85,7 +85,7 @@ Invoked once, from slapdmesh.yaml, which is always rendered.
 {{- end -}}
 
 {{- $multiSite := gt (len $sites) 1 -}}
-{{- $ridBases := list -}}
+{{- $ridSegments := list -}}
 {{- range $i, $db := .Values.databases -}}
   {{- if not $db.name -}}
   {{- fail (printf "slapd-mesh: databases[%d] has no name" $i) -}}
@@ -102,12 +102,12 @@ Invoked once, from slapdmesh.yaml, which is always rendered.
   {{- fail (printf "slapd-mesh: database %q names seed.site %q, which is not a site in mesh.sites (%s). No site would ever match it, so the database would never be seeded anywhere." $db.name $seed.site (join ", " $names)) -}}
   {{- end -}}
   {{- $repl := default (dict) $spec.replication -}}
-  {{- if and (hasKey $repl "ridBase") (not (kindIs "invalid" $repl.ridBase)) -}}
-    {{- $rid := printf "%v" $repl.ridBase -}}
-    {{- if has $rid $ridBases -}}
-    {{- fail (printf "slapd-mesh: ridBase %s is used by two databases (at databases[%d], %s). ADR-003 requires a unique ridBase per database within a site." $rid $i $db.name) -}}
+  {{- if and (hasKey $repl "ridSegment") (not (kindIs "invalid" $repl.ridSegment)) -}}
+    {{- $seg := printf "%v" $repl.ridSegment -}}
+    {{- if has $seg $ridSegments -}}
+    {{- fail (printf "slapd-mesh: ridSegment %s is used by two databases (at databases[%d], %s). ADR-031 requires a unique ridSegment per database within a mesh." $seg $i $db.name) -}}
     {{- end -}}
-    {{- $ridBases = append $ridBases $rid -}}
+    {{- $ridSegments = append $ridSegments $seg -}}
   {{- end -}}
 {{- end -}}
 

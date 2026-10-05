@@ -31,7 +31,7 @@ spec:
       by * read
 
   replication:
-    ridBase: 100
+    ridSegment: 1
     deltaSync: true
     syncprovCheckpoint: "500 15"
     accesslogPurge: "0+00:05 0+00:01"

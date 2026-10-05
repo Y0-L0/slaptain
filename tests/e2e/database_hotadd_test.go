@@ -49,8 +49,10 @@ var _ = Describe("database hot add", Label("database-hotadd"), Ordered, func() {
 		// subordinate naming context is served by its parent database (the
 		// same trap cleanup_policy_test.go documents).
 		hotSuffix = "dc=hotadd,dc=hotadd,dc=test"
-		// Unique per ADR-003; 100/200 are the fixtures', 300/400 cleanupPolicy's.
-		hotRIDBase = int32(500)
+		// Unique per ADR-031 decision 3; 1/2 are the fixtures', 3/4
+		// cleanupPolicy's. A duplicate is refused at reconcile and withholds
+		// the stanzas of BOTH databases, so this number is load-bearing.
+		hotRIDSegment = int32(5)
 
 		settle = 8 * time.Minute
 	)
@@ -127,7 +129,7 @@ var _ = Describe("database hot add", Label("database-hotadd"), Ordered, func() {
 		snapshot(ctx)
 
 		By("creating the SlapdDatabase")
-		createCleanupDB(ctx, hotDB, hotSuffix, ldapv1alpha1.CleanupPolicyDelete, true, hotRIDBase)
+		createCleanupDB(ctx, hotDB, hotSuffix, ldapv1alpha1.CleanupPolicyDelete, true, hotRIDSegment)
 
 		By("waiting for it to reach Running")
 		Eventually(ctx, func() bool {

@@ -125,15 +125,15 @@ var _ = Describe("scale-up", Label("scaleup"), Ordered, func() {
 
 		By("declaring the database with delta-syncrepl intent")
 		enabled := true
-		ridBase := int32(300)
+		ridSegment := int32(3)
 		Expect(crdClient.Create(ctx, &ldapv1alpha1.SlapdDatabase{
 			ObjectMeta: metav1.ObjectMeta{Name: scaleDB, Namespace: namespace},
 			Spec: ldapv1alpha1.SlapdDatabaseSpec{
 				ClusterRef: scaleCluster,
 				Suffix:     scaleSuffix,
 				Replication: ldapv1alpha1.DatabaseReplicationConfig{
-					Enabled: &enabled,
-					RIDBase: &ridBase,
+					Enabled:    &enabled,
+					RIDSegment: &ridSegment,
 				},
 				Seed: &ldapv1alpha1.DatabaseSeedConfig{
 					Entries: []string{

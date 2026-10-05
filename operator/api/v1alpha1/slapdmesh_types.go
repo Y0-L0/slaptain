@@ -188,7 +188,7 @@ type MeshIssuerRef struct {
 // by several SlapdClusters, and "whose databases?" has no coherent answer in
 // that case; SlapdDatabase and SlapdSchema keep their clusterRef and are
 // transitively mesh-aware through it. The invariants they must hold across
-// sites (identical name, suffix, ridBase, credentials) are checked by
+// sites (identical name, suffix, ridSegment, credentials) are checked by
 // `mesh verify` (ADR-028 §6), not modelled here.
 //
 // Every field is mesh-scoped by construction: it has one value that is true at

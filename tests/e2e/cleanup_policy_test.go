@@ -61,9 +61,9 @@ var _ = Describe("cleanupPolicy", Label("cleanup-policy"), Ordered, func() {
 	)
 
 	BeforeAll(func(ctx SpecContext) {
-		createCleanupDB(ctx, delDB, delSuffix, ldapv1alpha1.CleanupPolicyDelete, true, 300)
+		createCleanupDB(ctx, delDB, delSuffix, ldapv1alpha1.CleanupPolicyDelete, true, 3)
 		createCleanupDB(ctx, plainDB, plainSfx, ldapv1alpha1.CleanupPolicyDelete, false, 0)
-		createCleanupDB(ctx, keepDB, keepSfx, ldapv1alpha1.CleanupPolicyRetain, true, 400)
+		createCleanupDB(ctx, keepDB, keepSfx, ldapv1alpha1.CleanupPolicyRetain, true, 4)
 
 		for _, name := range []string{delDB, plainDB, keepDB} {
 			By("waiting for " + name + " to reach Running")
@@ -142,7 +142,7 @@ var _ = Describe("cleanupPolicy", Label("cleanup-policy"), Ordered, func() {
 	// spec's leftover, so the shared fixture is left as it was found.
 	It("re-adopts the Retain leftover and can then delete it", func(ctx SpecContext) {
 		By("re-creating the CR over the unmanaged database, this time with Delete")
-		createCleanupDB(ctx, keepDB, keepSfx, ldapv1alpha1.CleanupPolicyDelete, true, 400)
+		createCleanupDB(ctx, keepDB, keepSfx, ldapv1alpha1.CleanupPolicyDelete, true, 4)
 		Eventually(ctx, func() bool {
 			return slapdDatabaseRunning(crdClient, namespace, keepDB)
 		}).WithTimeout(settle).WithPolling(5*time.Second).Should(BeTrue(),
@@ -167,14 +167,16 @@ var _ = Describe("cleanupPolicy", Label("cleanup-policy"), Ordered, func() {
 })
 
 // createCleanupDB creates one throwaway SlapdDatabase on the shared cluster.
-// Seeded with just its suffix entry so it can reach Running; ridBase must not
-// collide with the fixture databases (100, 200 are taken).
+// Seeded with just its suffix entry so it can reach Running; ridSegment must
+// not collide with the fixture databases (1 and 2 are taken) — ADR-031
+// decision 3 makes that a reconcile-time refusal, not just a convention, so a
+// reused segment here stalls BOTH databases rather than only this one.
 func createCleanupDB(
 	ctx context.Context,
 	name, suffix string,
 	policy ldapv1alpha1.CleanupPolicy,
 	replicated bool,
-	ridBase int32,
+	ridSegment int32,
 ) {
 	dc := strings.TrimPrefix(strings.SplitN(suffix, ",", 2)[0], "dc=")
 
@@ -192,7 +194,7 @@ func createCleanupDB(
 		},
 	}
 	if replicated {
-		spec.Replication.RIDBase = &ridBase
+		spec.Replication.RIDSegment = &ridSegment
 	}
 
 	Expect(crdClient.Create(ctx, &ldapv1alpha1.SlapdDatabase{

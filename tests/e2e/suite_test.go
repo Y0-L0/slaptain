@@ -40,7 +40,7 @@ var (
 	// READPW_OU — OU name for read-only service accounts (readpw users).
 	readpwOU = envOrDefault("READPW_OU", "ServiceAccounts")
 
-	// DB_CR_NAME — SlapdDatabase CR name. Used to read ridBase for RID assertions.
+	// DB_CR_NAME — SlapdDatabase CR name. Used to read ridSegment for RID assertions.
 	dbCRName = envOrDefault("DB_CR_NAME", "slapd-db")
 )
 

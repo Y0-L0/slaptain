@@ -55,9 +55,9 @@ spec:
   #
   # Set enabled=false to explicitly exclude this database from cluster
   # replication (legitimate but rare: partial-migration coexistence, per-site
-  # local state, static reference DBs). Otherwise supply ridBase.
+  # local state, static reference DBs). Otherwise supply ridSegment.
   replication:
-    ridBase: 100
+    ridSegment: 1
     # deltaSync: true                # default
     # syncprovCheckpoint: "500 15"
     # accesslogPurge: "2+00:00 1+00:00"

@@ -89,12 +89,22 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 			replicas = *sts.Spec.Replicas
 		}
 
-		// Read ridBase from SlapdDatabase CR to compute expected external peer RID.
-		// External peer j → RID = ridBase + 50 + j + 1 (first peer: ridBase + 51).
+		// Compute the expected external peer RID from the database's declared
+		// segment.
+		//
+		// TODO(M4, docs/RID-PLAN.md "M4 — Consumption"): this encodes the
+		// PRE-ADR-031 external formula — external peer j → ridBase + 50 + j + 1
+		// — and it still holds only because M3 kept every RID byte-identical
+		// through the temporary legacyRIDBase bridge (ridBase = segment × 100,
+		// operator/internal/controller/ridsegment.go). M4 replaces that formula
+		// with ridcoord.Remote, where a peer's RID is keyed on the peer's SITE
+		// INDEX rather than its position in the peer list (ADR-031 decision 1),
+		// and the arithmetic below stops being true. Rewrite this against
+		// ridcoord then; do not re-derive the old formula from the new field.
 		sd := &ldapv1alpha1.SlapdDatabase{}
 		Expect(crdClient.Get(ctx, types.NamespacedName{Name: dbCRName, Namespace: namespace}, sd)).To(Succeed())
-		Expect(sd.Spec.Replication.RIDBase).NotTo(BeNil(), "test fixture must set spec.replication.ridBase")
-		extPeerRIDBase = *sd.Spec.Replication.RIDBase + 50
+		Expect(sd.Spec.Replication.RIDSegment).NotTo(BeNil(), "test fixture must set spec.replication.ridSegment")
+		extPeerRIDBase = *sd.Spec.Replication.RIDSegment*100 + 50
 		extPeerRID = fmt.Sprintf("%d", extPeerRIDBase+1)
 	}, NodeTimeout(30*time.Second))
 
@@ -220,7 +230,7 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 		GinkgoLogr.Info("wrote entry on siteA, waiting for siteB", "dn", dn)
 		Eventually(ctx, func() bool {
 			return ldapExists(remoteConn, dn)
-		}).WithTimeout(60 * time.Second).WithPolling(3 * time.Second).Should(BeTrue(),
+		}).WithTimeout(60*time.Second).WithPolling(3*time.Second).Should(BeTrue(),
 			"entry %s should replicate from siteA to siteB within 60 s\n%s", dn,
 			dumpReplDiagnostics(remoteAddr, remoteAdminPW, remoteRootPW))
 	}, NodeTimeout(3*time.Minute))
@@ -238,7 +248,7 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 		GinkgoLogr.Info("wrote entry on siteB, waiting for siteA", "dn", dn)
 		Eventually(ctx, func() bool {
 			return ldapExists(ldapConn, dn)
-		}).WithTimeout(60 * time.Second).WithPolling(3 * time.Second).Should(BeTrue(),
+		}).WithTimeout(60*time.Second).WithPolling(3*time.Second).Should(BeTrue(),
 			"entry %s should replicate from siteB to siteA within 60 s\n%s", dn,
 			dumpReplDiagnostics(localLDAPAddr, adminPW, rootPW))
 	}, NodeTimeout(3*time.Minute))
@@ -355,7 +365,7 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 					}
 					return nil
 				})
-			}).WithTimeout(5 * time.Minute).WithPolling(5 * time.Second).Should(Succeed(),
+			}).WithTimeout(5*time.Minute).WithPolling(5*time.Second).Should(Succeed(),
 				"dropping site %q from mesh %q should remove exactly its syncrepl stanza from every RW pod",
 				victim, mesh.Name)
 			// 5 minutes, not the 60 s its spec-patching predecessor used: removing
@@ -383,7 +393,7 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 					}
 					return nil
 				})
-			}).WithTimeout(8 * time.Minute).WithPolling(5 * time.Second).Should(Succeed(),
+			}).WithTimeout(8*time.Minute).WithPolling(5*time.Second).Should(Succeed(),
 				"restoring site %q to mesh %q should bring its syncrepl stanza back on every RW pod",
 				victim, mesh.Name)
 			// 8 minutes: re-adding reconciles on the watch immediately, but the

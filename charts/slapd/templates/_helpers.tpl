@@ -84,30 +84,31 @@ helm.sh/resource-policy: keep
 Render-time validation for the databases this chart declares.
 
 One rule, and it is the one that survives from the mesh chart's four: two
-databases must not share a ridBase. ADR-003 requires one per database, because
-RIDs are derived from it (in-cluster peer i → ridBase+i+1, external peer j →
-ridBase+50+j+1) and a collision makes slapd confuse two databases' per-consumer
-cookie state. The mesh chart's other three checks are about sites and do not
+databases must not share a ridSegment. ADR-031 gives each database one segment
+of the RID space — the contiguous run of podsPerSite+maxSites replica IDs it
+owns — and a collision makes slapd confuse two databases' per-consumer cookie
+state, silently. The mesh chart's other three checks are about sites and do not
 exist here.
 
-Note what this is NOT: docs/BACKLOG.md tracks ridBase uniqueness as documented
-but unenforced, and the real fix is a reconcile-time check in the SlapdDatabase
-controller, which also catches CRs applied by hand. This catches only what the
-chart itself renders — worth having because it is free, not a substitute.
+This is the first of the two layers ADR-031 decision 3 describes, not the whole
+of it: the operator refuses the same collision at reconcile, which also catches
+a CR applied by hand or two charts in one namespace. This catches only what the
+chart itself renders — worth having because it is free and fails at render time,
+not a substitute.
 */}}
 {{- define "slapd.validateDatabases" -}}
-{{- $ridBases := list -}}
+{{- $ridSegments := list -}}
 {{- range $i, $db := .Values.databases -}}
   {{- if not $db.name -}}
   {{- fail (printf "slapd: databases[%d] has no name" $i) -}}
   {{- end -}}
   {{- $repl := default (dict) (default (dict) $db.spec).replication -}}
-  {{- if and (hasKey $repl "ridBase") (not (kindIs "invalid" $repl.ridBase)) -}}
-    {{- $rid := printf "%v" $repl.ridBase -}}
-    {{- if has $rid $ridBases -}}
-    {{- fail (printf "slapd: ridBase %s is used by two databases (at databases[%d], %s). ADR-003 requires a unique ridBase per database within a cluster." $rid $i $db.name) -}}
+  {{- if and (hasKey $repl "ridSegment") (not (kindIs "invalid" $repl.ridSegment)) -}}
+    {{- $seg := printf "%v" $repl.ridSegment -}}
+    {{- if has $seg $ridSegments -}}
+    {{- fail (printf "slapd: ridSegment %s is used by two databases (at databases[%d], %s). ADR-031 requires a unique ridSegment per database within a cluster." $seg $i $db.name) -}}
     {{- end -}}
-    {{- $ridBases = append $ridBases $rid -}}
+    {{- $ridSegments = append $ridSegments $seg -}}
   {{- end -}}
 {{- end -}}
 {{- end -}}

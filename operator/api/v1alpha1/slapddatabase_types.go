@@ -90,20 +90,6 @@ type DatabaseReplicationConfig struct {
 	// +kubebuilder:default=true
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
-	// ridBase is the SUPERSEDED base Replica ID for this database's syncrepl
-	// stanzas (ADR-003): in-cluster peer i got RID = ridBase + i + 1, external
-	// peer j got ridBase + 50 + j + 1.
-	//
-	// DEPRECATED, replaced by ridSegment (ADR-031 decision 8). It survives this
-	// commit only because slapddatabase_controller.go still reads it and that
-	// file belongs to another milestone; removing it here would break the build
-	// rather than produce a red. The implementer removes the field, its last
-	// reader, the chart templates and the fixtures together.
-	//
-	// +optional
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=949
-	RIDBase *int32 `json:"ridBase,omitempty"`
 	// ridSegment selects this database's segment of the RID space: the
 	// contiguous run of `podsPerSite + maxSites` replica IDs it owns
 	// (ADR-031). Must be unique among the databases of one SlapdCluster; the

@@ -22,11 +22,11 @@ import (
 // replication-password verification only runs when both the cluster and the
 // database have replication enabled. It asserts:
 //
-//   1. Default-deny: a restore whose replication-password does NOT match the
-//      backup's cn=replication hash fails preflight WITHOUT scaling down (no
-//      downtime, no data touched).
-//   2. Once the password matches, preflight passes and the slapadd-all-pods
-//      machine loads the DIT onto EVERY RW pod directly (not via syncrepl).
+//  1. Default-deny: a restore whose replication-password does NOT match the
+//     backup's cn=replication hash fails preflight WITHOUT scaling down (no
+//     downtime, no data touched).
+//  2. Once the password matches, preflight passes and the slapadd-all-pods
+//     machine loads the DIT onto EVERY RW pod directly (not via syncrepl).
 //
 // TLS note: the restore cluster reuses the source's TLS Secret, whose SANs cover
 // only the source cluster's DNS — so cross-pod syncrepl will NOT verify and the
@@ -108,7 +108,7 @@ var _ = Describe("replicated restore", Label("restore"), Label("restore-replicat
 				return ""
 			}
 			return b.Status.Phase
-		}).WithTimeout(5*time.Minute).WithPolling(5*time.Second).Should(Equal(ldapv1alpha1.BackupPhaseCompleted))
+		}).WithTimeout(5 * time.Minute).WithPolling(5 * time.Second).Should(Equal(ldapv1alpha1.BackupPhaseCompleted))
 
 		By("creating a replicated restore cluster + database with a DELIBERATELY WRONG replication-password")
 		// Pre-create the credentials Secret so the operator adopts it instead of
@@ -145,14 +145,14 @@ var _ = Describe("replicated restore", Label("restore"), Label("restore-replicat
 			},
 		})).To(Succeed())
 
-		ridBase := int32(200)
+		ridSegment := int32(2)
 		enabled := true
 		Expect(crdClient.Create(ctx, &ldapv1alpha1.SlapdDatabase{
 			ObjectMeta: metav1.ObjectMeta{Name: restoreDB, Namespace: namespace},
 			Spec: ldapv1alpha1.SlapdDatabaseSpec{
 				ClusterRef:  restoreCluster,
 				Suffix:      restoreSuffix,
-				Replication: ldapv1alpha1.DatabaseReplicationConfig{Enabled: &enabled, RIDBase: &ridBase},
+				Replication: ldapv1alpha1.DatabaseReplicationConfig{Enabled: &enabled, RIDSegment: &ridSegment},
 				BootstrapFrom: &ldapv1alpha1.BootstrapSource{
 					BackupRef: srcBackup,
 				},

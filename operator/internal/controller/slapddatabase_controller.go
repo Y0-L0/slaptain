@@ -41,6 +41,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
+	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/ridcoord"
 	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/suffixprobe"
 )
 
@@ -378,14 +379,42 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	//     directions — an upgrading cluster keeps the stanzas it already has,
 	//     which name the still-granted legacy identity and still work; a fresh
 	//     cluster has none yet and only pays a requeue.
+	//
+	//     Withheld for a second reason since ADR-031: a ridSegment that is out
+	//     of range, that another database of this cluster also declares, or
+	//     whose uniqueness could not be established at all. Same shape, same
+	//     stake — ADR-031 decision 6 and RID-PLAN hazard 2: olcSyncRepl is
+	//     installed with one atomic Replace, so converging a short set is a
+	//     deletion of live replication. A withhold must leave the pod's
+	//     stanzas alone, which is exactly what skipping this branch does.
+	var ridRefusal *ridSegmentVerdict
 	if sc.Spec.Replication.Enabled && sd.ReplicationEnabled() {
-		if !authIdentityReadyForStanzas(authIdentity) {
+		// TODO(M4, docs/RID-PLAN.md "M4 — Consumption"): resolve the layout
+		// from the mesh (ridLayoutFor: SlapdMesh.spec.ridLayout under meshRef,
+		// the defaults otherwise). The default here is a seam, not a decision
+		// — a mesh that narrows its layout is not yet obeyed.
+		rid := r.resolveRIDSegment(ctx, sd, ridcoord.DefaultLayout())
+		ridBase := int32(0)
+		if rid.OK {
+			ridBase, rid = legacyRIDBase(rid)
+		}
+		setCondition(&sd.Status.Conditions, ridSegmentCondition(sd, rid))
+
+		switch {
+		case !rid.OK:
+			v := rid
+			ridRefusal = &v
+			log.Info("syncrepl configuration withheld: this database's RID segment "+
+				"cannot be used (ADR-031); the pods keep the stanzas they have",
+				"database", sd.Name, "reason", rid.Reason, "message", rid.Message)
+			pendingWork = true
+		case !authIdentityReadyForStanzas(authIdentity):
 			log.Info("syncrepl configuration withheld: the node-local replication "+
 				"identity is not yet on every read-write pod (ADR-027); will retry",
 				"database", sd.Name)
 			pendingWork = true
-		} else {
-			skipped, err := r.reconcileReplication(ctx, sc, sd, configPW, healthyPods)
+		default:
+			skipped, err := r.reconcileReplication(ctx, sc, sd, configPW, healthyPods, ridBase)
 			if err != nil {
 				return ctrl.Result{}, fmt.Errorf("reconcileReplication: %w", err)
 			}
@@ -424,6 +453,15 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		phase = ldapv1alpha1.DatabasePhaseError
 		reason = "NoPodsReachable"
 		msg = "Could not apply database to any pod"
+	}
+	// A refused RID segment names itself in the phase, over the generic
+	// "PartiallyApplied": it is the one pending item a human fixes by editing
+	// the CR rather than by waiting (ADR-031 decision 6). It does not override
+	// Error — a database no pod can be reached on has a louder problem.
+	if ridRefusal != nil && phase != ldapv1alpha1.DatabasePhaseError {
+		phase = ldapv1alpha1.DatabasePhaseDegraded
+		reason = ridRefusal.Reason
+		msg = ridRefusal.Message
 	}
 	r.setStatus(ctx, sd, phase, appliedPods, failedPods, reason, msg)
 
@@ -2405,7 +2443,9 @@ func ldapEntryExists(conn *ldap.Conn, dn string) (bool, error) {
 // ── Replication ──────────────────────────────────────────────────────────────
 
 // reconcileReplication applies syncrepl stanzas for this database to each pod.
-// Uses the database's ridBase for RID assignment. See ADR-003 amendment.
+// ridBase is the already-validated base address of this database's run of
+// replica IDs — see legacyRIDBase, and ADR-031 for what replaces it. The caller
+// withholds this whole step rather than passing a base it could not justify.
 //
 // healthyPods names the pods whose per-pod database reconcile completed in this
 // pass; a pod outside the set is skipped and the caller requeues.
@@ -2442,6 +2482,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 	sd *ldapv1alpha1.SlapdDatabase,
 	configPW string,
 	healthyPods map[string]bool,
+	ridBase int32,
 ) (bool, error) {
 	log := logf.FromContext(ctx)
 
@@ -2567,10 +2608,6 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 	}
 
 	skipped := false
-	ridBase := int32(0)
-	if sd.Spec.Replication.RIDBase != nil {
-		ridBase = *sd.Spec.Replication.RIDBase
-	}
 
 	retryInterval := sc.Spec.Replication.Retry
 	if retryInterval == "" {

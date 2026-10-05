@@ -96,6 +96,39 @@ spec:
                       Only meaningful in "multus" mode; ignored in "pod-routed" (in-cluster stays on DNS).
                     type: boolean
                 type: object
+              ridLayout:
+                description: |-
+                  ridLayout shapes the RID matrix every site of this mesh computes
+                  coordinates in (ADR-031 decision 5). It lives on the mesh and not on the
+                  operator's installation config precisely because it must not differ per
+                  site: a different column width makes a RID read at one site decode to a
+                  different provider at another.
+
+                  Omitted means the defaults below, which is also what a SlapdCluster with
+                  no meshRef uses.
+                properties:
+                  maxSites:
+                    default: 12
+                    description: |-
+                      maxSites is S: the largest number of sites this mesh may hold. It sizes
+                      the remote block, one slot per peer site, which is enough because a pod
+                      holds at most one syncrepl link per peer site per database (ADR-031
+                      decision 9).
+                    format: int32
+                    maximum: 999
+                    minimum: 1
+                    type: integer
+                  podsPerSite:
+                    default: 8
+                    description: |-
+                      podsPerSite is P: the largest number of slapd pods any one site of this
+                      mesh may run. It sizes the local block of every database's segment, so
+                      raising it is a renumber and not an in-place widening.
+                    format: int32
+                    maximum: 999
+                    minimum: 1
+                    type: integer
+                type: object
               sites:
                 description: |-
                   sites lists the mesh's sites. Order is presentation only: each site's

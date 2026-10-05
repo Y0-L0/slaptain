@@ -27,7 +27,7 @@ import (
 // as all of it.
 //
 // The blind spot is worst for rid-uniqueness, whose entire purpose is a
-// collision BETWEEN databases: ADR-003 gives each database its own `ridBase`
+// collision BETWEEN databases: ADR-031 gives each database its own `ridSegment`
 // precisely so their RIDs cannot overlap, and a check that reads one database
 // is structurally incapable of finding an overlap. It said "all RIDs unique
 // within each pod" while having verified one database's worth.
@@ -119,7 +119,8 @@ var ridPattern = regexp.MustCompile(`rid=(\d+)`)
 //
 // The cross-database part is the point. A RID identifies a consumer connection
 // within a slapd instance, not within a database, so two databases sharing a
-// ridBase (ADR-003 requires distinct ones and nothing enforces it — see
+// ridSegment (ADR-031 requires distinct ones; the operator and the charts both
+// enforce it — see
 // docs/BACKLOG.md) collide on the same server. The first-database-only version
 // of this check could never have seen that.
 func checkRIDUniqueness(readings []syncreplPodReading) checkResult {

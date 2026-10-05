@@ -144,7 +144,7 @@ loses its volumes, syncrepl restores the DIT from surviving peers).
 
 **Two replicated databases.** `tests/resources/example/` declares
 `database.yaml` (`example-db`) *and* `database2.yaml` (`example-db2`), both at
-`deltaSync: true` with distinct `ridBase`es. That is the shape ADR-019 is about:
+`deltaSync: true` with distinct `ridSegment`s. That is the shape ADR-019 is about:
 with one cluster-shared `cn=accesslog`, every write to one database kicks the
 other database's consumers into a permanent full-DIT refresh while the cluster
 reports itself healthy. `tests/e2e/accesslog_test.go` covers it in the standard
@@ -369,7 +369,8 @@ SlapdMesh removes that peer's syncrepl stanza` (label `mesh-peer-removal`). It
 drops the last mesh site from the `SlapdMesh`, asserts that exactly that peer's
 stanza disappears from every RW pod while the survivors' stanzas stay, then
 restores the site and waits for the stanza to come back. Dropping the *last*
-site matters: external peer RIDs are positional (`ridBase+50+j+1`), so removing
+site matters: an external peer's RID is keyed on the peer site's declared index
+(ADR-031), so removing
 one in the middle renumbers the peers after it. The spec restores the mesh from
 a `DeferCleanup` too, so a failed assertion does not leave the rest of the run
 wired a site short.

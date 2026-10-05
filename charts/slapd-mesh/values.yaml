@@ -279,7 +279,7 @@ databases: []
 #        - "entryCSN eq"
 #        - "entryUUID eq"
 #      replication:
-#        ridBase: 100          # unique per database within a site (ADR-003)
+#        ridSegment: 1         # unique per database within the mesh (ADR-031)
 #        deltaSync: true
 #        syncprovCheckpoint: "500 15"
 #        accesslogPurge: "2+00:00 1+00:00"

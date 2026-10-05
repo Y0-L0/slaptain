@@ -180,7 +180,7 @@ spec:
   suffix: "$SUFFIX"
   replication:
     deltaSync: false   # fake-prod mimics a legacy plain-syncrepl provider
-    ridBase: 100
+    ridSegment: 1
   acls:
     - 'to attrs=userPassword by self write by anonymous auth by * read'
     - 'to * by * read'
@@ -255,7 +255,7 @@ spec:
   suffix: "$SUFFIX"
   replication:
     deltaSync: false   # consumer pulls from a plain-syncrepl source
-    ridBase: 200
+    ridSegment: 2
 EOF
 }
 

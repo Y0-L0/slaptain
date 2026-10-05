@@ -473,6 +473,22 @@ spec:
                       where your peers come from on a mesh, they come from there — and
                       replicasPerPeer below is the one per-peer knob that survives, because it
                       is an input to the derivation rather than an output of it.
+                      Two peers must never declare one siteIndex: a peer's RID slot is
+                      P + siteIndex, so a shared index is a shared slot — one RID for two
+                      providers, which is the shared-connid state slapd never rejects
+                      (ADR-031 decision 4, RID-PLAN hazard 5). The rule below refuses it at
+                      the API server; the operator refuses it again, because a CR applied
+                      with validation off reaches the stanza builder either way.
+
+                      The list is bounded because the uniqueness rule below is O(n^2) — an
+                      `all` over a `filter` — and the API server refuses a CEL rule whose cost
+                      it cannot bound, rejecting THE WHOLE CRD rather than the rule. The bound
+                      is a true constraint rather than an arbitrary one: a peer list longer
+                      than the layout's maxSites - 1 has no remote slot to put the surplus
+                      peers in and the operator would refuse it anyway (ADR-031 decision 1).
+                      24 is double the default maxSites of 12 — far above any mesh this
+                      project contemplates — and leaves the rule comfortably inside the
+                      budget.
                     items:
                       description: |-
                         ExternalPeer defines a cross-cluster peer for multi-site replication.
@@ -556,6 +572,27 @@ spec:
                           format: int32
                           minimum: 1
                           type: integer
+                        siteIndex:
+                          description: |-
+                            siteIndex is this peer's coordinate in the RID matrix's remote block:
+                            a syncrepl link to this peer takes RID 1 + segment*(P+S) + P + siteIndex
+                            (ADR-031 decision 1). It names the LINK, not the remote pod answering it,
+                            so reselecting the far end moves provider= and leaves the RID alone.
+
+                            DERIVED when spec.meshRef is set — it is the peer site's serverIDIndex,
+                            which ADR-028 already requires to be declared and unique — and setting
+                            externalPeers at all alongside meshRef is refused. REQUIRED on a
+                            hand-written peer of a replicating cluster: nothing else can supply a
+                            peer site's identity, and a positional fallback is exactly the inference
+                            ADR-031 forbids.
+
+                            Must be unique within one peer list, and must be below the mesh's
+                            maxSites (S). The bound here is the loosest the band can admit; the
+                            operator refuses it again against the layout actually in force.
+                          format: int32
+                          maximum: 998
+                          minimum: 0
+                          type: integer
                         syncMode:
                           default: delta
                           description: |-
@@ -586,7 +623,14 @@ spec:
                       required:
                       - name
                       type: object
+                    maxItems: 24
                     type: array
+                    x-kubernetes-validations:
+                    - message: 'two externalPeers declare the same siteIndex: a peer''s
+                        RID slot is derived from it, so a shared index gives two providers
+                        one syncrepl RID (ADR-031). Give every peer its own siteIndex.'
+                      rule: self.all(p, !has(p.siteIndex) || self.filter(q, has(q.siteIndex)
+                        && q.siteIndex == p.siteIndex).size() == 1)
                   keepalive:
                     description: |-
                       keepalive sets the TCP keepalive parameters for syncrepl connections.

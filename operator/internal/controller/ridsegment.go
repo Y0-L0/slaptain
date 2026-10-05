@@ -222,53 +222,17 @@ func (r *SlapdDatabaseReconciler) resolveRIDSegment(
 	return judgeRIDSegment(sd, siblings.Items, layout)
 }
 
-// legacyRIDBaseBridgeMax is the highest segment the pre-ADR-031 stanza builder
-// can still express. See legacyRIDBase.
-const legacyRIDBaseBridgeMax = 9
-
-// legacyRIDBase converts a validated segment into the base address the stanza
-// builder still takes.
+// reconcileRIDSegment judges this database's declared segment AND its cluster's
+// external peer list, publishes the verdict, and returns the segment the stanza
+// builder derives its coordinates from — or, on a refusal, the verdict that
+// withholds them.
 //
-// TODO(M4, docs/RID-PLAN.md "M4 — Consumption"): delete this. The builder
-// consumes a coordinate then — ridcoord.Local for an in-cluster provider,
-// ridcoord.Remote for a peer site — and no base address exists any more.
-//
-// Until then the arithmetic is deliberately the pre-ADR-031 one (segment ×
-// 100, which is exactly what ridBase held under the documented convention), so
-// M3 renames a field and changes no RID on any pod. The cost is that the old
-// scheme's own ceiling comes with it: segment 10 would put an external stanza's
-// RID past slapd's 999, which slapd rejects outright. That is refused here
-// rather than emitted, because the one thing worse than a withheld stanza set
-// is a silently wrong one.
-func legacyRIDBase(v ridSegmentVerdict) (int32, ridSegmentVerdict) {
-	if v.Segment < 0 {
-		// Unreachable through the only caller — judgeRIDSegment refuses a
-		// negative segment before the bridge ever sees it. Guarded anyway
-		// because the signature advertises no such precondition, and the cost
-		// of a second caller learning that the hard way is a stanza set with
-		// negative RIDs: slapd parses those with lutil_atoi and does NOT
-		// bounce them the way it bounces 1000.
-		return 0, ridSegmentVerdict{
-			Reason: reasonRIDSegmentOutOfRange,
-			Message: fmt.Sprintf(
-				"spec.replication.ridSegment %d is negative, so it names no coordinate at all. Declare a segment in 0..%d.",
-				v.Segment, legacyRIDBaseBridgeMax),
-		}
-	}
-	if v.Segment > legacyRIDBaseBridgeMax {
-		return 0, ridSegmentVerdict{
-			Reason: reasonRIDSegmentOutOfRange,
-			Message: fmt.Sprintf(
-				"spec.replication.ridSegment %d is not usable yet: the syncrepl stanza builder still addresses RIDs by the pre-ADR-031 base (segment × 100), and a segment above %d walks past slapd's %d ceiling. Declare a segment in 0..%d until the coordinate builder lands (docs/RID-PLAN.md, M4).",
-				v.Segment, legacyRIDBaseBridgeMax, ridcoord.MaxRID, legacyRIDBaseBridgeMax),
-		}
-	}
-	return v.Segment * 100, v
-}
-
-// reconcileRIDSegment judges this database's declared segment and publishes the
-// verdict, returning the base address the stanza builder needs and, on a
-// refusal, the verdict that withholds it.
+// The two judgements share one condition and one withhold because they are one
+// question with two halves: can this database's stanzas be given RIDs at all?
+// A refused segment has no run of RIDs; a peer list that cannot be indexed has
+// no remote slot. Either way every stanza on every pod is withheld, which is
+// the single outcome ADR-031 decision 6 prescribes, so splitting them would
+// publish two conditions that can never disagree.
 //
 // Called on EVERY pass, including the passes where the answer is "there is
 // nothing to judge". That is the whole point: the condition is published
@@ -294,16 +258,20 @@ func (r *SlapdDatabaseReconciler) reconcileRIDSegment(
 	}
 
 	v := r.resolveRIDSegment(ctx, sd, layout)
-	base := int32(0)
 	if v.OK {
-		base, v = legacyRIDBase(v)
+		// The peer list is judged only once the segment is usable: a refusal
+		// naming a peer's siteIndex while the segment itself has no run of
+		// RIDs would send a human to the wrong field.
+		if pv := judgeExternalPeers(sc, layout); !pv.OK {
+			v = pv
+		}
 	}
 	setCondition(&sd.Status.Conditions, ridSegmentCondition(sd, v))
 	if !v.OK {
 		refusal := v
 		return 0, &refusal
 	}
-	return base, nil
+	return v.Segment, nil
 }
 
 // ridSegmentConditionType is where a human looks for the verdict after the

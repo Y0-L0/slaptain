@@ -244,9 +244,15 @@ func TestValidateSelfSite(t *testing.T) {
 // — the operator derives the bind identity per database, so a peer-level value
 // spans every SlapdDatabase and can be right for at most one of them
 // (ADR-019 R9's axis argument).
-func peer(name, caSecret, kubeconfigSecret string) ldapv1alpha1.ExternalPeer {
+// siteIndex is the peer site's DECLARED serverIDIndex, which is also its slot
+// in the RID matrix's remote block (ADR-031 decision 4). It is a parameter
+// rather than a derivation from the fixture's list position on purpose: the two
+// differ in two cases below, and the whole point of the field is that the
+// declared value wins.
+func peer(name string, siteIndex int32, caSecret, kubeconfigSecret string) ldapv1alpha1.ExternalPeer {
 	return ldapv1alpha1.ExternalPeer{
 		Name:          name,
+		SiteIndex:     si(siteIndex),
 		Port:          1025,
 		TLSSecretName: caSecret,
 		Discovery: &ldapv1alpha1.ExternalPeerDiscovery{
@@ -287,8 +293,8 @@ func TestExternalPeersForSite(t *testing.T) {
 			sites: threeSiteMesh(),
 			self:  "site-2",
 			want: []ldapv1alpha1.ExternalPeer{
-				peer("site-1", "site-1-ca", "site-1-kubeconfig"),
-				peer("site-3", "site-3-ca", "site-3-kubeconfig"),
+				peer("site-1", 0, "site-1-ca", "site-1-kubeconfig"),
+				peer("site-3", 2, "site-3-ca", "site-3-kubeconfig"),
 			},
 		},
 		{
@@ -296,8 +302,8 @@ func TestExternalPeersForSite(t *testing.T) {
 			sites: threeSiteMesh(),
 			self:  "site-1",
 			want: []ldapv1alpha1.ExternalPeer{
-				peer("site-2", "site-2-ca", "site-2-kubeconfig"),
-				peer("site-3", "site-3-ca", "site-3-kubeconfig"),
+				peer("site-2", 1, "site-2-ca", "site-2-kubeconfig"),
+				peer("site-3", 2, "site-3-ca", "site-3-kubeconfig"),
 			},
 		},
 		{
@@ -314,7 +320,7 @@ func TestExternalPeersForSite(t *testing.T) {
 			selector: []string{"site-1", "site-2"},
 			self:     "site-2",
 			want: []ldapv1alpha1.ExternalPeer{
-				peer("site-1", "site-1-ca", "site-1-kubeconfig"),
+				peer("site-1", 0, "site-1-ca", "site-1-kubeconfig"),
 			},
 		},
 		{
@@ -325,7 +331,7 @@ func TestExternalPeersForSite(t *testing.T) {
 			selector: []string{"site-3", "site-1"},
 			self:     "site-1",
 			want: []ldapv1alpha1.ExternalPeer{
-				peer("site-3", "site-3-ca", "site-3-kubeconfig"),
+				peer("site-3", 2, "site-3-ca", "site-3-kubeconfig"),
 			},
 		},
 		{
@@ -341,6 +347,7 @@ func TestExternalPeersForSite(t *testing.T) {
 			want: []ldapv1alpha1.ExternalPeer{
 				{
 					Name:          "site-1",
+					SiteIndex:     si(0),
 					Port:          1025,
 					TLSSecretName: "bundle-a",
 					Discovery: &ldapv1alpha1.ExternalPeerDiscovery{
@@ -350,13 +357,26 @@ func TestExternalPeersForSite(t *testing.T) {
 			},
 		},
 		{
-			// The separation the explicit index buys, asserted directly: peers
-			// are derived from NAMES and Secret references, never from the
-			// index. Same three sites, same list order, wildly different
-			// indices — byte-identical peer set. (The index still has to be
-			// well-formed, because a malformed site list is rejected wholesale
-			// rather than half-used; that is the "malformed mesh" case below.)
-			name: "peer set does not depend on the indices",
+			// WHICH sites are peers, and in what order, is derived from NAMES
+			// and Secret references and never from the index — same three
+			// sites, same list order, wildly different indices, same two peers
+			// in the same order.
+			//
+			// What each peer CARRIES does depend on the index, and that is the
+			// half this case exists for since ADR-031 M4a: a peer's siteIndex
+			// is the site's DECLARED serverIDIndex, not its position in the
+			// list. Here the two disagree on purpose — site-1 sits at position
+			// 0 and declares 7; site-3 sits at position 2 and declares 39 — so
+			// a derivation that reached for the loop variable passes every
+			// other case in this table and fails this one.
+			//
+			// It is the same distinction M1 drew for a remote pod's ordinal,
+			// one level up: identity is declared, position is an accident of
+			// how somebody sorted a YAML list. Under ADR-031 the stakes are a
+			// RID — the number is 1 + segment*M + P + siteIndex, so a peer
+			// given position 0 instead of index 7 writes a stanza in another
+			// site's slot, and slapd takes it without a word.
+			name: "a peer carries its declared index, not its list position",
 			sites: []ldapv1alpha1.MeshSite{
 				{Name: "site-1", ServerIDIndex: si(7)},
 				{Name: "site-2", ServerIDIndex: si(0)},
@@ -364,15 +384,18 @@ func TestExternalPeersForSite(t *testing.T) {
 			},
 			self: "site-2",
 			want: []ldapv1alpha1.ExternalPeer{
-				peer("site-1", "site-1-ca", "site-1-kubeconfig"),
-				peer("site-3", "site-3-ca", "site-3-kubeconfig"),
+				peer("site-1", 7, "site-1-ca", "site-1-kubeconfig"),
+				peer("site-3", 39, "site-3-ca", "site-3-kubeconfig"),
 			},
 		},
 		{
 			// Reordering the list DOES reorder the peers, on purpose: the
 			// stanza order follows the list so that an unchanged mesh keeps
 			// producing an unchanged cn=config. What it must not do is change
-			// any site's identity — that is TestServerIDBaseForSite's job.
+			// any site's identity — that is TestServerIDBaseForSite's job, and
+			// since M4a this case watches it too: site-3 is first in the list
+			// and still carries siteIndex 2, site-1 is last and still carries
+			// 0, so reordering moves stanzas and renumbers nothing.
 			name: "peer order follows the list, not the index",
 			sites: []ldapv1alpha1.MeshSite{
 				{Name: "site-3", ServerIDIndex: si(2)},
@@ -381,8 +404,8 @@ func TestExternalPeersForSite(t *testing.T) {
 			},
 			self: "site-2",
 			want: []ldapv1alpha1.ExternalPeer{
-				peer("site-3", "site-3-ca", "site-3-kubeconfig"),
-				peer("site-1", "site-1-ca", "site-1-kubeconfig"),
+				peer("site-3", 2, "site-3-ca", "site-3-kubeconfig"),
+				peer("site-1", 0, "site-1-ca", "site-1-kubeconfig"),
 			},
 		},
 		{

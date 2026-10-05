@@ -43,7 +43,12 @@ func meshSpec() *ldapv1alpha1.SlapdMeshSpec {
 func peersForSite2() []ldapv1alpha1.ExternalPeer {
 	return []ldapv1alpha1.ExternalPeer{
 		{
-			Name:          "site-1",
+			Name: "site-1",
+			// The site's declared serverIDIndex, which is also its slot in the
+			// RID matrix's remote block (ADR-031 decision 4). site-1 declares
+			// 0 and site-3 declares 2 in threeSiteMesh; a wiring that dropped
+			// the field would leave every cross-site stanza without a RID.
+			SiteIndex:     si(0),
 			Port:          1025,
 			TLSSecretName: "site-1-ca",
 			Discovery: &ldapv1alpha1.ExternalPeerDiscovery{
@@ -52,6 +57,7 @@ func peersForSite2() []ldapv1alpha1.ExternalPeer {
 		},
 		{
 			Name:          "site-3",
+			SiteIndex:     si(2),
 			Port:          1025,
 			TLSSecretName: "site-3-ca",
 			Discovery: &ldapv1alpha1.ExternalPeerDiscovery{
@@ -116,11 +122,11 @@ func TestDeriveClusterWiring(t *testing.T) {
 			want: &meshWiring{
 				ServerIDBase: 0,
 				ExternalPeers: []ldapv1alpha1.ExternalPeer{
-					{Name: "site-2", Port: 1025, TLSSecretName: "site-2-ca",
+					{Name: "site-2", SiteIndex: si(1), Port: 1025, TLSSecretName: "site-2-ca",
 						Discovery: &ldapv1alpha1.ExternalPeerDiscovery{
 							KubeconfigSecret: ldapv1alpha1.KubeconfigSecretRef{Name: "site-2-kubeconfig"},
 						}},
-					{Name: "site-3", Port: 1025, TLSSecretName: "site-3-ca",
+					{Name: "site-3", SiteIndex: si(2), Port: 1025, TLSSecretName: "site-3-ca",
 						Discovery: &ldapv1alpha1.ExternalPeerDiscovery{
 							KubeconfigSecret: ldapv1alpha1.KubeconfigSecretRef{Name: "site-3-kubeconfig"},
 						}},
@@ -142,7 +148,7 @@ func TestDeriveClusterWiring(t *testing.T) {
 			want: &meshWiring{
 				ServerIDBase: 100,
 				ExternalPeers: []ldapv1alpha1.ExternalPeer{
-					{Name: "site-3", Port: 1025, TLSSecretName: "site-3-ca",
+					{Name: "site-3", SiteIndex: si(2), Port: 1025, TLSSecretName: "site-3-ca",
 						Discovery: &ldapv1alpha1.ExternalPeerDiscovery{
 							KubeconfigSecret: ldapv1alpha1.KubeconfigSecretRef{Name: "site-3-kubeconfig"},
 						}},
@@ -408,7 +414,16 @@ func fmtWiring(w *meshWiring) string {
 	}
 	s := "base=" + itoa(int(w.ServerIDBase))
 	for _, p := range w.ExternalPeers {
-		s += " peer{" + p.Name + " ca=" + p.TLSSecretName
+		// siteIndex is rendered because it is a RID coordinate (ADR-031
+		// decision 4): a peer whose index is wrong looks identical to a
+		// correct one in every other field, and a diff that prints two
+		// identical lines is how a reader concludes the test is broken rather
+		// than the code.
+		idx := "<unset>"
+		if p.SiteIndex != nil {
+			idx = itoa(int(*p.SiteIndex))
+		}
+		s += " peer{" + p.Name + " siteIndex=" + idx + " ca=" + p.TLSSecretName
 		if p.Discovery != nil {
 			s += " kubeconfig=" + p.Discovery.KubeconfigSecret.Name
 		}

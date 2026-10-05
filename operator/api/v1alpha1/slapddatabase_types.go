@@ -99,15 +99,11 @@ type DatabaseReplicationConfig struct {
 	// Required when replication is enabled. Migrating from ridBase: divide by
 	// 100 — 0 stays 0, 100 becomes 1, 200 becomes 2.
 	//
-	// TEMPORARY CEILING: although the default layout admits 49 segments and
-	// this field admits 499, the operator currently REFUSES any segment above
-	// 9 and withholds that database's syncrepl stanzas, reporting
-	// RIDSegmentOutOfRange. The stanza builder still addresses RIDs by the
-	// pre-ADR-031 base (segment × 100), and a tenth database would put an
-	// external stanza past slapd's 999 ceiling. Refusing is the safe direction
-	// — a silently wrong RID is the failure ADR-031 exists to remove — but
-	// until the coordinate builder lands (docs/RID-PLAN.md, M4) the usable
-	// range is 0..9.
+	// The usable range is the layout's own C = floor(999 / (podsPerSite +
+	// maxSites)) — 0..48 at the default layout. The bound this field declares
+	// is the loosest any layout can admit; the operator refuses the segment
+	// again against the layout actually in force, reporting
+	// RIDSegmentOutOfRange and withholding that database's syncrepl stanzas.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=499

@@ -302,10 +302,26 @@ func externalPeersForSite(sites []ldapv1alpha1.MeshSite, selector []string, iden
 			}
 		}
 		kubeconfig := s.KubeconfigSecretFor()
+		// The peer's coordinate in the RID matrix's remote block is its
+		// DECLARED serverIDIndex, never its position in spec.sites: the list
+		// is freely reorderable and gaps are legal, so position names a
+		// different site tomorrow (MESH-PLAN hazard 2). meshSiteIndex has
+		// already validated every site's index, so the pointer is non-nil
+		// here; it is read defensively anyway, because the alternative to a
+		// nil check is a panic inside a reconcile.
+		var siteIndex *int32
+		if s.ServerIDIndex != nil {
+			v := *s.ServerIDIndex
+			siteIndex = &v // copied, so the derived peer never aliases the mesh object
+		}
 		peers = append(peers, ldapv1alpha1.ExternalPeer{
 			Name:          normalizeSiteName(s.Name),
 			Port:          externalPeerLDAPSPort,
 			TLSSecretName: s.CASecretNameFor(),
+			// ADR-031 decision 4: under meshRef nothing is hand-written, so
+			// the derivation is what supplies each peer's remote coordinate.
+			// Without it a mesh cluster's cross-site stanzas have no RID.
+			SiteIndex: siteIndex,
 			// The cluster's fan-out, stamped onto every derived peer. A mesh
 			// cluster cannot reach externalPeers[].replicasPerPeer — the whole
 			// field is derived and setting it is refused — so without this the

@@ -11,6 +11,8 @@ You may obtain a copy of the License at
 package controller
 
 import (
+	"fmt"
+
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
@@ -42,5 +44,18 @@ func databasePhase(
 	pendingWork bool,
 	ridRefusal *ridSegmentVerdict,
 ) (ldapv1alpha1.SlapdDatabasePhase, string, string) {
-	panic("not implemented")
+	if len(appliedPods) == 0 {
+		return ldapv1alpha1.DatabasePhaseError, "NoPodsReachable",
+			"Could not apply database to any pod"
+	}
+	if ridRefusal != nil {
+		return ldapv1alpha1.DatabasePhaseDegraded, ridRefusal.Reason, ridRefusal.Message
+	}
+	if pendingWork {
+		return ldapv1alpha1.DatabasePhaseDegraded, "PartiallyApplied",
+			fmt.Sprintf("Database applied to %d pods, %d failed or pending",
+				len(appliedPods), len(failedPods))
+	}
+	return ldapv1alpha1.DatabasePhaseRunning, "Applied",
+		fmt.Sprintf("Database applied to %d pods", len(appliedPods))
 }

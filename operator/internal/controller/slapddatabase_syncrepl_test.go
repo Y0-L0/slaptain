@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
+	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/ridcoord"
 )
 
 // extractRIDs returns the set of rid=NNN values from a list of syncrepl stanzas.
@@ -66,7 +67,7 @@ func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 		dbName        = "default"
 		replicas      = int32(3)
 		replPW        = "pw"
-		ridBase       = int32(0)
+		ridSegment    = int32(0) // was ridBase 0; ridSegment = ridBase / 100
 		retry         = "10 +"
 		keepalive     = ""
 		deltaSync     = true
@@ -79,8 +80,10 @@ func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 		for i, ip := range remoteIPs {
 			uris[i] = fmt.Sprintf("ldaps://%s:1025", ip)
 		}
+		extRID, _ := externalStanzaRID(ridcoord.DefaultLayout(), ridSegment, 0)
 		return []resolvedExternalPeer{{
 			Name:            "site-b",
+			RID:             extRID,
 			URIs:            uris,
 			ReplicasPerPeer: rpp,
 			BindDN:          "cn=replication," + suffix,
@@ -89,10 +92,11 @@ func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 	}
 
 	build := func(ordinal int32, peers []resolvedExternalPeer) []string {
+		rids, _ := inClusterStanzaRIDs(ridcoord.DefaultLayout(), ridSegment, replicas, &ordinal)
 		return buildDatabaseSyncRepl(
 			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
 			replicas, ordinal, replPW,
-			true, ridBase, retry, keepalive, deltaSync,
+			true, rids, retry, keepalive, deltaSync,
 			ldapv1alpha1.AccesslogSuffix(dbName),
 			peers, nil, false,
 		)
@@ -117,57 +121,37 @@ func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 		}
 	})
 
-	t.Run("rpp=N degrades to full mesh", func(t *testing.T) {
-		peers := mkPeer(int32(len(remoteIPs)))
-		for ord := int32(0); ord < replicas; ord++ {
-			ext := filterExternal(build(ord, peers), "10.0.0.")
-			if len(ext) != len(remoteIPs) {
-				t.Fatalf("ordinal %d: got %d external stanzas, want %d", ord, len(ext), len(remoteIPs))
-			}
-			seen := map[string]bool{}
-			for _, ip := range remoteIPs {
-				for _, st := range ext {
-					if strings.Contains(st, ip) {
-						seen[ip] = true
-					}
-				}
-			}
-			if len(seen) != len(remoteIPs) {
-				t.Fatalf("ordinal %d: full mesh missing IPs, seen=%v stanzas=%v", ord, seen, ext)
-			}
-		}
-	})
+	// Three subtests stood here and were retired by ADR-031 M4a:
+	//
+	//   "rpp=N degrades to full mesh"
+	//   "rpp>N silently caps at N"
+	//   "rpp=2 picks (i+0, i+1) mod N per local pod"
+	//
+	// All three pinned MORE THAN ONE syncrepl link from one local pod to one
+	// peer site. ADR-031 decision 9 abolishes that shape: the remote block of a
+	// database's segment is S slots wide, one per peer site, so a second link
+	// from a pod to a peer has no slot of its own and would have to share the
+	// first one's RID — which slapd loads in silence and then runs on a shared
+	// connid. The operator now refuses replicasPerPeer >= 2 outright
+	// (judgeExternalPeers, reasonReplicasPerPeerUnsupported).
+	//
+	// They are retired rather than repaired because no implementation can
+	// satisfy them AND their own sibling below, "RIDs unique within each pod's
+	// stanzas" — which is as clean a proof as one gets that they describe a
+	// scheme that no longer exists.
+	//
+	// The redundancy they were written for is not cancelled, only moved: ADR-032
+	// brings the quantity back as a site-pair R, spread across DISTINCT local
+	// pods, which needs no second slot. Whoever implements that will want
+	// fixtures of this shape again — mkPeer, filterExternal and
+	// extractProviderURIs are all still here — but written per site pair, not
+	// per pod.
 
-	t.Run("rpp>N silently caps at N", func(t *testing.T) {
-		peers := mkPeer(int32(len(remoteIPs)) + 5)
-		ext := filterExternal(build(0, peers), "10.0.0.")
-		if len(ext) != len(remoteIPs) {
-			t.Fatalf("got %d external stanzas, want %d (cap)", len(ext), len(remoteIPs))
-		}
-	})
-
-	t.Run("rpp=2 picks (i+0, i+1) mod N per local pod", func(t *testing.T) {
-		peers := mkPeer(2)
-		want := map[int32][]string{
-			0: {"10.0.0.10", "10.0.0.11"},
-			1: {"10.0.0.11", "10.0.0.12"},
-			2: {"10.0.0.12", "10.0.0.10"},
-		}
-		for ord, ips := range want {
-			uris := extractProviderURIs(filterExternal(build(ord, peers), "10.0.0."))
-			if len(uris) != len(ips) {
-				t.Fatalf("ordinal %d: got %d uris, want %d: %v", ord, len(uris), len(ips), uris)
-			}
-			for k, ip := range ips {
-				if !strings.Contains(uris[k], ip) {
-					t.Fatalf("ordinal %d connection %d: want %s, got %s", ord, k, ip, uris[k])
-				}
-			}
-		}
-	})
-
+	// Pointed at a single-link peer since M4a: one link per peer site is the
+	// only topology ADR-031 decision 9 admits, and uniqueness is exactly what a
+	// second link to the same site would break.
 	t.Run("RIDs unique within each pod's stanzas", func(t *testing.T) {
-		peers := mkPeer(2)
+		peers := mkPeer(1)
 		for ord := int32(0); ord < replicas; ord++ {
 			rids := extractRIDs(build(ord, peers))
 			seen := map[string]bool{}
@@ -181,8 +165,10 @@ func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 	})
 
 	t.Run("URI-mode peer unaffected by ReplicasPerPeer", func(t *testing.T) {
+		uriRID, _ := externalStanzaRID(ridcoord.DefaultLayout(), ridSegment, 0)
 		peers := []resolvedExternalPeer{{
 			Name:            "site-uri",
+			RID:             uriRID,
 			URIs:            []string{"ldaps://remote.example.com:636"},
 			ReplicasPerPeer: 1,
 			BindDN:          "cn=repl," + suffix,
@@ -201,8 +187,10 @@ func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 	t.Run("consumer-only suppresses in-cluster stanzas, keeps external", func(t *testing.T) {
 		// In consumer-only mode (ADR-010), each pod independently consumes from
 		// externalPeers — there is no in-cluster mesh.
+		legacyRID, _ := externalStanzaRID(ridcoord.DefaultLayout(), ridSegment, 0)
 		peers := []resolvedExternalPeer{{
 			Name:            "legacy-prod",
+			RID:             legacyRID,
 			URIs:            []string{"ldaps://10.1.1.20:636"},
 			ReplicasPerPeer: 1,
 			BindDN:          "cn=syncuser,ou=config,o=example",
@@ -212,7 +200,7 @@ func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 		stanzas := buildDatabaseSyncRepl(
 			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
 			replicas, 0, replPW,
-			true, ridBase, retry, keepalive, deltaSync,
+			true, nil, retry, keepalive, deltaSync,
 			ldapv1alpha1.AccesslogSuffix(dbName),
 			peers, nil, true, // consumerOnly=true
 		)
@@ -251,10 +239,14 @@ func TestBuildDatabaseSyncRepl_PerDatabaseLogbase(t *testing.T) {
 		dbName        = "secondary"
 		replicas      = int32(3)
 		replPW        = "pw"
-		ridBase       = int32(200)
+		ridSegment    = int32(2) // was ridBase 200
 		retry         = "10 +"
 		keepalive     = ""
 	)
+	layout := ridcoord.DefaultLayout()
+	rwRIDs, _ := inClusterStanzaRIDs(layout, ridSegment, replicas, i32(0))
+	roRIDs, _ := inClusterStanzaRIDs(layout, ridSegment, replicas, nil)
+	extRID, _ := externalStanzaRID(layout, ridSegment, 0)
 
 	wantLogbase := `logbase="cn=accesslog-secondary"`
 
@@ -264,7 +256,7 @@ func TestBuildDatabaseSyncRepl_PerDatabaseLogbase(t *testing.T) {
 		stanzas := buildDatabaseSyncRepl(
 			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
 			replicas, 0, replPW,
-			true, ridBase, retry, keepalive, true,
+			true, rwRIDs, retry, keepalive, true,
 			ldapv1alpha1.ExternalLogBase(sd),
 			nil, nil, false,
 		)
@@ -282,7 +274,7 @@ func TestBuildDatabaseSyncRepl_PerDatabaseLogbase(t *testing.T) {
 		stanzas := buildDatabaseSyncReplRO(
 			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
 			replicas, replPW,
-			true, ridBase, retry, keepalive, true,
+			true, roRIDs, retry, keepalive, true,
 			nil,
 		)
 		if len(stanzas) == 0 {
@@ -298,6 +290,7 @@ func TestBuildDatabaseSyncRepl_PerDatabaseLogbase(t *testing.T) {
 	mkExternal := func(plain bool) []resolvedExternalPeer {
 		return []resolvedExternalPeer{{
 			Name:            "site-b",
+			RID:             extRID,
 			URIs:            []string{"ldaps://10.9.9.9:1025"},
 			ReplicasPerPeer: 1,
 			BindDN:          "cn=replication," + suffix,
@@ -309,7 +302,7 @@ func TestBuildDatabaseSyncRepl_PerDatabaseLogbase(t *testing.T) {
 		return filterExternal(buildDatabaseSyncRepl(
 			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
 			replicas, 0, replPW,
-			true, ridBase, retry, keepalive, true,
+			true, rwRIDs, retry, keepalive, true,
 			ldapv1alpha1.ExternalLogBase(sd),
 			mkExternal(plain), nil, false,
 		), "10.9.9.9")
@@ -400,15 +393,20 @@ func TestBuildDatabaseSyncRepl_StanzaTimeouts(t *testing.T) {
 		dbName        = "primary"
 		replicas      = int32(3)
 		replPW        = "pw"
-		ridBase       = int32(100)
+		ridSegment    = int32(1) // was ridBase 100
 		retry         = "10 +"
 	)
 	keepalive := defaultKeepalive
+	layout := ridcoord.DefaultLayout()
+	rwRIDs, _ := inClusterStanzaRIDs(layout, ridSegment, replicas, i32(0))
+	roRIDs, _ := inClusterStanzaRIDs(layout, ridSegment, replicas, nil)
+	extRID, _ := externalStanzaRID(layout, ridSegment, 0)
 
 	sd := &ldapv1alpha1.SlapdDatabase{}
 	sd.Name = dbName
 	external := []resolvedExternalPeer{{
 		Name:            "site-b",
+		RID:             extRID,
 		URIs:            []string{"ldaps://10.9.9.9:1025"},
 		ReplicasPerPeer: 1,
 		BindDN:          "cn=replication," + suffix,
@@ -419,14 +417,14 @@ func TestBuildDatabaseSyncRepl_StanzaTimeouts(t *testing.T) {
 		"RW (in-cluster + external)": buildDatabaseSyncRepl(
 			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
 			replicas, 0, replPW,
-			true, ridBase, retry, keepalive, true,
+			true, rwRIDs, retry, keepalive, true,
 			ldapv1alpha1.ExternalLogBase(sd),
 			external, nil, false,
 		),
 		"read-only replica": buildDatabaseSyncReplRO(
 			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
 			replicas, replPW,
-			true, ridBase, retry, keepalive, true,
+			true, roRIDs, retry, keepalive, true,
 			nil,
 		),
 	}

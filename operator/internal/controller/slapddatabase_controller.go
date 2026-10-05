@@ -221,11 +221,19 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// for why a verdict published only inside the replication gate outlives the
 	// configuration that produced it.
 	//
-	// TODO(M4, docs/RID-PLAN.md "M4 — Consumption"): resolve the layout from
-	// the mesh (SlapdMesh.spec.ridLayout under meshRef, the defaults
-	// otherwise). The default here is a seam, not a decision — a mesh that
-	// narrows its layout is not yet obeyed.
-	ridBase, ridRefusal := r.reconcileRIDSegment(ctx, sc, sd, ridcoord.DefaultLayout())
+	// The layout comes from the mesh under meshRef and from the defaults
+	// otherwise (ADR-031 decision 5). An unreadable mesh is deliberately NOT
+	// excused into the defaults: ridLayoutFor returns an unusable layout
+	// alongside its error, and the judgement below refuses it — so an
+	// apiserver blip withholds stanzas rather than renumbering this site and
+	// no other (RID-PLAN hazard 3).
+	ridLayout, ridLayoutErr := ridLayoutFor(ctx, r.Client, sc)
+	if ridLayoutErr != nil {
+		log.Info("RID layout unresolved: syncrepl stanzas are withheld until the "+
+			"SlapdMesh can be read (ADR-031 decision 5)",
+			"database", sd.Name, "meshRef", sc.Spec.MeshRef, "err", ridLayoutErr)
+	}
+	ridSegment, ridRefusal := r.reconcileRIDSegment(ctx, sc, sd, ridLayout)
 
 	// RW pods.
 	for i := int32(0); i < replicas; i++ {
@@ -411,7 +419,7 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				"database", sd.Name)
 			pendingWork = true
 		default:
-			skipped, err := r.reconcileReplication(ctx, sc, sd, configPW, healthyPods, ridBase)
+			skipped, err := r.reconcileReplication(ctx, sc, sd, configPW, healthyPods, ridLayout, ridSegment)
 			if err != nil {
 				return ctrl.Result{}, fmt.Errorf("reconcileReplication: %w", err)
 			}
@@ -436,30 +444,10 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		sd.Status.DataObserved = true
 	}
 
-	// 11. Update status.
-	phase := ldapv1alpha1.DatabasePhaseRunning
-	reason := "Applied"
-	msg := fmt.Sprintf("Database applied to %d pods", len(appliedPods))
-	if pendingWork {
-		phase = ldapv1alpha1.DatabasePhaseDegraded
-		reason = "PartiallyApplied"
-		msg = fmt.Sprintf("Database applied to %d pods, %d failed or pending",
-			len(appliedPods), len(failedPods))
-	}
-	if len(appliedPods) == 0 {
-		phase = ldapv1alpha1.DatabasePhaseError
-		reason = "NoPodsReachable"
-		msg = "Could not apply database to any pod"
-	}
-	// A refused RID segment names itself in the phase, over the generic
-	// "PartiallyApplied": it is the one pending item a human fixes by editing
-	// the CR rather than by waiting (ADR-031 decision 6). It does not override
-	// Error — a database no pod can be reached on has a louder problem.
-	if ridRefusal != nil && phase != ldapv1alpha1.DatabasePhaseError {
-		phase = ldapv1alpha1.DatabasePhaseDegraded
-		reason = ridRefusal.Reason
-		msg = ridRefusal.Message
-	}
+	// 11. Update status. The precedence lives in databasePhase, which is pure
+	//      and therefore assertable — inline here it was dead in every test,
+	//      because the envtest fixtures have no pods at all.
+	phase, reason, msg := databasePhase(appliedPods, failedPods, pendingWork, ridRefusal)
 	r.setStatus(ctx, sd, phase, appliedPods, failedPods, reason, msg)
 
 	// Unhealthy → the tight retry; healthy → a slow resync floor, so that state
@@ -2440,9 +2428,11 @@ func ldapEntryExists(conn *ldap.Conn, dn string) (bool, error) {
 // ── Replication ──────────────────────────────────────────────────────────────
 
 // reconcileReplication applies syncrepl stanzas for this database to each pod.
-// ridBase is the already-validated base address of this database's run of
-// replica IDs — see legacyRIDBase, and ADR-031 for what replaces it. The caller
-// withholds this whole step rather than passing a base it could not justify.
+// layout and segment are the already-validated RID coordinate system this
+// database addresses its stanzas in (ADR-031): an in-cluster provider at pod
+// ordinal k is Local(segment, k), a link to peer site s is Remote(segment, s).
+// The caller withholds this whole step rather than passing a coordinate it
+// could not justify.
 //
 // healthyPods names the pods whose per-pod database reconcile completed in this
 // pass; a pod outside the set is skipped and the caller requeues.
@@ -2479,7 +2469,8 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 	sd *ldapv1alpha1.SlapdDatabase,
 	configPW string,
 	healthyPods map[string]bool,
-	ridBase int32,
+	layout ridcoord.Layout,
+	segment int32,
 ) (bool, error) {
 	log := logf.FromContext(ctx)
 
@@ -2513,6 +2504,29 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 	// per-local-pod inside buildDatabaseSyncRepl.
 	var externalPeers []resolvedExternalPeer
 	for _, ep := range sc.Spec.Replication.ExternalPeers {
+		// The link's coordinate, before anything about the far end is
+		// resolved: the RID names the LINK to this peer SITE, not the remote
+		// pod that happens to answer it (ADR-031 decision 1), so reselecting
+		// the far end moves provider= and leaves the number alone.
+		//
+		// reconcileRIDSegment has already judged the whole peer list, so
+		// neither branch below is reachable from a CR the operator accepted.
+		// They are nevertheless a withhold and not a skip: a peer dropped here
+		// would be a stanza set short by one link, which olcSyncRepl's atomic
+		// Replace turns into a deletion of live replication (RID-PLAN hazard
+		// 2).
+		if ep.SiteIndex == nil {
+			log.Info("syncrepl stanzas withheld: external peer declares no siteIndex, "+
+				"so its link has no RID (ADR-031 decision 4)", "peer", ep.Name)
+			return true, nil
+		}
+		peerRID, err := externalStanzaRID(layout, segment, *ep.SiteIndex)
+		if err != nil {
+			log.Info("syncrepl stanzas withheld: no RID for the link to this peer site",
+				"peer", ep.Name, "siteIndex", *ep.SiteIndex, "err", err)
+			return true, nil
+		}
+
 		tlsCACertPath := ""
 		if ep.TLSSecretName != "" {
 			tlsCACertPath = "/etc/openldap/tls/peers/" + ep.Name + "/ca.crt"
@@ -2584,6 +2598,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 			}
 			externalPeers = append(externalPeers, resolvedExternalPeer{
 				Name:            ep.Name,
+				RID:             peerRID,
 				URIs:            uris,
 				ReplicasPerPeer: rpp,
 				BindDN:          bindDN,
@@ -2594,6 +2609,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 		} else {
 			externalPeers = append(externalPeers, resolvedExternalPeer{
 				Name:            ep.Name,
+				RID:             peerRID,
 				URIs:            providerAddresses(providersFromURI(ep.URI)),
 				ReplicasPerPeer: 1,
 				BindDN:          bindDN,
@@ -2634,6 +2650,14 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 		multiProvider = "FALSE"
 	}
 
+	// The in-cluster providers this cluster has, as a RID set. Consumer-only
+	// clusters have none: each pod consumes from externalPeers and there is no
+	// in-cluster mesh (ADR-010), so there is no local block to address.
+	inClusterReplicas := replicas
+	if consumerOnly {
+		inClusterReplicas = 0
+	}
+
 	// Apply to RW pods.
 	for i := int32(0); i < replicas; i++ {
 		podName := fmt.Sprintf("%s-%d", sc.Name, i)
@@ -2647,10 +2671,22 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 			continue
 		}
 
+		// Per pod, because the pod's own ordinal is the one slot it does not
+		// write. A refusal is the whole pass's, not this pod's: every pod of
+		// the fleet would refuse identically, and writing the ones that
+		// happened to be judged first would leave the mesh half-renumbered.
+		inClusterRIDs, err := inClusterStanzaRIDs(layout, segment, inClusterReplicas, &i)
+		if err != nil {
+			log.Info("syncrepl stanzas withheld: no RID for this cluster's in-cluster "+
+				"providers (ADR-031); the pods keep the stanzas they have",
+				"database", sd.Name, "segment", segment, "err", err)
+			return true, nil
+		}
+
 		desired := buildDatabaseSyncRepl(
 			sc.Name, headlessSvc, sc.Namespace, r.ClusterDomain, sd.Spec.Suffix, sd.Name,
 			replicas, i, replPassword,
-			tlsEnabled, ridBase,
+			tlsEnabled, inClusterRIDs,
 			retryInterval, keepalive,
 			useDeltaSync,
 			ldapv1alpha1.ExternalLogBase(sd),
@@ -2685,10 +2721,20 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 				continue
 			}
 
+			// nil selfOrdinal: an RO pod is not a provider, so it consumes
+			// from every one of them and skips nothing.
+			inClusterRIDs, err := inClusterStanzaRIDs(layout, segment, inClusterReplicas, nil)
+			if err != nil {
+				log.Info("syncrepl stanzas withheld for read-only pods: no RID for this "+
+					"cluster's in-cluster providers (ADR-031)",
+					"database", sd.Name, "segment", segment, "err", err)
+				return true, nil
+			}
+
 			desired := buildDatabaseSyncReplRO(
 				sc.Name, headlessSvc, sc.Namespace, r.ClusterDomain, sd.Spec.Suffix, sd.Name,
 				replicas, replPassword,
-				tlsEnabled, ridBase,
+				tlsEnabled, inClusterRIDs,
 				retryInterval, keepalive,
 				useDeltaSync,
 				replNetIPs,
@@ -2741,7 +2787,11 @@ func externalBindIdentity(overrideBindDN, overrideSecretName, overridePassword, 
 // Multi-pod peers have URIs of length N (one per remote pod) and the fan-out
 // is applied per-local-pod via diagonal-first selection in buildDatabaseSyncRepl.
 type resolvedExternalPeer struct {
-	Name            string
+	Name string
+	// RID is this pod's coordinate for the LINK to that peer site, already
+	// derived through ridcoord (ADR-031 decision 1). One per peer, because a
+	// pod holds at most one link per peer site per database (decision 9).
+	RID             int32
 	URIs            []string
 	ReplicasPerPeer int32
 	BindDN          string
@@ -2753,11 +2803,19 @@ type resolvedExternalPeer struct {
 	PlainSyncRepl bool
 }
 
-// buildDatabaseSyncRepl computes syncrepl stanzas for one RW pod using per-database
-// ridBase. In-cluster peer i → RID = ridBase + i + 1. External stanzas are numbered
-// sequentially starting at ridBase + 50 + 1, in the order peers appear in the spec.
-// For each multi-pod external peer, only ReplicasPerPeer remote URIs are selected,
-// using diagonal-first assignment URIs[(ordinal + k) % len(URIs)]; this keeps each
+// buildDatabaseSyncRepl computes syncrepl stanzas for one RW pod.
+//
+// Every RID it emits was derived by the caller through internal/ridcoord and is
+// handed in already: inClusterRIDs maps a provider's pod ordinal to that
+// provider's RID (the caller's inClusterStanzaRIDs, with this pod's own ordinal
+// already omitted), and each resolvedExternalPeer carries the RID of this pod's
+// link to that peer site. The arithmetic is NOT repeated here — one coordinate
+// function, not two (RID-PLAN hazard 1): a second spelling does not fail to
+// compile, it produces a stanza carrying another provider's number, which slapd
+// accepts in silence.
+//
+// For each multi-pod external peer, one remote URI is selected by
+// diagonal-first assignment URIs[ordinal % len(URIs)]; this keeps each
 // local pod talking to a distinct slice of the remote cluster while the remote
 // cluster's own internal mesh fans the data out across all remote pods.
 // When replNetIPs is non-nil and contains an IP for a peer pod, that IP is used instead of
@@ -2767,7 +2825,7 @@ func buildDatabaseSyncRepl(
 	replicas, ordinal int32,
 	replPassword string,
 	tlsEnabled bool,
-	ridBase int32,
+	inClusterRIDs map[int32]int32,
 	retryInterval, keepalive string,
 	deltaSync bool,
 	externalLogSuffix string,
@@ -2825,7 +2883,13 @@ func buildDatabaseSyncRepl(
 		if i == ordinal {
 			continue
 		}
-		rid := fmt.Sprintf("%03d", ridBase+i+1)
+		// The caller's map is this pod's complete in-cluster set; a provider
+		// missing from it was skipped there, not here.
+		coord, known := inClusterRIDs[i]
+		if !known {
+			continue
+		}
+		rid := fmt.Sprintf("%03d", coord)
 		peerPodName := fmt.Sprintf("%s-%d", clusterName, i)
 		peerHost := fmt.Sprintf("%s.%s.%s.svc.%s", peerPodName, headlessSvc, namespace, clusterDomain)
 		peerTLSOpt := tlsOpt
@@ -2855,9 +2919,11 @@ func buildDatabaseSyncRepl(
 		stanzas = append(stanzas, stanza)
 	}
 
-	// External peer stanzas: RID = ridBase + 50 + offset + 1, offset incremented
-	// across all emitted external stanzas (across peers and selected URIs).
-	externalOffset := int32(0)
+	// External peer stanzas: one per peer SITE, carrying that link's remote
+	// coordinate. ADR-031 decision 9 — a pod holds at most one syncrepl link to
+	// any peer site for one database, which is what makes one remote slot per
+	// peer site enough; replicasPerPeer >= 2 is refused upstream
+	// (judgeExternalPeers) rather than emitted as two stanzas sharing one RID.
 	for _, ep := range externalPeers {
 		baseTLSOpt := ""
 		if ep.TLSCACertPath != "" {
@@ -2871,13 +2937,6 @@ func buildDatabaseSyncRepl(
 		if n == 0 {
 			continue
 		}
-		rpp := ep.ReplicasPerPeer
-		if rpp < 1 {
-			rpp = 1
-		}
-		if rpp > n {
-			rpp = n
-		}
 
 		// Per-peer delta opts: omit logbase / syncdata=accesslog when the peer
 		// is configured for plain syncrepl (ADR-011) — typically a legacy
@@ -2887,31 +2946,32 @@ func buildDatabaseSyncRepl(
 			epDeltaOpts = ""
 		}
 
-		for k := int32(0); k < rpp; k++ {
-			uri := ep.URIs[(ordinal+k)%n]
-			rid := fmt.Sprintf("%03d", ridBase+50+externalOffset+1)
-			externalOffset++
+		// Exactly one link, and diagonal-first selection of WHICH remote pod
+		// answers it: ordinal % n spreads the site's pods across the local
+		// fleet while the remote cluster's own mesh fans the data out. The
+		// selection moves provider= and never the RID (ADR-031 decision 1).
+		uri := ep.URIs[ordinal%n]
+		rid := fmt.Sprintf("%03d", ep.RID)
 
-			epTLSOpt := baseTLSOpt
-			// IP-based provider URIs won't match DNS SANs → relax hostname verification.
-			if net.ParseIP(strings.Split(strings.TrimPrefix(strings.TrimPrefix(uri, "ldaps://"), "ldap://"), ":")[0]) != nil {
-				epTLSOpt += " tls_reqcert=allow"
-			}
-
-			stanza := fmt.Sprintf("rid=%s provider=%s"+
-				" type=refreshAndPersist"+
-				" searchbase=\"%s\""+
-				" scope=sub"+
-				" schemachecking=off"+
-				" bindmethod=simple"+
-				" binddn=\"%s\""+
-				" credentials=%s"+
-				"%s%s%s%s"+
-				" retry=\"%s\"",
-				rid, uri, suffix, ep.BindDN, ep.Password,
-				epDeltaOpts, epTLSOpt, keepaliveOpt, syncreplTimeoutOpts, retryInterval)
-			stanzas = append(stanzas, stanza)
+		epTLSOpt := baseTLSOpt
+		// IP-based provider URIs won't match DNS SANs → relax hostname verification.
+		if net.ParseIP(strings.Split(strings.TrimPrefix(strings.TrimPrefix(uri, "ldaps://"), "ldap://"), ":")[0]) != nil {
+			epTLSOpt += " tls_reqcert=allow"
 		}
+
+		stanza := fmt.Sprintf("rid=%s provider=%s"+
+			" type=refreshAndPersist"+
+			" searchbase=\"%s\""+
+			" scope=sub"+
+			" schemachecking=off"+
+			" bindmethod=simple"+
+			" binddn=\"%s\""+
+			" credentials=%s"+
+			"%s%s%s%s"+
+			" retry=\"%s\"",
+			rid, uri, suffix, ep.BindDN, ep.Password,
+			epDeltaOpts, epTLSOpt, keepaliveOpt, syncreplTimeoutOpts, retryInterval)
+		stanzas = append(stanzas, stanza)
 	}
 
 	return stanzas
@@ -2924,7 +2984,7 @@ func buildDatabaseSyncReplRO(
 	rwReplicas int32,
 	replPassword string,
 	tlsEnabled bool,
-	ridBase int32,
+	inClusterRIDs map[int32]int32,
 	retryInterval, keepalive string,
 	deltaSync bool,
 	replNetIPs map[string]string,
@@ -2957,7 +3017,15 @@ func buildDatabaseSyncReplRO(
 	}
 
 	for i := int32(0); i < rwReplicas; i++ {
-		rid := fmt.Sprintf("%03d", ridBase+i+1)
+		// The same number the RW pods hold for this provider: an RO pod
+		// consumes from the same providers and is never one itself, so its
+		// caller passes a nil selfOrdinal and nothing is skipped (ADR-031
+		// Consequences, "read replicas stay free").
+		coord, known := inClusterRIDs[i]
+		if !known {
+			continue
+		}
+		rid := fmt.Sprintf("%03d", coord)
 		peerPodName := fmt.Sprintf("%s-%d", clusterName, i)
 		peerHost := fmt.Sprintf("%s.%s.%s.svc.%s", peerPodName, headlessSvc, namespace, clusterDomain)
 		peerTLSOpt := tlsOpt

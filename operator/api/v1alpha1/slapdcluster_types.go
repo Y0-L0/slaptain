@@ -588,6 +588,17 @@ type SlapdReplicationConfig struct {
 	// (ADR-031 decision 4, RID-PLAN hazard 5). The rule below refuses it at
 	// the API server; the operator refuses it again, because a CR applied
 	// with validation off reaches the stanza builder either way.
+	//
+	// The list is bounded because the uniqueness rule below is O(n^2) — an
+	// `all` over a `filter` — and the API server refuses a CEL rule whose cost
+	// it cannot bound, rejecting THE WHOLE CRD rather than the rule. The bound
+	// is a true constraint rather than an arbitrary one: a peer list longer
+	// than the layout's maxSites - 1 has no remote slot to put the surplus
+	// peers in and the operator would refuse it anyway (ADR-031 decision 1).
+	// 24 is double the default maxSites of 12 — far above any mesh this
+	// project contemplates — and leaves the rule comfortably inside the
+	// budget.
+	// +kubebuilder:validation:MaxItems=24
 	// +kubebuilder:validation:XValidation:rule="self.all(p, !has(p.siteIndex) || self.filter(q, has(q.siteIndex) && q.siteIndex == p.siteIndex).size() == 1)",message="two externalPeers declare the same siteIndex: a peer's RID slot is derived from it, so a shared index gives two providers one syncrepl RID (ADR-031). Give every peer its own siteIndex."
 	// +optional
 	ExternalPeers []ExternalPeer `json:"externalPeers,omitempty"`

@@ -12,6 +12,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -67,7 +68,29 @@ import (
 // stanza set is a deletion under the atomic Replace, so there is no such thing
 // as "most of the RIDs".
 func inClusterStanzaRIDs(layout ridcoord.Layout, segment, replicas int32, selfOrdinal *int32) (map[int32]int32, error) {
-	panic("not implemented")
+	// The layout and the segment are judged once, before the fleet is walked,
+	// so that an empty fleet refuses a bad segment exactly as a populated one
+	// does. Ordinal 0 is in range for every layout that validates at all
+	// (podsPerSite is at least 1), so this probe can only answer for the two
+	// axes it is here to answer for.
+	if _, err := layout.Local(segment, 0); err != nil {
+		return nil, err
+	}
+
+	rids := make(map[int32]int32, replicas)
+	for ordinal := int32(0); ordinal < replicas; ordinal++ {
+		if selfOrdinal != nil && *selfOrdinal == ordinal {
+			continue
+		}
+		rid, err := layout.Local(segment, ordinal)
+		if err != nil {
+			// No partial map: a short stanza set is a deletion under the
+			// atomic Replace (RID-PLAN hazard 2).
+			return nil, err
+		}
+		rids[ordinal] = rid
+	}
+	return rids, nil
 }
 
 // externalStanzaRID is the RID of this pod's syncrepl link to peer site
@@ -84,7 +107,14 @@ func inClusterStanzaRIDs(layout ridcoord.Layout, segment, replicas int32, selfOr
 // index into range: the remote block is S wide, and a peer index past it has no
 // slot, not a different one.
 func externalStanzaRID(layout ridcoord.Layout, segment, peerSiteIndex int32) (int32, error) {
-	panic("not implemented")
+	rid, err := layout.Remote(segment, peerSiteIndex)
+	if err != nil {
+		// Zero rather than the number that was refused: rid = 0 is reserved
+		// and never a coordinate, so a caller that drops the error writes
+		// something obviously wrong rather than something plausibly wrong.
+		return 0, err
+	}
+	return rid, nil
 }
 
 // ridLayoutFor resolves the RID layout in force for sc.
@@ -113,7 +143,34 @@ func externalStanzaRID(layout ridcoord.Layout, segment, peerSiteIndex int32) (in
 //     defaults, because defaulting a layout that the mesh may have narrowed
 //     renumbers every stanza on every pod of this site and no other.
 func ridLayoutFor(ctx context.Context, c client.Client, sc *ldapv1alpha1.SlapdCluster) (ridcoord.Layout, error) {
-	panic("not implemented")
+	if sc.Spec.MeshRef == "" {
+		return ridcoord.DefaultLayout(), nil
+	}
+
+	var mesh ldapv1alpha1.SlapdMesh
+	key := client.ObjectKey{Name: sc.Spec.MeshRef, Namespace: sc.Namespace}
+	if err := c.Get(ctx, key, &mesh); err != nil {
+		// The zero Layout is deliberately unusable: ridcoord.Validate refuses
+		// it, so a caller that drops this error still withholds instead of
+		// converging on the defaults.
+		return ridcoord.Layout{}, fmt.Errorf(
+			"RID layout unknown: cannot read SlapdMesh %q named by spec.meshRef: %w", key, err)
+	}
+
+	// Defaulted per axis. A zero axis is unset, not unusable: API-server
+	// defaulting runs only on the API server's path, and a mesh unmarshalled
+	// from a manifest or restored from a backup reaches this code with a zero
+	// in the axis it never declared.
+	layout := ridcoord.DefaultLayout()
+	if rl := mesh.Spec.RIDLayout; rl != nil {
+		if rl.PodsPerSite != 0 {
+			layout.PodsPerSite = rl.PodsPerSite
+		}
+		if rl.MaxSites != 0 {
+			layout.MaxSites = rl.MaxSites
+		}
+	}
+	return layout, nil
 }
 
 // Reasons an external peer list cannot be turned into remote coordinates. They
@@ -160,5 +217,63 @@ const (
 // Pure: the peer list is already resolved on sc (mesh wiring is applied in
 // memory before this is reached), so there is no read and no ordering question.
 func judgeExternalPeers(sc *ldapv1alpha1.SlapdCluster, layout ridcoord.Layout) ridSegmentVerdict {
-	panic("not implemented")
+	peers := sc.Spec.Replication.ExternalPeers
+
+	// 1. A second link to one peer site has no slot to live in.
+	for i := range peers {
+		rpp := resolveReplicasPerPeer(sc.Spec.Replication.ReplicasPerPeer, peers[i].ReplicasPerPeer)
+		if rpp >= 2 {
+			return ridSegmentVerdict{
+				Reason: reasonReplicasPerPeerUnsupported,
+				Message: fmt.Sprintf(
+					"replicasPerPeer %d for external peer %q asks one pod for %d syncrepl links to one peer site, and the RID matrix has one slot per peer site (ADR-031 decision 9). Set replicasPerPeer to 1, or leave it unset.",
+					rpp, peers[i].Name, rpp),
+			}
+		}
+	}
+
+	// 2. Declared at all. nil is absence; a positional fallback is exactly the
+	//    inference ADR-031 decision 4 forbids.
+	for i := range peers {
+		if peers[i].SiteIndex == nil {
+			return ridSegmentVerdict{
+				Reason: reasonPeerSiteIndexMissing,
+				Message: fmt.Sprintf(
+					"external peer %q declares no siteIndex, so its cross-site syncrepl link has no coordinate in the RID matrix. Declare externalPeers[].siteIndex (0..%d), or put this cluster under a SlapdMesh, where it is the peer site's serverIDIndex.",
+					peers[i].Name, layout.MaxSites-1),
+			}
+		}
+	}
+
+	// 3. In range for THIS layout. The ceiling is the mesh's S, so the same CR
+	//    is judged differently under a layout the mesh narrowed.
+	for i := range peers {
+		idx := *peers[i].SiteIndex
+		if idx < 0 || idx >= layout.MaxSites {
+			return ridSegmentVerdict{
+				Reason: reasonPeerSiteIndexOutOfRange,
+				Message: fmt.Sprintf(
+					"external peer %q declares siteIndex %d, outside 0..%d: the RID layout in force (podsPerSite=%d, maxSites=%d) has no remote slot for it. Declare an index in that range, or widen spec.ridLayout.maxSites on the SlapdMesh.",
+					peers[i].Name, idx, layout.MaxSites-1, layout.PodsPerSite, layout.MaxSites),
+			}
+		}
+	}
+
+	// 4. One slot, one peer — named symmetrically, because neither of them may
+	//    win the race to write a stanza over the other's.
+	byIndex := make(map[int32]string, len(peers))
+	for i := range peers {
+		idx := *peers[i].SiteIndex
+		if first, taken := byIndex[idx]; taken {
+			return ridSegmentVerdict{
+				Reason: reasonPeerSiteIndexCollision,
+				Message: fmt.Sprintf(
+					"external peers %q and %q both declare siteIndex %d, so both cross-site links would carry one RID — slapd loads both stanzas and shares one connection id between them. Give each peer site its own index; neither peer's stanzas are written until one of them moves.",
+					first, peers[i].Name, idx),
+			}
+		}
+		byIndex[idx] = peers[i].Name
+	}
+
+	return ridSegmentVerdict{OK: true, Reason: reasonRIDSegmentOK}
 }

@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
+	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/ridcoord"
 )
 
 // Every syncrepl stanza the operator writes binds as the node-local identity
@@ -33,19 +34,26 @@ func TestSyncReplStanzasBindAsNodeLocalIdentity(t *testing.T) {
 	wantBind := `binddn="cn=repl-example-db,cn=slaptain-auth"`
 
 	extDN, _ := externalBindIdentity("", "", "", dbName, "pw")
+	// Call-site adaptation only (ADR-031 M4a): the builders take coordinates
+	// rather than a base address. ridBase 100 is segment 1 and ridBase 200 is
+	// segment 2, the documented ridBase/100 migration.
+	layout := ridcoord.DefaultLayout()
+	rwRIDs, _ := inClusterStanzaRIDs(layout, 1, 3, i32(0))
+	extRID, _ := externalStanzaRID(layout, 1, 0)
+	roRIDs, _ := inClusterStanzaRIDs(layout, 2, 3, nil)
 	rw := buildDatabaseSyncRepl(
 		cluster, headless, ns, domain, suffix, dbName,
-		3, 0, "pw", false, 100, "60 +", "", true,
+		3, 0, "pw", false, rwRIDs, "60 +", "", true,
 		ldapv1alpha1.AccesslogSuffix(dbName),
 		[]resolvedExternalPeer{{
-			Name: "site-b", URIs: []string{"ldap://10.0.0.9:1024"},
+			Name: "site-b", RID: extRID, URIs: []string{"ldap://10.0.0.9:1024"},
 			ReplicasPerPeer: 1, BindDN: extDN, Password: "pw",
 		}},
 		nil, false,
 	)
 	ro := buildDatabaseSyncReplRO(
 		cluster, headless, ns, domain, suffix, dbName,
-		3, "pw", false, 200, "60 +", "", true, nil,
+		3, "pw", false, roRIDs, "60 +", "", true, nil,
 	)
 
 	if len(rw) != 3 {

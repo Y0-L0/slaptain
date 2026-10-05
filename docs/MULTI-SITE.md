@@ -111,8 +111,10 @@ properties of the artifact you apply, checked by hash and by tooling.
 | network mode | identical | derived from `mesh.network` |
 | trust wiring (CA mounts) | N×(N−1) | derived from each site's `caSecretName` |
 | `SlapdDatabase` name and `suffix` | identical | one chart, same values everywhere |
-| `spec.replication.ridBase` | identical per database across sites | one chart, same values everywhere |
-| `spec.replication.ridBase` | unique *between* databases within a site | chart render-time check |
+| `spec.replication.ridSegment` | identical per database across sites | one chart, same values everywhere |
+| `spec.replication.ridSegment` | unique *between* databases within a site | chart render-time check **and** an operator refusal (ADR-031) |
+| `mesh.ridLayout` | identical everywhere, or omitted everywhere | one chart, same values everywhere |
+| every site's `serverIDIndex` | below `ridLayout.maxSites` | chart render-time check **and** a CEL rule on the mesh |
 | `<db>-credentials` / `replication-password` | identical everywhere | provisioned out of band; the chart never generates one |
 | `SlapdSchema` set | identical, or a superset everywhere | one chart, same values everywhere |
 | `spec.seed` | exactly one site carries it | `seed.site` + the operator's evidence belt |
@@ -462,7 +464,7 @@ databases:
     spec:
       suffix: "dc=example,dc=org"
       replication:
-        ridBase: 100
+        ridSegment: 1
         deltaSync: true
       seed:
         site: site-a          # the founder, named — not edited in
@@ -472,7 +474,8 @@ databases:
 Notice what is **not** in there: no `serverIDBase`, no `externalPeers`, no
 network block on the cluster, no Secret, nothing derived from the Helm release
 name. The chart refuses to render several classes of incoherent bundle
-(duplicate index, duplicate `ridBase`, a selector naming an unknown site, a
+(duplicate index, duplicate `ridSegment`, a site index with no slot in the RID
+layout, a selector naming an unknown site, a
 seeded database with no `seed.site` once a second site is declared), so those
 mistakes never reach a cluster.
 

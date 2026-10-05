@@ -117,12 +117,20 @@ buys nothing and costs more.
 
 ## Options considered
 
-### Option 1: Keep `ridBase` blocks — rejected
+### Option 1: Keep `ridBase` blocks unchanged — rejected
 
-The status quo. Preserves the encoding, so a reader can tell from `rid=251` that
-it is the mgmt database's second external peer. Keeps every ceiling above,
-keeps the `Maximum=949` overflow, and keeps cross-CR uniqueness as unenforced
-deployer paperwork.
+The status quo: a hand-assigned base, 100 apart, `ridBase + i + 1` in-cluster
+and `ridBase + 50 + j + 1` external. Rejected for the ceilings — 10 databases,
+50 replicas, a `Maximum=949` that overflows for any database with an external
+peer — and for deriving the external coordinate from a peer's *position* in a
+list that discovery reorders.
+
+**Note what is NOT rejected here, because the first draft of this ADR conflated
+them:** that a human assigns the number. The decision below keeps declared
+assignment and changes everything else — the stride, the proportions, the
+meaning of the second coordinate, and who enforces uniqueness. Option 7 records
+what it cost to confuse "this scheme is wrong" with "declaring a number is
+wrong".
 
 ### Option 2: Dense packing derived from a canonical order — rejected
 
@@ -229,12 +237,46 @@ the ~15 lines of arithmetic it replaced.
 → the failure was not the ledger. It was keying the ledger on something derived.
 A coordinate that comes from *declared identity* has nothing to be stale about.
 
+### Option 7: The operator allocates the segment into status — implemented, then withdrawn
+
+The second implementation of this ADR. `SlapdCluster.status.ridColumns` mapped
+each database to a lowest-free number, released on absence from the List,
+written under a `resourceVersion` guard. It reached green: 58 unit cases, two
+envtest specs, two independent reviews.
+
+Withdrawn on the evidence those reviews produced, which is worth keeping
+because none of it was visible when the option was chosen:
+
+- **It broke decision 2.** Allocation follows per-site history, so two sites
+  with the same databases and different deletion orders hold different numbers
+  (the worked example is in decision 2). The cross-site legibility this ADR is
+  built on cannot rest on that.
+- **A status field derived from its own previous value is fragile in a way a
+  guard does not fix.** The guard covered the ledger's own write; three
+  unrelated status writes in the same pass applied the whole status object with
+  `ForceOwnership`, so a pass that judged itself settled and wrote nothing left
+  a stale map for them to publish — deleting a column allocated moments
+  earlier. Reproduced in envtest.
+- **It carried three hazards nothing else needed:** release coupled to
+  ADR-005's finalizer, the stale-read renumber, and a failed List reading as an
+  empty database set.
+
+Against which it bought exactly one thing: nobody has to choose a number. The
+original rejection of declared assignment (Option 1) rested on cross-CR
+uniqueness being unenforceable — which was never true of the charts, and is not
+true of the operator either, since it already lists every database in the
+namespace. Enforcement is roughly twenty lines; the allocator was four hundred
+and fifty.
+
+→ the problem this ADR set out to solve was the *space* — two linear degrees of
+freedom in a square 1000 — and `P + S` solves it without allocating anything.
+
 ## Decision
 
 ### 1. A RID is a coordinate in a static matrix
 
 ```
-rid = 1 + column·M + offset              M = P + S
+rid = 1 + segment·M + offset              M = P + S
 
 offset <  P   →  a provider at MY OWN site, at pod ordinal `offset`
 offset >= P   →  MY LINK to peer site `offset − P`
@@ -242,7 +284,7 @@ offset >= P   →  MY LINK to peer site `offset − P`
 
 | term | meaning | source |
 |---|---|---|
-| `column` | which database | **allocated** — the only allocated quantity in the scheme |
+| `segment` | which database | **allocated** — the only allocated quantity in the scheme |
 | `offset` | which provider, in two blocks | structural (see below) |
 | `P` | max pods per site | mesh-scoped constant (see 5) |
 | `S` | max sites in a mesh | mesh-scoped constant (see 5) |
@@ -264,7 +306,7 @@ That is not only our hygiene: `SLAPD_SYNC_RID2SYNCCONN(rid)` is the identity
 (`slap.h:1881`) and slapd already uses connid `0` for its own outbound client
 connections (`connection.c:437`, `CONN_IS_CLIENT`), which
 `SLAPD_SYNC_IS_SYNCCONN` then reports as a sync connection. Whether that is
-exploitable is unverified; reserving the value costs one column out of 49 and
+exploitable is unverified; reserving the value costs one segment out of 49 and
 removes the question. The Go argument stands on its own anyway — `int32`'s zero
 value is what a forgotten assignment produces, and a scheme in which that is a
 legal coordinate cannot tell the two apart.
@@ -276,7 +318,7 @@ is a runtime selection that changes when the far end is replaced or
 unavailable, and binding the RID to it would move the number every time. The
 stanza's own `provider=` says which pod; the RID says which link.
 
-Two slots per column are structurally dead — your own ordinal in the local
+Two slots per segment are structurally dead — your own ordinal in the local
 block, your own site in the remote block. Reclaiming them would make the offset
 depend on who is reading, which is exactly the uniformity decision 2 is built
 on. Two slots out of twenty is the price of a decode that does not need to know
@@ -295,36 +337,24 @@ This is the whole difference from Option 6, and three properties follow:
   `ordinal` are declared, so the part of the number naming *which server* means
   the same thing at every site in the mesh.
 
-  **The column half is not, and an earlier draft of this decision claimed it
-  was** — "derived from a database name that ADR-028 requires to be identical
-  at every site". It is not derived from the name; decision 3 makes it
-  *allocated*, lowest-free, from that cluster's own history. Two sites holding
-  the same database set can hold different columns, because allocation order
-  followed deletions that happened at different times. Worked example, from the
-  M3 conformance review (2026-10-05): site A creates `a, b, x` → `{a:0, b:1,
-  x:2}`, deletes `a`, adds `c` → `{c:0, b:1, x:2}`; site B joins later and
-  allocates the same set from scratch → `{b:0, c:1, x:2}`. Database `b` on its
-  own pod 0 is `rid=21` at A and `rid=1` at B.
+  **The segment half is identical too — but only because the segment is
+  declared, and this took two tries to get right.** ADR-028 applies one values
+  file at every site, so a database's `ridSegment` is the same number
+  everywhere by construction.
 
-  In the common case they agree: a fresh allocation over a sorted key set is
-  canonical, so sites deployed together from one chart, with no database ever
-  deleted, produce identical columns. The divergence needs a delete-then-add,
-  or a site that joined late. So this is a property to *verify*, never to
-  assume.
+  An intermediate design allocated the segment per cluster instead, and the
+  property did not survive it: two sites holding the same database set could
+  hold different numbers, because allocation followed deletions that happened
+  at different times. Site A creating `a, b, x`, deleting `a` and adding `c`
+  holds `{c:0, b:1, x:2}`; site B joining later and allocating the same set
+  from scratch holds `{b:0, c:1, x:2}` — database `b` on its own pod 0 reading
+  `rid=21` at A and `rid=1` at B. That is recorded here because it is the
+  sharpest argument for decision 3's choice: a cross-site property cannot rest
+  on per-site history.
 
-  What follows for tooling: `slctl` must resolve a column through that
-  cluster's own `status.ridColumns` and must never decode a column to a
-  database name using another site's ledger. Correlating the provider half
-  across sites needs no decoder; correlating the database half needs that
-  site's map.
+  So correlating a RID across sites needs no decoder, and `slctl decode` needs
+  no cluster state at all beyond the layout.
 
-  **Rejected fix: assign columns by canonical order of the database names.**
-  It would make the column globally identical, and it would renumber every
-  later database whenever one is inserted or removed — turning a routine
-  database add into a `cn=config` write on every pod for every database, which
-  is the cost this ADR's own upgrade pays once and should not pay repeatedly.
-  Stability of an existing assignment is worth more than cross-site equality of
-  a number that can be looked up.
 - **Remote churn stops rewriting `cn=config`.** Today `discoverRemotePeerAddresses`
   drops non-`Running` pods and sorts the survivors by IP string, so an unrelated
   remote pod blipping permutes the list and every local pod rewrites its whole
@@ -338,59 +368,45 @@ This is the whole difference from Option 6, and three properties follow:
   keyed by peer site, so reselecting the far end — it was replaced, it went
   away, discovery saw it late — changes `provider=` and leaves the RID alone.
 
-### 3. The ledger holds one map
+### 3. The segment is declared, and the operator refuses a collision
 
-`SlapdCluster.status.ridColumns: map[string]int32` — database name → column.
-At most `C` entries (49 under the default layout), written only by the
-SlapdCluster controller, read by the SlapdDatabase controller.
+`SlapdDatabase.spec.replication.ridSegment` — an integer `0..C-1`, set by
+whoever declares the database, exactly where `ridBase` used to sit.
 
-Allocation is lowest-free, not high-water: with ~49 columns, never reusing one
-would exhaust the space after 49 database creations in a cluster's lifetime. A
-column is released only when the `SlapdDatabase` is gone — ADR-005's finalizer
-already guarantees its stanzas are torn off every pod before the CR is released,
-so a reused column cannot collide with a stanza that outlived its database.
+The operator allocates nothing and records nothing. It **validates**: on every
+cluster reconcile it reads the same-namespace `SlapdDatabase`s naming this
+cluster and refuses when two declare one segment, or when a segment falls
+outside the layout's `0..C-1`. A refusal names both databases and withholds
+stanza convergence (decision 6); it never reassigns, because the number is the
+user's to choose and silently moving it would rewrite `cn=config` on every pod.
 
-Nothing else is recorded. `siteIndex` and `ordinal` are read from the spec and
-from pod names on every pass, because they are facts about declared identity
-rather than decisions.
+**Why declared rather than allocated.** An earlier implementation allocated the
+segment into `SlapdCluster.status` and is recorded below as a withdrawn option.
+The short version: allocation buys one thing — nobody has to pick a number —
+and costs the two properties this ADR is built on. A declared segment is
+identical at every site by construction, because ADR-028 applies one values
+file everywhere, which is what makes decision 2's cross-site legibility true
+rather than aspirational. And a number that lives in `spec` cannot be lost,
+renumbered by a stale read, or deleted by an unrelated status write.
 
-Three rules the paragraph above implies and does not state. All three were
-found by the M3 test author turning this decision into cases (2026-10-05), and
-all three are now test-locked, so changing one changes numbers on running
-clusters:
+**Uniqueness is enforced where it can be.** Two layers, neither sufficient
+alone:
 
-- **A database holds a column whether or not it replicates.** `replication.
-  enabled: false` and `suspend: true` keep theirs. Columns are cheap and the
-  alternative renumbers the whole cluster when someone flips a flag — and
-  `enabled: false` is reachable in production (a partial migration, a
-  site-local database, a static reference tree).
-- **New keys claim free columns in ascending key order.** "Lowest free" fixes
-  which columns are used and not who gets which. Any other order satisfies
-  every other rule here while producing different numbers.
-- **Refusals have a precedence, because each names a different fix.**
-  `LayoutInvalid` first: no column exists at all while the layout is unusable,
-  so nothing else can be judged. Then `ColumnSpaceExhausted`: the fit check is
-  `len(desired) > C`, which does not read the stored map, so a corrupt ledger
-  cannot *cause* exhaustion — and when the topology genuinely does not fit, no
-  amount of clearing the map helps. Then `LedgerCorrupt`, whose remedy is to
-  clear the map and accept a renumber, which only works once the set fits.
-  (An earlier draft ran `LedgerCorrupt` ahead of exhaustion on the premise
-  that a corrupt map often makes the space look full. It cannot; the fit check
-  never reads it. Corrected 2026-10-05 from the M3 reviews, which found a
-  narrowed layout reporting "clear the map" where clearing never helps.)
-- **A corrupt ledger is reported, never repaired.** Two databases holding one
-  column, or a column outside the layout, stalls with `LedgerCorrupt` naming
-  the entries. The operator does not deduplicate and carry on: the recovery is
-  a human clearing the map and accepting the renumber, which is ADR-026 R2's
-  "report and stall" applied to state the operator does own but cannot
-  disambiguate.
+- the `slapd-mesh` and `slapd` charts already refuse to render two databases
+  sharing a segment, which catches the common path, since a mesh declares every
+  database in one values file;
+- the operator refuses it at reconcile, which catches what the chart cannot: a
+  CR applied by hand, or two charts in one namespace.
 
-And one property worth naming because it is unusual here: the ledger makes
-`SlapdCluster.status` **load-bearing cross-controller input**, not merely an
-observation — the SlapdDatabase controller reads it to decide what to write to
-`cn=config`. That is exactly why decision 7's guard exists, and why this one
-field is the only status in the system that is derived from its own previous
-value.
+ADR-003's original rule was the first layer only, and called cross-CR
+uniqueness "the deployer's responsibility". The second layer is what retires
+that phrase.
+
+**A segment is free the moment nothing declares it.** There is no release
+protocol and no finalizer coupling: delete the database and its number is
+simply unused. A new database may reuse it, and reuse is safe for the same
+reason ADR-005 already guarantees — the deleted database's stanzas come off
+every pod before its CR goes away.
 
 ### 4. Off-mesh peers declare their site index
 
@@ -438,10 +454,10 @@ is a legibility property and not a correctness one.
 Changing the layout renumbers the mesh. That is permitted, not forbidden: it
 costs exactly what this ADR's own upgrade costs — one `cn=config` write per pod
 per database, no restart, no resync — and the field documents it. A change that
-would leave `C` below the number of databases already holding a column is
+would leave `C` below the number of databases already declaring a segment is
 refused instead.
 
-Because the column is `P + S` and not `P · S`, headroom on both axes is nearly
+Because a segment is `P + S` wide and not `P · S`, headroom on both axes is nearly
 free:
 
 | `P` | `S` | `M = P+S` | databases |
@@ -451,12 +467,12 @@ free:
 | **8** | **12** | **20** | **49** |
 | 8 | 16 | 24 | 41 |
 
-The last row is the argument in one line: the same column width that bought 4
+The last row is the argument in one line: the same segment width that bought 4
 pods and 6 sites under a `P · S` layout buys 8 pods and 16 sites under this
 one.
 
 `C = floor(999 / M)`, not `1000 / M`, because `rid = 0` is reserved — the one
-column that reservation costs.
+segment that reservation costs.
 
 Exceeding any axis is a refusal naming which one and what the ceiling is. It is
 never a wrap, never a silent collision.
@@ -480,34 +496,57 @@ use this ADR as an executable spec found all three missing (M2 test author,
   this line itself rather than trusting a caller to have defaulted.
 
 - **`P = 1` and `S = 1` are legal.** A single-pod standalone cluster is a
-  configuration, not a typo. The lower bound is "at least one usable column",
+  configuration, not a typo. The lower bound is "at least one usable segment",
   nothing stricter.
 
-### 6. The ledger gates stanza convergence, and a withhold leaves stanzas alone
+### 6. A refused segment withholds stanzas, and a withhold leaves them alone
 
-A `SlapdDatabase` whose column is not yet in the ledger writes no stanzas and
-reports `Degraded/RIDColumnUnassigned`. It does **not** converge toward an empty
-set: `olcSyncRepl` is written with one atomic `Replace`, so a short set is a
+A `SlapdDatabase` whose segment collides with another's, or falls outside the
+layout, writes no stanzas and reports `Degraded` with the reason naming the
+other database or the ceiling. It does **not** converge toward an empty set:
+`olcSyncRepl` is written with one atomic `Replace`, so a short set is a
 deletion. The same rule covers a coordinate outside the envelope — refuse the
 whole pod's stanza set, report, requeue.
 
-The gate is one map lookup against one key. There is no derived slot set to
-disagree about, and therefore no resolution-ordering question on the consumer
-side.
+The check is a comparison over the cluster's own databases. There is no stored
+state to read back, so there is no ordering question between the two
+controllers and no window in which a database's number is not yet known.
 
-### 7. A stale read of the ledger is guarded, not tolerated
+### 7. Nothing about a RID lives in status
 
-Status is normally last-writer-wins here because every field is an observation
-recomputed each pass. The column map is not: it is computed from its own
-previous value, and an empty read of a populated map does not look stale — it
-looks like a fresh cluster, and reallocating from it renumbers everything. So
-the ledger write carries the `resourceVersion` it was derived from; a 409
-requeues, by which point the informer has caught up.
+Deliberately recorded as a decision, because the withdrawn implementation put
+it there and the failure modes that followed were not obvious in advance: a
+stale read renumbering the cluster, and — found in review — three unrelated
+status writes in the same pass deleting a number the ledger had just assigned,
+because server-side apply of a whole status object drops map keys the applier
+no longer carries.
 
-### 8. `spec.replication.ridBase` is removed
+`status` describes what the operator observed. A RID is an input to what the
+operator writes. Keeping the two apart removes a class of bug rather than
+guarding against it.
 
-With no deployer-assigned number left, the field, its `Maximum=949` overflow,
-its CEL requirement, and the two Helm chart uniqueness checks all go.
+### 8. `spec.replication.ridBase` becomes `spec.replication.ridSegment`
+
+Same place, same shape, same requirement (present unless
+`replication.enabled: false`), different meaning: a 0-based segment number
+rather than a literal base address. The `Maximum=949` that overflowed for any
+database with an external peer is gone; the bound is the layout's `C`.
+
+For every deployment following the documented convention the migration is
+`ridSegment = ridBase / 100` — `0 → 0`, `100 → 1`, `200 → 2`. The field is
+renamed rather than reinterpreted so that an unconverted manifest fails loudly
+on apply instead of `ridBase: 0` quietly continuing to mean the right thing
+while `ridBase: 100` quietly means something new.
+
+**On the name.** `ridColumn` and `ridBlock` were rejected for importing a
+dimensionality the space does not have — a database owns `M` *consecutive*
+RIDs, a line and not a grid. `ridIndex` was rejected for colliding with
+`olcDatabase={N}`, which ADR-026 R1 exists to warn about and which counts
+databases this number does not. `ridSlice` is the most natural English word
+and was rejected only because `slice` is Go's most common noun and the field
+appears in Go signatures. `ridPage` collides with LDAP's paged results
+(RFC 2696). `segment × stride + offset` is a familiar addressing idiom and
+collides with neither domain.
 
 ### 9. At most one syncrepl link per (pod, peer site, database)
 
@@ -536,14 +575,15 @@ so nothing has to land in a particular order.
 - **The upgrade renumbers every stanza once** — one `cn=config` write per pod
   per database. No restart, no resync, no data movement: slapd keys durable sync
   state on SID, never on RID. See `docs/UPGRADING.md`.
-- **A lost ledger costs a renumber, not an outage.** The column map can be
-  cleared by hand; the operator reallocates and rewrites every stanza. The
-  provider coordinates are unaffected, so only the database axis moves.
+- **There is nothing to lose.** Every term of a RID is declared or structural,
+  so no operator state can go stale, be renumbered by a concurrent write, or
+  need recovering. A number changes only when a human changes it.
 - **`slctl` can decode a RID**, at any site, with no cluster state. At the
-  default layout (`M = 20`): `317` → `316 = 15·20 + 16`, so column 15 and
+  default layout (`M = 20`): `317` → `316 = 15·20 + 16`, so segment 15 and
   offset 16. The offset is not below `P`, so it is a remote slot, naming peer
-  site `16 − P` = 8. A decode subcommand becomes worth having, and it needs
-  the cluster only to turn the column back into a database name.
+  site `16 − P` = 8. A decode subcommand becomes worth having, and it needs no
+  cluster state at all — the segment maps back to a database by reading any
+  site's CRs, since every site declares the same number.
 - **Hazard 6 stops existing** for the RID path. The address-resolution hazard it
   rode on does not: a peer with no resolved addresses still yields a short
   stanza set, which `slapddatabase_controller.go:135` already handles by
@@ -593,7 +633,7 @@ so nothing has to land in a particular order.
 - **Read replicas stay free.** They consume from the same providers, so their
   stanzas carry the same RIDs. An RO pod is never a provider, so its own ordinal
   never enters a coordinate.
-- **Two slots per column are structurally dead** — a pod's own ordinal in the
+- **Two slots per segment are structurally dead** — a pod's own ordinal in the
   local block, its own site in the remote block. The matrix stays uniform
   rather than dense, which is the trade decision 1 makes deliberately.
 - **A RID outside the matrix needs a softer answer in `slctl` than in the
@@ -607,8 +647,9 @@ so nothing has to land in a particular order.
 
 ## Scope
 
-In: the RID scheme, the column ledger, the gate, discovery returning ordinals,
-`ridBase` removal, the upgrade note.
+In: the RID scheme, the declared segment and its collision refusal, the
+stanza withhold, discovery returning ordinals, the `ridBase` rename, the
+upgrade note.
 
 Out: serverID allocation (ADR-017, unchanged and deliberately not unified — see
 Context on two almost-identical schemes being worse than two different ones);
@@ -619,7 +660,7 @@ ITS#9398.
 
 - ADR-003 — operator owns syncrepl configuration; its per-database `ridBase`
   rule is superseded here.
-- ADR-005 — the finalizer that makes column reuse safe.
+- ADR-005 — the finalizer that makes segment reuse safe.
 - ADR-016 — pod replacement invalidates peer addresses; the reason a RID cannot
   be keyed on one.
 - ADR-017 — `olcServerID` is a bare integer; `serverIDBase` supplies the local

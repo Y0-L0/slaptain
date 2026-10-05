@@ -474,3 +474,39 @@ The real complaint underneath was discoverability: someone reading
 elsewhere. Fixed directly instead — each of the three derived fields now carries
 a pointer back to `meshRef` in its doc comment, which puts the explanation where
 the person who needs it is already looking.
+
+
+## Amendment (2026-10-05): `serverIDIndex`'s range is ADR-031's to set
+
+This ADR bounded `serverIDIndex` at 40, from slapd's own arithmetic —
+`olcServerID` caps at 4095, so index 40 is the last whole decade — and said
+gaps are legal and expected, a decommissioned site's index being retired
+rather than reused.
+
+ADR-031 then made a peer's syncrepl RID slot `P + siteIndex`, with the remote
+block `maxSites` wide. That makes the usable index range **the narrower of the
+two**, and the narrower one is now the RID layout's: at the default
+`maxSites: 12`, index 12 has no slot to live in.
+
+**The decision is that ADR-031's layout governs, and this ADR yields.** It is
+the later and more specific constraint, it was chosen deliberately with its
+trade-offs costed, and discovering an older ceiling of 40 is not a reason to
+re-open it. So:
+
+- a site's `serverIDIndex` must be **strictly below** the mesh's
+  `spec.ridLayout.maxSites`, and slapd's 40 remains a hard ceiling above that;
+- because `ridLayout` is configurable, this is no longer a constant the CRD can
+  hardcode. The bound is validated against the layout the mesh itself declares —
+  a CEL rule over `sites[]`, so a site index that no RID could address is
+  refused at admission rather than at the first reconcile;
+- **gaps remain legal**, and reuse remains the hazardous option for the reason
+  this ADR already gives: `contextCSN` keeps the highest CSN per serverID, so a
+  new site inheriting a retired decade can have its writes read as
+  already-seen. What changes is that the index space is now finite, so a mesh
+  that retires indices is spending a budget. Exhausting it means widening
+  `maxSites`, which costs one mesh-wide renumber.
+
+Sites are static in practice — a mesh is built with its sites and then runs —
+so this is a bound to state and validate, not a lifecycle to engineer around.
+`docs/BACKLOG.md` is where any add/remove-site work belongs if it ever earns
+its place.

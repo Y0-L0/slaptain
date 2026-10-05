@@ -488,23 +488,24 @@ one.
 `C = floor(999 / M)`, not `1000 / M`, because `rid = 0` is reserved — the one
 segment that reservation costs.
 
-**`S` bounds the index, not the population — and the sizing table above reads
-like a count, which is the trap.** A peer's slot is `P + siteIndex`, and
-ADR-028 states that `serverIDIndex` values are unique, run to 40, and that
-**gaps are legal and expected**: "a decommissioned site's index is retired, not
-reused, so 0/1/2 becoming 0/2 is the correct way to remove a site." So a mesh
-that has only ever held three sites, but has replaced sites over its life,
-climbs toward index 40 and is refused at `S` — on a topology that never
-exceeded three.
+**`S` bounds the site INDEX, not the site population**, and the sizing table
+reads like a count — which is the trap. A peer's slot is `P + siteIndex`, so
+what must fit under `S` is the highest `serverIDIndex` any site declares, not
+how many sites there are.
 
-The refusal is legible (`PeerSiteIndexOutOfRange`, naming the ceiling) and the
-fix is to widen `maxSites`, which costs one mesh-wide renumber. But the cost is
-real and the default buys headroom for twelve *indices*, not twelve sites.
-Covering the whole index space would mean `S = 41`, `M = 49`, and `C = 20`
-databases — a 60% cut in database capacity to buy headroom a long-lived mesh
-reaches slowly. Recorded here as the trade rather than silently resolved;
-`docs/BACKLOG.md` carries an early-warning item so a mesh approaching the bound
-learns about it before a peer is refused.
+ADR-028 originally bounded that index at 40 (slapd's `olcServerID` caps at
+4095, so index 40 is the last whole decade) and expected gaps, since a
+decommissioned site's index is retired rather than reused. Those two together
+would let a mesh of three sites climb past `S` over its life.
+
+**ADR-031's layout governs and ADR-028 yields** — amended there on the same
+day. The later, more specific constraint wins; an older ceiling is not a reason
+to re-open a decision whose trade-offs were costed. A site's `serverIDIndex`
+must be strictly below `maxSites`, validated **against the layout the mesh
+declares** rather than against a hardcoded constant, so an unaddressable index
+is refused at admission. Gaps stay legal and the index space is simply finite:
+a mesh that retires indices spends a budget, and exhausting it means widening
+`maxSites` at the cost of one renumber.
 
 Exceeding any axis is a refusal naming which one and what the ceiling is. It is
 never a wrap, never a silent collision.

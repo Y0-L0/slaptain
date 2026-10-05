@@ -216,6 +216,17 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		ObservedGeneration: sd.Generation,
 	})
 
+	// Judge this database's declared RID segment, here rather than at step 10,
+	// and on every pass whether or not it replicates — see reconcileRIDSegment
+	// for why a verdict published only inside the replication gate outlives the
+	// configuration that produced it.
+	//
+	// TODO(M4, docs/RID-PLAN.md "M4 — Consumption"): resolve the layout from
+	// the mesh (SlapdMesh.spec.ridLayout under meshRef, the defaults
+	// otherwise). The default here is a seam, not a decision — a mesh that
+	// narrows its layout is not yet obeyed.
+	ridBase, ridRefusal := r.reconcileRIDSegment(ctx, sc, sd, ridcoord.DefaultLayout())
+
 	// RW pods.
 	for i := int32(0); i < replicas; i++ {
 		podName := fmt.Sprintf("%s-%d", sc.Name, i)
@@ -387,26 +398,12 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	//     installed with one atomic Replace, so converging a short set is a
 	//     deletion of live replication. A withhold must leave the pod's
 	//     stanzas alone, which is exactly what skipping this branch does.
-	var ridRefusal *ridSegmentVerdict
 	if sc.Spec.Replication.Enabled && sd.ReplicationEnabled() {
-		// TODO(M4, docs/RID-PLAN.md "M4 — Consumption"): resolve the layout
-		// from the mesh (ridLayoutFor: SlapdMesh.spec.ridLayout under meshRef,
-		// the defaults otherwise). The default here is a seam, not a decision
-		// — a mesh that narrows its layout is not yet obeyed.
-		rid := r.resolveRIDSegment(ctx, sd, ridcoord.DefaultLayout())
-		ridBase := int32(0)
-		if rid.OK {
-			ridBase, rid = legacyRIDBase(rid)
-		}
-		setCondition(&sd.Status.Conditions, ridSegmentCondition(sd, rid))
-
 		switch {
-		case !rid.OK:
-			v := rid
-			ridRefusal = &v
+		case ridRefusal != nil:
 			log.Info("syncrepl configuration withheld: this database's RID segment "+
 				"cannot be used (ADR-031); the pods keep the stanzas they have",
-				"database", sd.Name, "reason", rid.Reason, "message", rid.Message)
+				"database", sd.Name, "reason", ridRefusal.Reason, "message", ridRefusal.Message)
 			pendingWork = true
 		case !authIdentityReadyForStanzas(authIdentity):
 			log.Info("syncrepl configuration withheld: the node-local replication "+

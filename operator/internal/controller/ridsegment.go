@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -197,9 +198,13 @@ func collidingSibling(sd *ldapv1alpha1.SlapdDatabase, siblings []ldapv1alpha1.Sl
 //
 // RID-PLAN hazard 3: an unprovable uniqueness is not a proven one. A failed
 // List is not "no siblings, therefore no collision" — it is "unknown", and
-// unknown withholds. The refusal it returns is deliberately the collision
-// reason, because that is the question that went unanswered and the withhold it
-// triggers is the same one.
+// unknown withholds.
+//
+// The withhold is identical to a collision's; the REASON is not. A reason is a
+// diagnosis, and alerting and slctl key on it: RIDSegmentCollision sends a
+// human to go edit a CR, which here may be perfectly correct, and would make a
+// real collision that happened during an apiserver blip indistinguishable from
+// the blip.
 func (r *SlapdDatabaseReconciler) resolveRIDSegment(
 	ctx context.Context,
 	sd *ldapv1alpha1.SlapdDatabase,
@@ -208,9 +213,9 @@ func (r *SlapdDatabaseReconciler) resolveRIDSegment(
 	var siblings ldapv1alpha1.SlapdDatabaseList
 	if err := r.List(ctx, &siblings, client.InNamespace(sd.Namespace)); err != nil {
 		return ridSegmentVerdict{
-			Reason: reasonRIDSegmentCollision,
+			Reason: reasonRIDSegmentUnverified,
 			Message: fmt.Sprintf(
-				"could not list the SlapdDatabases of namespace %q, so this database's ridSegment cannot be shown to be unique: %v. Syncrepl stanzas are withheld until the read succeeds — an unproven uniqueness is not a proven one.",
+				"could not list the SlapdDatabases of namespace %q, so this database's ridSegment cannot be shown to be unique: %v. Syncrepl stanzas are withheld until the read succeeds — an unproven uniqueness is not a proven one. Nothing here says a CR is wrong: look at the API server, the operator's RBAC and its cache.",
 				sd.Namespace, err),
 		}
 	}
@@ -236,6 +241,20 @@ const legacyRIDBaseBridgeMax = 9
 // rather than emitted, because the one thing worse than a withheld stanza set
 // is a silently wrong one.
 func legacyRIDBase(v ridSegmentVerdict) (int32, ridSegmentVerdict) {
+	if v.Segment < 0 {
+		// Unreachable through the only caller — judgeRIDSegment refuses a
+		// negative segment before the bridge ever sees it. Guarded anyway
+		// because the signature advertises no such precondition, and the cost
+		// of a second caller learning that the hard way is a stanza set with
+		// negative RIDs: slapd parses those with lutil_atoi and does NOT
+		// bounce them the way it bounces 1000.
+		return 0, ridSegmentVerdict{
+			Reason: reasonRIDSegmentOutOfRange,
+			Message: fmt.Sprintf(
+				"spec.replication.ridSegment %d is negative, so it names no coordinate at all. Declare a segment in 0..%d.",
+				v.Segment, legacyRIDBaseBridgeMax),
+		}
+	}
 	if v.Segment > legacyRIDBaseBridgeMax {
 		return 0, ridSegmentVerdict{
 			Reason: reasonRIDSegmentOutOfRange,
@@ -245,6 +264,46 @@ func legacyRIDBase(v ridSegmentVerdict) (int32, ridSegmentVerdict) {
 		}
 	}
 	return v.Segment * 100, v
+}
+
+// reconcileRIDSegment judges this database's declared segment and publishes the
+// verdict, returning the base address the stanza builder needs and, on a
+// refusal, the verdict that withholds it.
+//
+// Called on EVERY pass, including the passes where the answer is "there is
+// nothing to judge". That is the whole point: the condition is published
+// inside the replication gate's own branch nowhere, so a database that STOPS
+// replicating cannot keep the verdict it had when it did. That path is not
+// hypothetical — "set replication.enabled=false to exclude this database" is
+// the text of the refusal itself, so it is exactly where the message sends
+// people, and it used to leave them a False condition naming a collision that
+// could no longer exist, beside Ready=True. Absence cannot go stale, so the
+// not-applicable answer is to remove the condition rather than to word one.
+//
+// Shaped after tunablesConvergedCondition, which is set unconditionally at the
+// top of every pass for the same reason.
+func (r *SlapdDatabaseReconciler) reconcileRIDSegment(
+	ctx context.Context,
+	sc *ldapv1alpha1.SlapdCluster,
+	sd *ldapv1alpha1.SlapdDatabase,
+	layout ridcoord.Layout,
+) (int32, *ridSegmentVerdict) {
+	if !sc.Spec.Replication.Enabled || !sd.ReplicationEnabled() {
+		meta.RemoveStatusCondition(&sd.Status.Conditions, ridSegmentConditionType)
+		return 0, nil
+	}
+
+	v := r.resolveRIDSegment(ctx, sd, layout)
+	base := int32(0)
+	if v.OK {
+		base, v = legacyRIDBase(v)
+	}
+	setCondition(&sd.Status.Conditions, ridSegmentCondition(sd, v))
+	if !v.OK {
+		refusal := v
+		return 0, &refusal
+	}
+	return base, nil
 }
 
 // ridSegmentConditionType is where a human looks for the verdict after the

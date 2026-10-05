@@ -402,28 +402,33 @@ func TestLegacyRIDBaseRefusesABridgeOverflow(t *testing.T) {
 	}
 }
 
-// TestLegacyRIDBaseGuardIsOneSided is a TRIPWIRE, not a defect report.
+// TestLegacyRIDBaseRefusesANegativeSegment is the tripwire above, flipped.
 //
-// legacyRIDBase checks Segment > legacyRIDBaseBridgeMax and not Segment < 0, so
-// called directly with -3 it answers base -300 and OK = true. That is
-// UNREACHABLE today: its only caller is the SlapdDatabase reconcile, which
-// calls it on a verdict judgeRIDSegment already accepted, and the judge refuses
-// a negative segment before the bridge ever sees it (see the
-// "a negative segment is out of range" case above).
+// It was written as a tripwire because legacyRIDBase checked only
+// Segment > legacyRIDBaseBridgeMax, so called directly with -3 it answered
+// base -300 and OK = true — unreachable through its only caller, which judges
+// the segment first and refuses a negative one before the bridge ever sees it
+// (see "a negative segment is out of range" above). The guard has since
+// landed, so the tripwire becomes an assertion.
 //
-// It is pinned anyway because the bridge's signature advertises no such
-// precondition, and the cost of a second caller is a stanza set with negative
-// RIDs — which slapd parses with lutil_atoi and does not bounce the way it
-// bounces 1000. The implementer adds the guard; when that lands, this test
-// flips to expecting a refusal and the comment above becomes wrong, which is
-// the point of writing it down.
-func TestLegacyRIDBaseGuardIsOneSided(t *testing.T) {
-	base, v := legacyRIDBase(ridSegmentVerdict{OK: true, Reason: reasonRIDSegmentOK, Segment: -3})
-	if v.OK && base < 0 {
-		t.Logf("TRIPWIRE INTACT: legacyRIDBase(-3) = %d, OK — the guard is still one-sided. "+
-			"Unreachable through the judge, which refuses a negative segment first.", base)
-		return
+// It is worth asserting rather than deleting because the bridge's signature
+// advertises no such precondition, and the cost of a second caller is a stanza
+// set with negative RIDs — which slapd parses with lutil_atoi and does NOT
+// bounce the way it bounces 1000.
+func TestLegacyRIDBaseRefusesANegativeSegment(t *testing.T) {
+	for _, segment := range []int32{-1, -3, -100} {
+		base, v := legacyRIDBase(ridSegmentVerdict{OK: true, Reason: reasonRIDSegmentOK, Segment: segment})
+		if v.OK {
+			t.Errorf("segment %d: the bridge produced base %d instead of refusing; "+
+				"in-cluster peer 0 would take rid %d, which slapd accepts into a stanza "+
+				"rather than bouncing", segment, base, base+1)
+			continue
+		}
+		if v.Reason != reasonRIDSegmentOutOfRange {
+			t.Errorf("segment %d: reason = %q, want %q", segment, v.Reason, reasonRIDSegmentOutOfRange)
+		}
+		if v.Message == "" {
+			t.Errorf("segment %d: a refusal carries an empty Message", segment)
+		}
 	}
-	t.Logf("TRIPWIRE CLEARED: legacyRIDBase(-3) now answers OK=%v reason=%q. "+
-		"The guard is two-sided; rewrite this test to assert the refusal and delete the tripwire.", v.OK, v.Reason)
 }

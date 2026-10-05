@@ -30,8 +30,8 @@ import (
 var secondLayout = Layout{PodsPerSite: 4, MaxSites: 6}
 
 // admissibleLayouts spans the axes the ADR's own sizing table walks, plus the
-// two degenerate ends the bounds still admit: the narrowest column (1+1) and
-// the widest one that still yields a column at all (M=999).
+// two degenerate ends the bounds still admit: the narrowest segment (1+1) and
+// the widest one that still yields a segment at all (M=999).
 var admissibleLayouts = []Layout{
 	{PodsPerSite: 1, MaxSites: 1},
 	{PodsPerSite: 4, MaxSites: 6},
@@ -41,12 +41,12 @@ var admissibleLayouts = []Layout{
 	{PodsPerSite: 500, MaxSites: 499},
 }
 
-// wantColumnWidth and wantMaxColumns are the test's OWN arithmetic, written
+// wantSegmentWidth and wantMaxSegments are the test's OWN arithmetic, written
 // straight from ADR-031 decision 5. They deliberately do not call the methods
 // under test — a sweep bounded by the implementation it is checking proves
 // nothing.
-func wantColumnWidth(l Layout) int32 { return l.PodsPerSite + l.MaxSites }
-func wantMaxColumns(l Layout) int32  { return MaxRID / wantColumnWidth(l) }
+func wantSegmentWidth(l Layout) int32 { return l.PodsPerSite + l.MaxSites }
+func wantMaxSegments(l Layout) int32  { return MaxRID / wantSegmentWidth(l) }
 
 // TestDefaultLayoutIsTheMeshDefault pins ADR-031 decision 5's chosen
 // constants: P=8, S=12 → M=20, C=49. These are the values SlapdMesh defaults
@@ -56,40 +56,40 @@ func TestDefaultLayoutIsTheMeshDefault(t *testing.T) {
 	if l.PodsPerSite != 8 || l.MaxSites != 12 {
 		t.Fatalf("DefaultLayout() = %+v, want {PodsPerSite:8 MaxSites:12}", l)
 	}
-	if got := l.ColumnWidth(); got != 20 {
-		t.Errorf("ColumnWidth() = %d, want 20 (M = P + S)", got)
+	if got := l.SegmentWidth(); got != 20 {
+		t.Errorf("SegmentWidth() = %d, want 20 (M = P + S)", got)
 	}
-	if got := l.MaxColumns(); got != 49 {
-		t.Errorf("MaxColumns() = %d, want 49 (C = floor(999/20))", got)
+	if got := l.MaxSegments(); got != 49 {
+		t.Errorf("MaxSegments() = %d, want 49 (C = floor(999/20))", got)
 	}
 }
 
-// TestColumnWidthIsPPlusS pins the column width as a SUM and not a product —
+// TestSegmentWidthIsPPlusS pins the segment width as a SUM and not a product —
 // the single arithmetic choice that buys headroom on both axes at once
-// (ADR-031 decision 5, "Because the column is P + S and not P · S").
-func TestColumnWidthIsPPlusS(t *testing.T) {
+// (ADR-031 decision 5, "Because the segment is P + S and not P · S").
+func TestSegmentWidthIsPPlusS(t *testing.T) {
 	for _, l := range admissibleLayouts {
 		t.Run(fmt.Sprintf("P%d_S%d", l.PodsPerSite, l.MaxSites), func(t *testing.T) {
-			want := wantColumnWidth(l)
-			if got := l.ColumnWidth(); got != want {
-				t.Errorf("ColumnWidth() = %d, want %d (= P + S; a product would be %d)",
+			want := wantSegmentWidth(l)
+			if got := l.SegmentWidth(); got != want {
+				t.Errorf("SegmentWidth() = %d, want %d (= P + S; a product would be %d)",
 					got, want, l.PodsPerSite*l.MaxSites)
 			}
 		})
 	}
 }
 
-// TestMaxColumnsReservesTheZeroRID pins C = floor(999/M), not floor(1000/M).
-// The reserved zero costs exactly one column (ADR-031 decision 1 and 5); the
+// TestMaxSegmentsReservesTheZeroRID pins C = floor(999/M), not floor(1000/M).
+// The reserved zero costs exactly one segment (ADR-031 decision 1 and 5); the
 // layouts below are chosen so the two formulas disagree, which is what makes
 // this test fail if someone "fixes" the off-by-one.
-func TestMaxColumnsReservesTheZeroRID(t *testing.T) {
+func TestMaxSegmentsReservesTheZeroRID(t *testing.T) {
 	for _, l := range admissibleLayouts {
 		t.Run(fmt.Sprintf("P%d_S%d", l.PodsPerSite, l.MaxSites), func(t *testing.T) {
-			m := wantColumnWidth(l)
-			want := wantMaxColumns(l)
-			if got := l.MaxColumns(); got != want {
-				t.Errorf("MaxColumns() = %d, want %d (floor(999/%d)); floor(1000/%d) would be %d",
+			m := wantSegmentWidth(l)
+			want := wantMaxSegments(l)
+			if got := l.MaxSegments(); got != want {
+				t.Errorf("MaxSegments() = %d, want %d (floor(999/%d)); floor(1000/%d) would be %d",
 					got, want, m, m, 1000/m)
 			}
 		})
@@ -99,7 +99,7 @@ func TestMaxColumnsReservesTheZeroRID(t *testing.T) {
 	// the assertion has no teeth at all.
 	differs := false
 	for _, l := range admissibleLayouts {
-		m := wantColumnWidth(l)
+		m := wantSegmentWidth(l)
 		if MaxRID/m != 1000/m {
 			differs = true
 		}
@@ -110,7 +110,7 @@ func TestMaxColumnsReservesTheZeroRID(t *testing.T) {
 }
 
 // TestRoundTripDefaultLayout walks EVERY legal coordinate at the default
-// layout — 49 columns × 20 offsets = 980 values — and requires Decode to
+// layout — 49 segments × 20 offsets = 980 values — and requires Decode to
 // invert Local and Remote exactly, including which block the offset fell in
 // (ADR-031 decision 1). Exhaustive is cheap here, and cheap exhaustive is the
 // point: there is no sampling gap to hide an edge in.
@@ -127,47 +127,47 @@ func TestRoundTripSecondLayout(t *testing.T) {
 
 func assertRoundTrip(t *testing.T, l Layout) {
 	t.Helper()
-	c := wantMaxColumns(l)
+	c := wantMaxSegments(l)
 	seen := 0
 
-	for column := int32(0); column < c; column++ {
+	for segment := int32(0); segment < c; segment++ {
 		for ordinal := int32(0); ordinal < l.PodsPerSite; ordinal++ {
-			rid, err := l.Local(column, ordinal)
+			rid, err := l.Local(segment, ordinal)
 			if err != nil {
-				t.Fatalf("Local(column=%d, ordinal=%d) at %+v: unexpected error %v", column, ordinal, l, err)
+				t.Fatalf("Local(segment=%d, ordinal=%d) at %+v: unexpected error %v", segment, ordinal, l, err)
 			}
 			got, err := l.Decode(rid)
 			if err != nil {
-				t.Fatalf("Decode(%d) from Local(column=%d, ordinal=%d) at %+v: unexpected error %v",
-					rid, column, ordinal, l, err)
+				t.Fatalf("Decode(%d) from Local(segment=%d, ordinal=%d) at %+v: unexpected error %v",
+					rid, segment, ordinal, l, err)
 			}
-			want := Coordinate{Column: column, Kind: KindLocal, Ordinal: ordinal}
+			want := Coordinate{Segment: segment, Kind: KindLocal, Ordinal: ordinal}
 			if got != want {
-				t.Fatalf("Decode(Local(column=%d, ordinal=%d)) at %+v: rid=%d decoded to %+v, want %+v",
-					column, ordinal, l, rid, got, want)
+				t.Fatalf("Decode(Local(segment=%d, ordinal=%d)) at %+v: rid=%d decoded to %+v, want %+v",
+					segment, ordinal, l, rid, got, want)
 			}
 			seen++
 		}
 		for siteIndex := int32(0); siteIndex < l.MaxSites; siteIndex++ {
-			rid, err := l.Remote(column, siteIndex)
+			rid, err := l.Remote(segment, siteIndex)
 			if err != nil {
-				t.Fatalf("Remote(column=%d, siteIndex=%d) at %+v: unexpected error %v", column, siteIndex, l, err)
+				t.Fatalf("Remote(segment=%d, siteIndex=%d) at %+v: unexpected error %v", segment, siteIndex, l, err)
 			}
 			got, err := l.Decode(rid)
 			if err != nil {
-				t.Fatalf("Decode(%d) from Remote(column=%d, siteIndex=%d) at %+v: unexpected error %v",
-					rid, column, siteIndex, l, err)
+				t.Fatalf("Decode(%d) from Remote(segment=%d, siteIndex=%d) at %+v: unexpected error %v",
+					rid, segment, siteIndex, l, err)
 			}
-			want := Coordinate{Column: column, Kind: KindRemote, SiteIndex: siteIndex}
+			want := Coordinate{Segment: segment, Kind: KindRemote, SiteIndex: siteIndex}
 			if got != want {
-				t.Fatalf("Decode(Remote(column=%d, siteIndex=%d)) at %+v: rid=%d decoded to %+v, want %+v",
-					column, siteIndex, l, rid, got, want)
+				t.Fatalf("Decode(Remote(segment=%d, siteIndex=%d)) at %+v: rid=%d decoded to %+v, want %+v",
+					segment, siteIndex, l, rid, got, want)
 			}
 			seen++
 		}
 	}
 
-	if want := int(c * wantColumnWidth(l)); seen != want {
+	if want := int(c * wantSegmentWidth(l)); seen != want {
 		t.Fatalf("swept %d coordinates at %+v, want %d — the sweep bounds are wrong, not the implementation", seen, l, want)
 	}
 }
@@ -183,12 +183,12 @@ func TestBlockBoundaryIsAtP(t *testing.T) {
 		rid  int32
 		want Coordinate
 	}{
-		{"first RID is column 0, local ordinal 0", 1, Coordinate{Column: 0, Kind: KindLocal, Ordinal: 0}},
-		{"last slot of the local block is ordinal P-1", 308, Coordinate{Column: 15, Kind: KindLocal, Ordinal: 7}},
-		{"first slot of the remote block is peer site 0", 309, Coordinate{Column: 15, Kind: KindRemote, SiteIndex: 0}},
-		{"ADR worked example: 317 is the link to peer site 8", 317, Coordinate{Column: 15, Kind: KindRemote, SiteIndex: 8}},
-		{"last slot of a column is peer site S-1", 320, Coordinate{Column: 15, Kind: KindRemote, SiteIndex: 11}},
-		{"the very last legal RID", 980, Coordinate{Column: 48, Kind: KindRemote, SiteIndex: 11}},
+		{"first RID is segment 0, local ordinal 0", 1, Coordinate{Segment: 0, Kind: KindLocal, Ordinal: 0}},
+		{"last slot of the local block is ordinal P-1", 308, Coordinate{Segment: 15, Kind: KindLocal, Ordinal: 7}},
+		{"first slot of the remote block is peer site 0", 309, Coordinate{Segment: 15, Kind: KindRemote, SiteIndex: 0}},
+		{"ADR worked example: 317 is the link to peer site 8", 317, Coordinate{Segment: 15, Kind: KindRemote, SiteIndex: 8}},
+		{"last slot of a segment is peer site S-1", 320, Coordinate{Segment: 15, Kind: KindRemote, SiteIndex: 11}},
+		{"the very last legal RID", 980, Coordinate{Segment: 48, Kind: KindRemote, SiteIndex: 11}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -210,18 +210,18 @@ func TestBlockBoundaryIsAtP(t *testing.T) {
 func TestNeverProducesZeroRID(t *testing.T) {
 	for _, l := range admissibleLayouts {
 		t.Run(fmt.Sprintf("P%d_S%d", l.PodsPerSite, l.MaxSites), func(t *testing.T) {
-			c := wantMaxColumns(l)
-			for column := int32(0); column < c; column++ {
+			c := wantMaxSegments(l)
+			for segment := int32(0); segment < c; segment++ {
 				for ordinal := int32(0); ordinal < l.PodsPerSite; ordinal++ {
-					if rid, err := l.Local(column, ordinal); err != nil || rid == 0 {
-						t.Fatalf("Local(column=%d, ordinal=%d) at %+v = (%d, %v), want a non-zero RID and no error",
-							column, ordinal, l, rid, err)
+					if rid, err := l.Local(segment, ordinal); err != nil || rid == 0 {
+						t.Fatalf("Local(segment=%d, ordinal=%d) at %+v = (%d, %v), want a non-zero RID and no error",
+							segment, ordinal, l, rid, err)
 					}
 				}
 				for siteIndex := int32(0); siteIndex < l.MaxSites; siteIndex++ {
-					if rid, err := l.Remote(column, siteIndex); err != nil || rid == 0 {
-						t.Fatalf("Remote(column=%d, siteIndex=%d) at %+v = (%d, %v), want a non-zero RID and no error",
-							column, siteIndex, l, rid, err)
+					if rid, err := l.Remote(segment, siteIndex); err != nil || rid == 0 {
+						t.Fatalf("Remote(segment=%d, siteIndex=%d) at %+v = (%d, %v), want a non-zero RID and no error",
+							segment, siteIndex, l, rid, err)
 					}
 				}
 			}
@@ -232,7 +232,7 @@ func TestNeverProducesZeroRID(t *testing.T) {
 // TestMaximumLegalRIDFitsSlapdsBand pins the ceiling slapd actually enforces
 // (SLAP_SYNC_RID_MAX = 999, ADR-031 "What slapd actually requires"). At the
 // default layout the maximum is exactly 980 — asserted as a number, because a
-// bound-only assertion would survive a layout that silently lost a column.
+// bound-only assertion would survive a layout that silently lost a segment.
 func TestMaximumLegalRIDFitsSlapdsBand(t *testing.T) {
 	if got := maxLegalRID(t, DefaultLayout()); got != 980 {
 		t.Errorf("maximum RID at the default layout = %d, want 980 (= C·M = 49·20)", got)
@@ -245,18 +245,18 @@ func TestMaximumLegalRIDFitsSlapdsBand(t *testing.T) {
 }
 
 // maxLegalRID is the largest RID the layout can produce: the last slot of the
-// last column, which is a remote slot.
+// last segment, which is a remote slot.
 func maxLegalRID(t *testing.T, l Layout) int32 {
 	t.Helper()
-	rid, err := l.Remote(wantMaxColumns(l)-1, l.MaxSites-1)
+	rid, err := l.Remote(wantMaxSegments(l)-1, l.MaxSites-1)
 	if err != nil {
-		t.Fatalf("Remote(last column, last site) at %+v: unexpected error %v", l, err)
+		t.Fatalf("Remote(last segment, last site) at %+v: unexpected error %v", l, err)
 	}
 	return rid
 }
 
 // TestLocalAndRemoteNeverCollide pins that the two blocks of the matrix are
-// disjoint across the WHOLE space, not just within one column. A collision is
+// disjoint across the WHOLE space, not just within one segment. A collision is
 // silent in slapd — add_syncrepl has no duplicate check, two stanzas share a
 // connid and become indistinguishable in the logs (ADR-031, "slapd does not
 // reject a duplicate RID").
@@ -275,24 +275,24 @@ func TestLocalAndRemoteNeverCollide(t *testing.T) {
 				}
 				seen[rid] = o
 			}
-			c := wantMaxColumns(l)
-			for column := int32(0); column < c; column++ {
+			c := wantMaxSegments(l)
+			for segment := int32(0); segment < c; segment++ {
 				for ordinal := int32(0); ordinal < l.PodsPerSite; ordinal++ {
-					rid, err := l.Local(column, ordinal)
+					rid, err := l.Local(segment, ordinal)
 					if err != nil {
-						t.Fatalf("Local(column=%d, ordinal=%d): unexpected error %v", column, ordinal, err)
+						t.Fatalf("Local(segment=%d, ordinal=%d): unexpected error %v", segment, ordinal, err)
 					}
-					record(rid, origin{"Local", column, ordinal})
+					record(rid, origin{"Local", segment, ordinal})
 				}
 				for siteIndex := int32(0); siteIndex < l.MaxSites; siteIndex++ {
-					rid, err := l.Remote(column, siteIndex)
+					rid, err := l.Remote(segment, siteIndex)
 					if err != nil {
-						t.Fatalf("Remote(column=%d, siteIndex=%d): unexpected error %v", column, siteIndex, err)
+						t.Fatalf("Remote(segment=%d, siteIndex=%d): unexpected error %v", segment, siteIndex, err)
 					}
-					record(rid, origin{"Remote", column, siteIndex})
+					record(rid, origin{"Remote", segment, siteIndex})
 				}
 			}
-			if want := int(c * wantColumnWidth(l)); len(seen) != want {
+			if want := int(c * wantSegmentWidth(l)); len(seen) != want {
 				t.Fatalf("collected %d distinct RIDs at %+v, want %d", len(seen), l, want)
 			}
 		})
@@ -312,12 +312,12 @@ func TestEachAxisRefusesAtItsOwnCeiling(t *testing.T) {
 		call func() (int32, error)
 		want error
 	}{
-		{"Local refuses the column at C", func() (int32, error) { return l.Local(49, 0) }, ErrColumnOutOfRange},
-		{"Local refuses a negative column", func() (int32, error) { return l.Local(-1, 0) }, ErrColumnOutOfRange},
+		{"Local refuses the segment at C", func() (int32, error) { return l.Local(49, 0) }, ErrSegmentOutOfRange},
+		{"Local refuses a negative segment", func() (int32, error) { return l.Local(-1, 0) }, ErrSegmentOutOfRange},
 		{"Local refuses the ordinal at P", func() (int32, error) { return l.Local(0, 8) }, ErrOrdinalOutOfRange},
 		{"Local refuses a negative ordinal", func() (int32, error) { return l.Local(0, -1) }, ErrOrdinalOutOfRange},
-		{"Remote refuses the column at C", func() (int32, error) { return l.Remote(49, 0) }, ErrColumnOutOfRange},
-		{"Remote refuses a negative column", func() (int32, error) { return l.Remote(-1, 0) }, ErrColumnOutOfRange},
+		{"Remote refuses the segment at C", func() (int32, error) { return l.Remote(49, 0) }, ErrSegmentOutOfRange},
+		{"Remote refuses a negative segment", func() (int32, error) { return l.Remote(-1, 0) }, ErrSegmentOutOfRange},
 		{"Remote refuses the site index at S", func() (int32, error) { return l.Remote(0, 12) }, ErrSiteIndexOutOfRange},
 		{"Remote refuses a negative site index", func() (int32, error) { return l.Remote(0, -1) }, ErrSiteIndexOutOfRange},
 	}
@@ -345,7 +345,7 @@ func TestRefusalNamesTheAxisAndItsCeiling(t *testing.T) {
 		call    func() (int32, error)
 		mustSay []string
 	}{
-		{"column refusal names the column ceiling", func() (int32, error) { return l.Local(49, 0) }, []string{"column", "49"}},
+		{"segment refusal names the segment ceiling", func() (int32, error) { return l.Local(49, 0) }, []string{"segment", "49"}},
 		{"ordinal refusal names the pods-per-site ceiling", func() (int32, error) { return l.Local(0, 8) }, []string{"ordinal", "8"}},
 		{"site refusal names the max-sites ceiling", func() (int32, error) { return l.Remote(0, 12) }, []string{"site", "12"}},
 	}
@@ -368,7 +368,7 @@ func TestRefusalNamesTheAxisAndItsCeiling(t *testing.T) {
 // TestDecodeRefusesOutsideTheRIDRange pins the inverse's bounds: below 1
 // (0 is reserved and negatives are nonsense) and above the last RID the layout
 // can produce. 981..999 are inside slapd's band but outside THIS layout's
-// matrix, and decoding one would invent a column that no database can hold.
+// matrix, and decoding one would invent a segment that no database can hold.
 func TestDecodeRefusesOutsideTheRIDRange(t *testing.T) {
 	l := DefaultLayout() // last legal RID is 980
 
@@ -393,7 +393,7 @@ func TestDecodeRefusesOutsideTheRIDRange(t *testing.T) {
 }
 
 // TestValidateRejectsUnusableLayouts pins the admissibility rule: both axes at
-// least 1, and a column width that still leaves room for one column — C < 1 is
+// least 1, and a segment width that still leaves room for one segment — C < 1 is
 // a layout that can express no database at all (ADR-031 decision 5).
 func TestValidateRejectsUnusableLayouts(t *testing.T) {
 	tests := []struct {
@@ -403,13 +403,13 @@ func TestValidateRejectsUnusableLayouts(t *testing.T) {
 	}{
 		{"the mesh default", DefaultLayout(), true},
 		{"the narrowest usable layout", Layout{PodsPerSite: 1, MaxSites: 1}, true},
-		{"the widest column that still yields one", Layout{PodsPerSite: 500, MaxSites: 499}, true},
+		{"the widest segment that still yields one", Layout{PodsPerSite: 500, MaxSites: 499}, true},
 		{"zero pods per site", Layout{PodsPerSite: 0, MaxSites: 12}, false},
 		{"negative pods per site", Layout{PodsPerSite: -1, MaxSites: 12}, false},
 		{"zero sites", Layout{PodsPerSite: 8, MaxSites: 0}, false},
 		{"negative sites", Layout{PodsPerSite: 8, MaxSites: -3}, false},
 		{"both axes zero", Layout{}, false},
-		{"column wider than the RID band leaves no column", Layout{PodsPerSite: 500, MaxSites: 500}, false},
+		{"segment wider than the RID band leaves no segment", Layout{PodsPerSite: 500, MaxSites: 500}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -434,8 +434,8 @@ func TestValidateRejectsUnusableLayouts(t *testing.T) {
 func TestInvalidLayoutRefusesBeforeDividing(t *testing.T) {
 	for _, l := range []Layout{{}, {PodsPerSite: -1, MaxSites: -1}, {PodsPerSite: 500, MaxSites: 500}} {
 		t.Run(fmt.Sprintf("P%d_S%d", l.PodsPerSite, l.MaxSites), func(t *testing.T) {
-			if got := l.MaxColumns(); got != 0 {
-				t.Errorf("MaxColumns() on the unusable layout %+v = %d, want 0 and no panic", l, got)
+			if got := l.MaxSegments(); got != 0 {
+				t.Errorf("MaxSegments() on the unusable layout %+v = %d, want 0 and no panic", l, got)
 			}
 			if _, err := l.Local(0, 0); !errors.Is(err, ErrInvalidLayout) {
 				t.Errorf("Local(0,0) on %+v = %v, want an error matching %v", l, err, ErrInvalidLayout)
@@ -483,10 +483,10 @@ func TestZeroKindIsNotAKind(t *testing.T) {
 // sums to -2, which is not greater than 999, so the layout passes.
 //
 // The failure that follows is not a wrong RID, which is why the rest of this
-// suite does not see it. It is a wrong REFUSAL: ColumnWidth answers -2,
-// MaxColumns answers 999 / -2 = -499, and Local(0, 0) then refuses column 0
-// as "outside 0..-500" with ErrColumnOutOfRange — sending a human to look at
-// the column ledger when the layout is what is broken. A refusal that names
+// suite does not see it. It is a wrong REFUSAL: SegmentWidth answers -2,
+// MaxSegments answers 999 / -2 = -499, and Local(0, 0) then refuses segment 0
+// as "outside 0..-500" with ErrSegmentOutOfRange — sending a human to look at
+// the segment ledger when the layout is what is broken. A refusal that names
 // the wrong axis is worse than no refusal, because it is actionable and the
 // action is wrong.
 func TestAxisLargeEnoughToOverflowTheSumIsRefused(t *testing.T) {
@@ -508,18 +508,18 @@ func TestAxisLargeEnoughToOverflowTheSumIsRefused(t *testing.T) {
 				t.Errorf("Validate() on %+v = %v, want an error matching %v (the sum %d overflowed)",
 					l, err, ErrInvalidLayout, l.PodsPerSite+l.MaxSites)
 			}
-			if got := l.ColumnWidth(); got != 0 {
-				t.Errorf("ColumnWidth() on %+v = %d, want 0; an unusable layout must not report a width",
+			if got := l.SegmentWidth(); got != 0 {
+				t.Errorf("SegmentWidth() on %+v = %d, want 0; an unusable layout must not report a width",
 					l, got)
 			}
-			if got := l.MaxColumns(); got != 0 {
-				t.Errorf("MaxColumns() on %+v = %d, want 0; a negative column count is not a ceiling",
+			if got := l.MaxSegments(); got != 0 {
+				t.Errorf("MaxSegments() on %+v = %d, want 0; a negative segment count is not a ceiling",
 					l, got)
 			}
 
 			// The refusal must name the layout, not an axis of the matrix the
 			// layout failed to define. This is the half the defect actually
-			// breaks: it refuses, but as ErrColumnOutOfRange.
+			// breaks: it refuses, but as ErrSegmentOutOfRange.
 			if _, err := l.Local(0, 0); !errors.Is(err, ErrInvalidLayout) {
 				t.Errorf("Local(0, 0) on %+v = %v, want an error matching %v", l, err, ErrInvalidLayout)
 			}

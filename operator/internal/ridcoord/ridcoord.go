@@ -17,12 +17,12 @@ limitations under the License.
 // Package ridcoord derives syncrepl replica IDs as coordinates in a static
 // matrix (ADR-031 decision 1). Pure: no Kubernetes types, no I/O.
 //
-//	rid = 1 + column·M + offset              M = P + S
+//	rid = 1 + segment·M + offset              M = P + S
 //
 //	offset <  P   →  a provider at MY OWN site, at pod ordinal `offset`
 //	offset >= P   →  MY LINK to peer site `offset − P`
 //
-// `column` names the database and is the only allocated term in the scheme
+// `segment` names the database and is the only allocated term in the scheme
 // (ADR-031 decision 3); everything else is declared identity, so a coordinate
 // has nothing to go stale about. `rid = 0` is reserved and never produced:
 // zero is what a forgotten int32 assignment looks like, and slapd itself uses
@@ -48,7 +48,7 @@ const MaxRID = 999
 // three refusals mean three different human responses.
 var (
 	ErrInvalidLayout       = errors.New("invalid RID layout")
-	ErrColumnOutOfRange    = errors.New("RID column out of range")
+	ErrSegmentOutOfRange   = errors.New("RID segment out of range")
 	ErrOrdinalOutOfRange   = errors.New("RID pod ordinal out of range")
 	ErrSiteIndexOutOfRange = errors.New("RID site index out of range")
 	ErrRIDOutOfRange       = errors.New("RID out of range")
@@ -68,8 +68,8 @@ func DefaultLayout() Layout {
 	return Layout{PodsPerSite: 8, MaxSites: 12}
 }
 
-// Validate reports whether the layout can produce at least one usable column:
-// both axes at least 1, and a column width that leaves room for a column
+// Validate reports whether the layout can produce at least one usable segment:
+// both axes at least 1, and a segment width that leaves room for a segment
 // inside the 0..999 band. Returns an error wrapping ErrInvalidLayout.
 func (l Layout) Validate() error {
 	if l.PodsPerSite < 1 || l.MaxSites < 1 {
@@ -90,25 +90,25 @@ func (l Layout) Validate() error {
 			ErrInvalidLayout, l.MaxSites, MaxRID)
 	}
 	if m := l.PodsPerSite + l.MaxSites; m > MaxRID {
-		return fmt.Errorf("%w: column width %d (= %d + %d) leaves no column inside the 0..%d RID band",
+		return fmt.Errorf("%w: segment width %d (= %d + %d) leaves no segment inside the 0..%d RID band",
 			ErrInvalidLayout, m, l.PodsPerSite, l.MaxSites, MaxRID)
 	}
 	return nil
 }
 
-// ColumnWidth is M = P + S. Zero for a layout whose axes are not positive.
-func (l Layout) ColumnWidth() int32 {
+// SegmentWidth is M = P + S. Zero for a layout whose axes are not positive.
+func (l Layout) SegmentWidth() int32 {
 	if l.Validate() != nil {
 		return 0
 	}
 	return l.PodsPerSite + l.MaxSites
 }
 
-// MaxColumns is C = floor(999 / M) — the number of databases the layout
+// MaxSegments is C = floor(999 / M) — the number of databases the layout
 // admits. It is 999 and not 1000 because rid = 0 is reserved, which costs
-// exactly one column. Zero for an invalid layout; never divides by zero.
-func (l Layout) MaxColumns() int32 {
-	m := l.ColumnWidth()
+// exactly one segment. Zero for an invalid layout; never divides by zero.
+func (l Layout) MaxSegments() int32 {
+	m := l.SegmentWidth()
 	if m == 0 {
 		return 0
 	}
@@ -116,54 +116,54 @@ func (l Layout) MaxColumns() int32 {
 }
 
 // Local is the RID of the provider at ordinal `ordinal` on this pod's own
-// site, for the database holding `column`.
+// site, for the database holding `segment`.
 //
-// Refuses with ErrInvalidLayout, ErrColumnOutOfRange (0 <= column < C) or
+// Refuses with ErrInvalidLayout, ErrSegmentOutOfRange (0 <= segment < C) or
 // ErrOrdinalOutOfRange (0 <= ordinal < P). Never wraps, never collides.
-func (l Layout) Local(column, ordinal int32) (int32, error) {
-	if err := l.checkColumn(column); err != nil {
+func (l Layout) Local(segment, ordinal int32) (int32, error) {
+	if err := l.checkSegment(segment); err != nil {
 		return 0, err
 	}
 	if ordinal < 0 || ordinal >= l.PodsPerSite {
 		return 0, fmt.Errorf("%w: pod ordinal %d is outside 0..%d (podsPerSite = %d)",
 			ErrOrdinalOutOfRange, ordinal, l.PodsPerSite-1, l.PodsPerSite)
 	}
-	return 1 + column*l.ColumnWidth() + ordinal, nil
+	return 1 + segment*l.SegmentWidth() + ordinal, nil
 }
 
 // Remote is the RID of this pod's link to peer site `siteIndex`, for the
-// database holding `column`. A pod holds at most one link per peer site
+// database holding `segment`. A pod holds at most one link per peer site
 // (ADR-031 decision 9), which is what makes the remote block S wide.
 //
-// Refuses with ErrInvalidLayout, ErrColumnOutOfRange (0 <= column < C) or
+// Refuses with ErrInvalidLayout, ErrSegmentOutOfRange (0 <= segment < C) or
 // ErrSiteIndexOutOfRange (0 <= siteIndex < S).
-func (l Layout) Remote(column, siteIndex int32) (int32, error) {
-	if err := l.checkColumn(column); err != nil {
+func (l Layout) Remote(segment, siteIndex int32) (int32, error) {
+	if err := l.checkSegment(segment); err != nil {
 		return 0, err
 	}
 	if siteIndex < 0 || siteIndex >= l.MaxSites {
 		return 0, fmt.Errorf("%w: peer site index %d is outside 0..%d (maxSites = %d)",
 			ErrSiteIndexOutOfRange, siteIndex, l.MaxSites-1, l.MaxSites)
 	}
-	return 1 + column*l.ColumnWidth() + l.PodsPerSite + siteIndex, nil
+	return 1 + segment*l.SegmentWidth() + l.PodsPerSite + siteIndex, nil
 }
 
-// checkColumn is the layout check and the column check in the order they are
-// answerable: an unusable layout has no column ceiling to compare against. The
-// column is also the axis reported first when two are out of range at once —
+// checkSegment is the layout check and the segment check in the order they are
+// answerable: an unusable layout has no segment ceiling to compare against. The
+// segment is also the axis reported first when two are out of range at once —
 // it is the only allocated term, so it is the one a human can act on.
-func (l Layout) checkColumn(column int32) error {
+func (l Layout) checkSegment(segment int32) error {
 	if err := l.Validate(); err != nil {
 		return err
 	}
-	if c := l.MaxColumns(); column < 0 || column >= c {
-		return fmt.Errorf("%w: column %d is outside 0..%d (the layout admits %d columns)",
-			ErrColumnOutOfRange, column, c-1, c)
+	if c := l.MaxSegments(); segment < 0 || segment >= c {
+		return fmt.Errorf("%w: segment %d is outside 0..%d (the layout admits %d segments)",
+			ErrSegmentOutOfRange, segment, c-1, c)
 	}
 	return nil
 }
 
-// Kind distinguishes the two blocks of a column.
+// Kind distinguishes the two blocks of a segment.
 type Kind int
 
 // The enumeration starts at 1, so the zero Kind is not a Kind at all. This is
@@ -195,13 +195,13 @@ func (k Kind) String() string {
 // Decode always returns a valid Kind — KindLocal or KindRemote, never the zero
 // value. A Coordinate carrying Kind(0) was never produced by this package.
 type Coordinate struct {
-	Column    int32
+	Segment   int32
 	Kind      Kind
 	Ordinal   int32
 	SiteIndex int32
 }
 
-// Decode inverts Local and Remote: it reports which column the RID belongs to,
+// Decode inverts Local and Remote: it reports which segment the RID belongs to,
 // which of the two blocks the offset fell in, and the index within that block.
 //
 // Refuses with ErrInvalidLayout, or ErrRIDOutOfRange for anything below 1 or
@@ -210,17 +210,17 @@ func (l Layout) Decode(rid int32) (Coordinate, error) {
 	if err := l.Validate(); err != nil {
 		return Coordinate{}, err
 	}
-	m := l.ColumnWidth()
+	m := l.SegmentWidth()
 	// The matrix stops at C·M, which is below slapd's 999 for every layout
 	// that does not divide it exactly. A RID in that tail is a legal syncrepl
 	// id that this layout never issued, so it decodes to no coordinate.
-	last := l.MaxColumns() * m
+	last := l.MaxSegments() * m
 	if rid < 1 || rid > last {
 		return Coordinate{}, fmt.Errorf("%w: rid %d is outside 1..%d, the range this layout can produce",
 			ErrRIDOutOfRange, rid, last)
 	}
 	offset := (rid - 1) % m
-	coord := Coordinate{Column: (rid - 1) / m}
+	coord := Coordinate{Segment: (rid - 1) / m}
 	if offset < l.PodsPerSite {
 		coord.Kind = KindLocal
 		coord.Ordinal = offset

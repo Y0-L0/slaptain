@@ -312,7 +312,7 @@ func TestJudgeRIDSegment(t *testing.T) {
 // verdicts on one segment, which a per-row assertion cannot express.
 func TestJudgeRIDSegmentCeilingTracksTheLayout(t *testing.T) {
 	for _, layout := range []ridcoord.Layout{ridcoord.DefaultLayout(), wideLayout(), {PodsPerSite: 4, MaxSites: 6}} {
-		c := layout.MaxColumns()
+		c := layout.MaxSegments()
 		db := ridDB("a", testRIDCluster, i32(c)) // exactly one past the top
 		v := judgeRIDSegment(&db, nil, layout)
 

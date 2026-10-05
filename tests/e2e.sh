@@ -1465,13 +1465,19 @@ teardown_all() {
 
         hctl "$ctx" uninstall slaptain -n "$NAMESPACE" 2>/dev/null || true
 
-        kctl "$ctx" delete crd slapdclusters.ldap.chuck-chuck-chuck.net --ignore-not-found 2>/dev/null || true
-        kctl "$ctx" delete crd slapddatabases.ldap.chuck-chuck-chuck.net --ignore-not-found 2>/dev/null || true
-        kctl "$ctx" delete crd slapdschemas.ldap.chuck-chuck-chuck.net --ignore-not-found 2>/dev/null || true
-        # SlapdMesh (ADR-028). Helm only installs a chart's crds/ on the FIRST
-        # install, so a CRD left behind here is the one the next run would be
-        # stuck with — and this is the kind whose schema is still moving.
-        kctl "$ctx" delete crd slapdmeshes.ldap.chuck-chuck-chuck.net --ignore-not-found 2>/dev/null || true
+        # Every CRD the operator chart ships, derived from the chart rather than
+        # hand-listed: Helm only installs a chart's crds/ on the FIRST install,
+        # so a CRD left behind here is the one the NEXT run is stuck with. A
+        # hand-written list silently went stale once — teardown kept deleting
+        # four of seven and left the backup/restore kinds from an older schema
+        # behind on all three sites.
+        for _crd_file in "$PROJECT_ROOT"/charts/operator/crds/*.yaml; do
+            [ -e "$_crd_file" ] || continue
+            _crd_name="$(basename "$_crd_file" .yaml)"
+            # file name is <group>_<plural>.yaml; the CRD is <plural>.<group>
+            _crd="${_crd_name#*_}.${_crd_name%%_*}"
+            kctl "$ctx" delete crd "$_crd" --ignore-not-found 2>/dev/null || true
+        done
 
         kctl "$ctx" delete namespace "$NAMESPACE" --ignore-not-found \
             --timeout="${TEARDOWN_TIMEOUT}s" \

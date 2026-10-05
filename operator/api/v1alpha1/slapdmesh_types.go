@@ -225,6 +225,45 @@ type SlapdMeshSpec struct {
 	// site entries.
 	// +optional
 	Trust *MeshTrustConfig `json:"trust,omitempty"`
+
+	// ridLayout shapes the RID matrix every site of this mesh computes
+	// coordinates in (ADR-031 decision 5). It lives on the mesh and not on the
+	// operator's installation config precisely because it must not differ per
+	// site: a different column width makes a RID read at one site decode to a
+	// different provider at another.
+	//
+	// Omitted means the defaults below, which is also what a SlapdCluster with
+	// no meshRef uses.
+	// +optional
+	RIDLayout *RIDLayout `json:"ridLayout,omitempty"`
+}
+
+// RIDLayout is the envelope of the RID matrix: how many pods a site may hold
+// and how many sites a mesh may hold. Together they fix the per-database
+// segment width M = podsPerSite + maxSites, and with it the number of
+// databases the 1..999 RID band admits, C = floor(999 / M).
+//
+// Changing it renumbers the mesh — one cn=config write per pod per database,
+// no restart and no resync, because slapd keys durable sync state on serverID
+// and never on RID (ADR-031 decision 5).
+type RIDLayout struct {
+	// podsPerSite is P: the largest number of slapd pods any one site of this
+	// mesh may run. It sizes the local block of every database's segment, so
+	// raising it is a renumber and not an in-place widening.
+	// +kubebuilder:default=8
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=999
+	// +optional
+	PodsPerSite int32 `json:"podsPerSite,omitempty"`
+	// maxSites is S: the largest number of sites this mesh may hold. It sizes
+	// the remote block, one slot per peer site, which is enough because a pod
+	// holds at most one syncrepl link per peer site per database (ADR-031
+	// decision 9).
+	// +kubebuilder:default=12
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=999
+	// +optional
+	MaxSites int32 `json:"maxSites,omitempty"`
 }
 
 // SlapdMeshStatus is the observed state of the mesh.

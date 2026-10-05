@@ -90,21 +90,32 @@ type DatabaseReplicationConfig struct {
 	// +kubebuilder:default=true
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
-	// ridBase is the base Replica ID for this database's syncrepl stanzas.
-	// In-cluster peer i gets RID = ridBase + i + 1.
-	// External peer j gets RID = ridBase + 50 + j + 1.
-	// Must be unique across all SlapdDatabase CRs in the same cluster to avoid
-	// RID collisions. NOT machine-enforced today: the operator validates only
-	// that ridBase is present when replication is enabled (the CEL rule below);
-	// cross-CR uniqueness is the deployer's responsibility. See docs/BACKLOG.md.
+	// ridBase is the SUPERSEDED base Replica ID for this database's syncrepl
+	// stanzas (ADR-003): in-cluster peer i got RID = ridBase + i + 1, external
+	// peer j got ridBase + 50 + j + 1.
 	//
-	// Required when enabled=true (the default); may be omitted when
-	// enabled=false. Encoded as *int32 so CEL's has() can distinguish
-	// "user supplied a value" from "Go zero value."
+	// DEPRECATED, replaced by ridSegment (ADR-031 decision 8). It survives this
+	// commit only because slapddatabase_controller.go still reads it and that
+	// file belongs to another milestone; removing it here would break the build
+	// rather than produce a red. The implementer removes the field, its last
+	// reader, the chart templates and the fixtures together.
+	//
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=949
 	RIDBase *int32 `json:"ridBase,omitempty"`
+	// ridSegment selects this database's segment of the RID space: the
+	// contiguous run of `podsPerSite + maxSites` replica IDs it owns
+	// (ADR-031). Must be unique among the databases of one SlapdCluster; the
+	// operator refuses a collision rather than reassigning, and the charts
+	// refuse to render one.
+	//
+	// Required when replication is enabled. Migrating from ridBase: divide by
+	// 100 — 0 stays 0, 100 becomes 1, 200 becomes 2.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=499
+	RIDSegment *int32 `json:"ridSegment,omitempty"`
 	// deltaSync enables delta-syncrepl via the accesslog overlay for this database.
 	// When true, the accesslog overlay is added to this database and syncrepl stanzas
 	// use syncdata=accesslog. When false, plain syncrepl (full entry sync) is used.
@@ -296,7 +307,7 @@ type DatabaseSeedConfig struct {
 
 // SlapdDatabaseSpec defines the desired state of SlapdDatabase.
 //
-// +kubebuilder:validation:XValidation:rule="self.replication.enabled == false || has(self.replication.ridBase)",message="spec.replication.ridBase is required when replication.enabled=true (the default). Set replication.enabled=false to explicitly exclude this database from cluster replication."
+// +kubebuilder:validation:XValidation:rule="self.replication.enabled == false || has(self.replication.ridSegment)",message="spec.replication.ridSegment is required when replication.enabled=true (the default). Set replication.enabled=false to explicitly exclude this database from cluster replication."
 // +kubebuilder:validation:XValidation:rule="!(has(self.seed) && has(self.bootstrapFrom))",message="spec.seed and spec.bootstrapFrom are mutually exclusive: a restore replaces seeding. Set at most one."
 type SlapdDatabaseSpec struct {
 	// suspend pauses the operator's reconciliation of this resource. The data
@@ -481,7 +492,7 @@ type SlapdDatabaseSpec struct {
 	// every SlapdDatabase must declare its replication intent at the CR level,
 	// even if the parent cluster doesn't replicate. Set replication.enabled=false
 	// to explicitly exclude this database from cluster replication; otherwise
-	// supply replication.ridBase. See DatabaseReplicationConfig for the rationale.
+	// supply replication.ridSegment. See DatabaseReplicationConfig for the rationale.
 	// +required
 	Replication DatabaseReplicationConfig `json:"replication"`
 	// seed defines initial data to populate in the database on first creation.

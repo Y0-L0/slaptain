@@ -366,6 +366,25 @@ type ExternalPeer struct {
 	// name is a human-readable identifier for this peer.
 	// +required
 	Name string `json:"name"`
+	// siteIndex is this peer's coordinate in the RID matrix's remote block:
+	// a syncrepl link to this peer takes RID 1 + segment*(P+S) + P + siteIndex
+	// (ADR-031 decision 1). It names the LINK, not the remote pod answering it,
+	// so reselecting the far end moves provider= and leaves the RID alone.
+	//
+	// DERIVED when spec.meshRef is set — it is the peer site's serverIDIndex,
+	// which ADR-028 already requires to be declared and unique — and setting
+	// externalPeers at all alongside meshRef is refused. REQUIRED on a
+	// hand-written peer of a replicating cluster: nothing else can supply a
+	// peer site's identity, and a positional fallback is exactly the inference
+	// ADR-031 forbids.
+	//
+	// Must be unique within one peer list, and must be below the mesh's
+	// maxSites (S). The bound here is the loosest the band can admit; the
+	// operator refuses it again against the layout actually in force.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=998
+	// +optional
+	SiteIndex *int32 `json:"siteIndex,omitempty"`
 	// uri is the LDAP URI of the remote peer, e.g. "ldaps://ldap.remote-site.example.com:636".
 	// Mutually exclusive with podAddresses and discovery.
 	// +optional
@@ -563,6 +582,13 @@ type SlapdReplicationConfig struct {
 	// where your peers come from on a mesh, they come from there — and
 	// replicasPerPeer below is the one per-peer knob that survives, because it
 	// is an input to the derivation rather than an output of it.
+	// Two peers must never declare one siteIndex: a peer's RID slot is
+	// P + siteIndex, so a shared index is a shared slot — one RID for two
+	// providers, which is the shared-connid state slapd never rejects
+	// (ADR-031 decision 4, RID-PLAN hazard 5). The rule below refuses it at
+	// the API server; the operator refuses it again, because a CR applied
+	// with validation off reaches the stanza builder either way.
+	// +kubebuilder:validation:XValidation:rule="self.all(p, !has(p.siteIndex) || self.filter(q, has(q.siteIndex) && q.siteIndex == p.siteIndex).size() == 1)",message="two externalPeers declare the same siteIndex: a peer's RID slot is derived from it, so a shared index gives two providers one syncrepl RID (ADR-031). Give every peer its own siteIndex."
 	// +optional
 	ExternalPeers []ExternalPeer `json:"externalPeers,omitempty"`
 

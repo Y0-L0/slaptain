@@ -11,6 +11,7 @@ You may obtain a copy of the License at
 package controller
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -340,95 +341,126 @@ func TestJudgeRIDSegmentCeilingTracksTheLayout(t *testing.T) {
 // changing in logs nobody is reading at the time. These are the tests that
 // make that edit loud.
 
-// TestLegacyRIDBaseMatchesThePreADR031Convention pins the whole stanza set, not
-// just the base: the old scheme derived in-cluster peer i as ridBase + i + 1
-// and external peer j as ridBase + 50 + j + 1, and both have to land where
-// they always did.
-func TestLegacyRIDBaseMatchesThePreADR031Convention(t *testing.T) {
-	for segment := int32(0); segment <= legacyRIDBaseBridgeMax; segment++ {
-		// What the CR used to carry for this database, under the convention
-		// docs/ADR-003 documented and every fixture followed.
-		wantBase := segment * 100
+// ── The bridge's grave ───────────────────────────────────────────────────────
+//
+// What stood here until M4a: TestLegacyRIDBaseMatchesThePreADR031Convention,
+// which asserted that legacyRIDBase answered segment × 100 and that the
+// stanza builder derived in-cluster peer i as ridBase + i + 1 and external
+// peer j as ridBase + 50 + j + 1 — i.e. the PRE-ADR-031 formula, on purpose.
+// That test was M3's whole claim: a field was renamed and no pod was
+// renumbered.
+//
+// M4a is what renumbers them, so the test is now wrong by design. It is
+// rewritten rather than deleted, because what it actually guards is a SILENT
+// renumber — a stanza set that quietly moves to numbers nobody chose — and
+// that guard is worth more under the new scheme than it was under the old one.
+// The numbers below are the ADR-031 coordinates for the same inputs.
 
-		base, v := legacyRIDBase(ridSegmentVerdict{OK: true, Reason: reasonRIDSegmentOK, Segment: segment})
-		if !v.OK {
-			t.Fatalf("segment %d: the bridge refused a segment the judge accepted: %s", segment, v.Message)
-		}
-		if base != wantBase {
-			t.Fatalf("segment %d: bridge base = %d, want %d — this renumbers every stanza on every pod. "+
-				"M3's claim is that it renames a field and changes no RID; that claim is now false",
-				segment, base, wantBase)
-		}
+// TestStanzaRIDsAreTheADR031CoordinateAndNotTheOldConvention pins the new
+// numbers against ridcoord AND against a hand-written example, so that a
+// change to the formula cannot make both sides agree with each other and
+// disagree with the ADR.
+func TestStanzaRIDsAreTheADR031CoordinateAndNotTheOldConvention(t *testing.T) {
+	layout := ridcoord.DefaultLayout() // P=8, S=12 → M=20
 
-		// In-cluster peer i → ridBase + i + 1.
-		for i := int32(0); i < 3; i++ {
-			if got, want := base+i+1, segment*100+i+1; got != want {
-				t.Errorf("segment %d, in-cluster peer %d: rid = %d, want %d", segment, i, got, want)
-			}
+	// Hand-computed from rid = 1 + segment·M + offset, with the local block
+	// first. Spelled out rather than derived, because a test that computes the
+	// expectation the same way the code does checks nothing.
+	//
+	//   segment 0, pod 0  → 1 + 0  + 0     = 1      (was 1)
+	//   segment 1, pod 0  → 1 + 20 + 0     = 21     (was 101)
+	//   segment 1, site 0 → 1 + 20 + 8 + 0 = 29     (was 151)
+	//   segment 2, site 1 → 1 + 40 + 8 + 1 = 50     (was 252)
+	for _, tc := range []struct {
+		segment, index int32
+		remote         bool
+		want           int32
+		old            int32
+	}{
+		{segment: 0, index: 0, want: 1, old: 1},
+		{segment: 0, index: 2, want: 3, old: 3},
+		{segment: 1, index: 0, want: 21, old: 101},
+		{segment: 1, index: 0, remote: true, want: 29, old: 151},
+		{segment: 2, index: 1, remote: true, want: 50, old: 252},
+		{segment: 9, index: 7, want: 188, old: 908},
+	} {
+		var got int32
+		var err error
+		kind := "in-cluster provider"
+		if tc.remote {
+			kind = "link to peer site"
+			got, err = externalStanzaRID(layout, tc.segment, tc.index)
+		} else {
+			var rids map[int32]int32
+			rids, err = inClusterStanzaRIDs(layout, tc.segment, layout.PodsPerSite, nil)
+			got = rids[tc.index]
 		}
-		// External peer j → ridBase + 50 + j + 1.
-		for j := int32(0); j < 3; j++ {
-			if got, want := base+50+j+1, segment*100+50+j+1; got != want {
-				t.Errorf("segment %d, external peer %d: rid = %d, want %d", segment, j, got, want)
-			}
+		if err != nil {
+			t.Fatalf("segment %d, %s %d: unexpected refusal: %v", tc.segment, kind, tc.index, err)
+		}
+		if got != tc.want {
+			t.Errorf("segment %d, %s %d: rid = %d, want %d. If this is deliberate, it renumbers every "+
+				"stanza on every pod at every site and the ADR's worked examples are now wrong",
+				tc.segment, kind, tc.index, got, tc.want)
+		}
+		if tc.old != tc.want && got == tc.old {
+			t.Errorf("segment %d, %s %d: rid = %d, which is the PRE-ADR-031 number. The bridge is still "+
+				"in the path: M4a's whole content is that it is not", tc.segment, kind, tc.index, got)
 		}
 	}
 }
 
-// TestLegacyRIDBaseRefusesABridgeOverflow pins the ceiling the bridge inherits
-// from the scheme it bridges to. The judge admits 0..48 at the default layout;
-// the old builder cannot express a tenth database at all, because segment 10
-// puts an external stanza at 1051 and slapd rejects a RID above 999 outright.
-// Emitting it would be worse than withholding — see ADR-031's note that slapd
-// accepts a DUPLICATE rid in silence, so arithmetic that walks off the end is
-// not reliably loud.
-func TestLegacyRIDBaseRefusesABridgeOverflow(t *testing.T) {
-	for _, segment := range []int32{legacyRIDBaseBridgeMax + 1, 20, 48} {
-		base, v := legacyRIDBase(ridSegmentVerdict{OK: true, Reason: reasonRIDSegmentOK, Segment: segment})
-		if v.OK {
-			t.Errorf("segment %d: the bridge produced base %d instead of refusing; "+
-				"external peer 0 would take rid %d, past slapd's %d ceiling",
-				segment, base, base+51, ridcoord.MaxRID)
-			continue
+// TestStanzaRIDsRefuseASegmentPastTheLayoutsCeiling replaces
+// TestLegacyRIDBaseRefusesABridgeOverflow. The old test pinned the BRIDGE's
+// ceiling — segment 9, because segment 10 put an external stanza at 1051 under
+// the × 100 convention. Deleting the bridge lifts that back to the layout's own
+// C, so the cases split in two: the segments the bridge could not express must
+// now work, and the layout's real ceiling must still refuse.
+func TestStanzaRIDsRefuseASegmentPastTheLayoutsCeiling(t *testing.T) {
+	layout := ridcoord.DefaultLayout()
+	c := layout.MaxSegments() // 49
+
+	t.Run("the segments the bridge could not express now work", func(t *testing.T) {
+		for _, segment := range []int32{10, 20, c - 1} {
+			rid, err := externalStanzaRID(layout, segment, layout.MaxSites-1)
+			if err != nil {
+				t.Errorf("segment %d: refused (%v) — this is the ceiling M4a exists to lift", segment, err)
+				continue
+			}
+			if rid > ridcoord.MaxRID {
+				t.Errorf("segment %d: rid %d is past slapd's %d ceiling", segment, rid, ridcoord.MaxRID)
+			}
 		}
-		if v.Reason != reasonRIDSegmentOutOfRange {
-			t.Errorf("segment %d: reason = %q, want %q", segment, v.Reason, reasonRIDSegmentOutOfRange)
+	})
+
+	t.Run("the layout's own ceiling still refuses", func(t *testing.T) {
+		for _, segment := range []int32{c, c + 1, 100} {
+			if rid, err := externalStanzaRID(layout, segment, 0); err == nil {
+				t.Errorf("segment %d: produced rid %d instead of refusing", segment, rid)
+			} else if !errors.Is(err, ridcoord.ErrSegmentOutOfRange) {
+				t.Errorf("segment %d: error = %v, want one wrapping %v", segment, err, ridcoord.ErrSegmentOutOfRange)
+			}
 		}
-		if !strings.Contains(v.Message, strconv.Itoa(int(legacyRIDBaseBridgeMax))) {
-			t.Errorf("segment %d: message %q does not name the bridge's ceiling (%d), "+
-				"so a human cannot tell it apart from the layout's own range refusal",
-				segment, v.Message, legacyRIDBaseBridgeMax)
-		}
-	}
+	})
 }
 
-// TestLegacyRIDBaseRefusesANegativeSegment is the tripwire above, flipped.
-//
-// It was written as a tripwire because legacyRIDBase checked only
-// Segment > legacyRIDBaseBridgeMax, so called directly with -3 it answered
-// base -300 and OK = true — unreachable through its only caller, which judges
-// the segment first and refuses a negative one before the bridge ever sees it
-// (see "a negative segment is out of range" above). The guard has since
-// landed, so the tripwire becomes an assertion.
-//
-// It is worth asserting rather than deleting because the bridge's signature
-// advertises no such precondition, and the cost of a second caller is a stanza
-// set with negative RIDs — which slapd parses with lutil_atoi and does NOT
-// bounce the way it bounces 1000.
-func TestLegacyRIDBaseRefusesANegativeSegment(t *testing.T) {
+// TestStanzaRIDsRefuseANegativeSegment replaces
+// TestLegacyRIDBaseRefusesANegativeSegment, and keeps its point: a negative
+// segment is not caught downstream. slapd parses a negative rid with lutil_atoi
+// and does NOT bounce it the way it bounces 1000, so an unguarded derivation
+// writes a stanza nobody can correlate and nothing rejects.
+func TestStanzaRIDsRefuseANegativeSegment(t *testing.T) {
+	layout := ridcoord.DefaultLayout()
 	for _, segment := range []int32{-1, -3, -100} {
-		base, v := legacyRIDBase(ridSegmentVerdict{OK: true, Reason: reasonRIDSegmentOK, Segment: segment})
-		if v.OK {
-			t.Errorf("segment %d: the bridge produced base %d instead of refusing; "+
-				"in-cluster peer 0 would take rid %d, which slapd accepts into a stanza "+
-				"rather than bouncing", segment, base, base+1)
-			continue
+		if rid, err := externalStanzaRID(layout, segment, 0); err == nil {
+			t.Errorf("segment %d: produced rid %d instead of refusing", segment, rid)
+		} else if !errors.Is(err, ridcoord.ErrSegmentOutOfRange) {
+			t.Errorf("segment %d: error = %v, want one wrapping %v", segment, err, ridcoord.ErrSegmentOutOfRange)
 		}
-		if v.Reason != reasonRIDSegmentOutOfRange {
-			t.Errorf("segment %d: reason = %q, want %q", segment, v.Reason, reasonRIDSegmentOutOfRange)
-		}
-		if v.Message == "" {
-			t.Errorf("segment %d: a refusal carries an empty Message", segment)
+		if rids, err := inClusterStanzaRIDs(layout, segment, 3, i32(0)); err == nil {
+			t.Errorf("segment %d: produced rids %v instead of refusing", segment, rids)
+		} else if !errors.Is(err, ridcoord.ErrSegmentOutOfRange) {
+			t.Errorf("segment %d: error = %v, want one wrapping %v", segment, err, ridcoord.ErrSegmentOutOfRange)
 		}
 	}
 }

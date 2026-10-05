@@ -311,11 +311,11 @@ This is the whole difference from Option 6, and three properties follow:
 ### 3. The ledger holds one map
 
 `SlapdCluster.status.ridColumns: map[string]int32` — database name → column.
-At most `C` entries (41 under the chosen constants), written only by the
+At most `C` entries (49 under the default layout), written only by the
 SlapdCluster controller, read by the SlapdDatabase controller.
 
-Allocation is lowest-free, not high-water: with ~41 columns, never reusing one
-would exhaust the space after 41 database creations in a cluster's lifetime. A
+Allocation is lowest-free, not high-water: with ~49 columns, never reusing one
+would exhaust the space after 49 database creations in a cluster's lifetime. A
 column is released only when the `SlapdDatabase` is gone — ADR-005's finalizer
 already guarantees its stanzas are torn off every pod before the CR is released,
 so a reused column cannot collide with a stanza that outlived its database.
@@ -323,6 +323,33 @@ so a reused column cannot collide with a stanza that outlived its database.
 Nothing else is recorded. `siteIndex` and `ordinal` are read from the spec and
 from pod names on every pass, because they are facts about declared identity
 rather than decisions.
+
+Three rules the paragraph above implies and does not state. All three were
+found by the M3 test author turning this decision into cases (2026-10-05), and
+all three are now test-locked, so changing one changes numbers on running
+clusters:
+
+- **A database holds a column whether or not it replicates.** `replication.
+  enabled: false` and `suspend: true` keep theirs. Columns are cheap and the
+  alternative renumbers the whole cluster when someone flips a flag — and
+  `enabled: false` is reachable in production (a partial migration, a
+  site-local database, a static reference tree).
+- **New keys claim free columns in ascending key order.** "Lowest free" fixes
+  which columns are used and not who gets which. Any other order satisfies
+  every other rule here while producing different numbers.
+- **A corrupt ledger is reported, never repaired.** Two databases holding one
+  column, or a column outside the layout, stalls with `LedgerCorrupt` naming
+  the entries. The operator does not deduplicate and carry on: the recovery is
+  a human clearing the map and accepting the renumber, which is ADR-026 R2's
+  "report and stall" applied to state the operator does own but cannot
+  disambiguate.
+
+And one property worth naming because it is unusual here: the ledger makes
+`SlapdCluster.status` **load-bearing cross-controller input**, not merely an
+observation — the SlapdDatabase controller reads it to decide what to write to
+`cn=config`. That is exactly why decision 7's guard exists, and why this one
+field is the only status in the system that is derived from its own previous
+value.
 
 ### 4. Off-mesh peers declare their site index
 

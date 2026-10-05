@@ -527,6 +527,18 @@ refresh windows and convergence write-bursts where this class of regression
 lives (the timeout= freeze was invisible on t3e and cost ~300 s full-server
 silences on the mesh).
 
+**A mutation check is only evidence if the mutation landed.** Proving a
+green-from-birth test's teeth by breaking the code and watching it fail is the
+right move, and it has silently failed three times in one effort — each time
+reading as "this test has no teeth" when the truth was "the check did not run":
+a `str.replace` whose source did not match, a marker comment that produced a
+syntax error, and an edit that failed to compile on an unused import. A `grep`
+confirming the marker is present proves nothing. **Verify the mutated tree
+builds, then verify the test went red for the mutation's own reason** — and
+treat a green mutation result as suspicious until you have done both. A test
+whose teeth were "proven" by a check that never ran is worse than an untested
+one, because it reads as coverage.
+
 **Not dogmatic:** behavior-preserving refactors under already-green tests need no new red —
 the existing tests are the guard. Red-first applies to new behavior and bug fixes. If a test
 will not go red for the intended reason, treat it as a broken test and say so — do not paper

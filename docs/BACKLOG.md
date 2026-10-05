@@ -80,6 +80,24 @@ itself guarded only by prose.
 
 ---
 
+## A mesh approaching `maxSites` learns about it only when a peer is refused
+
+`maxSites` is the exclusive upper bound on a site's `serverIDIndex`, not a
+count of sites (ADR-031 decision 5). ADR-028 retires a decommissioned site's
+index rather than reusing it, so a long-lived mesh climbs toward the bound even
+while its site count stays flat — and the first signal is every cross-site
+stanza withheld with `PeerSiteIndexOutOfRange` on the day a new site crosses
+it.
+
+**Fix:** a `SlapdMesh` condition that reports the highest declared
+`serverIDIndex` against `ridLayout.maxSites`, warning while there is still
+headroom. Widening the layout costs a mesh-wide renumber, so the warning wants
+to arrive with enough notice to schedule one.
+
+Found 2026-10-05 by the M4a correctness review.
+
+---
+
 ## `spec.replicas` above the RID layout's `P` has no cluster-level diagnosis
 
 ADR-031 decision 5 says exceeding an axis is "a refusal naming which one and

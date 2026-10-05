@@ -287,7 +287,7 @@ offset >= P   →  MY LINK to peer site `offset − P`
 | `segment` | which database | **allocated** — the only allocated quantity in the scheme |
 | `offset` | which provider, in two blocks | structural (see below) |
 | `P` | max pods per site | mesh-scoped constant (see 5) |
-| `S` | max sites in a mesh | mesh-scoped constant (see 5) |
+| `S` | **the exclusive upper bound on a site's `serverIDIndex`** — not a site count (see 5) | mesh-scoped constant |
 
 The offset is two blocks, because a provider at your own site and a provider at
 another site are reached differently:
@@ -487,6 +487,24 @@ one.
 
 `C = floor(999 / M)`, not `1000 / M`, because `rid = 0` is reserved — the one
 segment that reservation costs.
+
+**`S` bounds the index, not the population — and the sizing table above reads
+like a count, which is the trap.** A peer's slot is `P + siteIndex`, and
+ADR-028 states that `serverIDIndex` values are unique, run to 40, and that
+**gaps are legal and expected**: "a decommissioned site's index is retired, not
+reused, so 0/1/2 becoming 0/2 is the correct way to remove a site." So a mesh
+that has only ever held three sites, but has replaced sites over its life,
+climbs toward index 40 and is refused at `S` — on a topology that never
+exceeded three.
+
+The refusal is legible (`PeerSiteIndexOutOfRange`, naming the ceiling) and the
+fix is to widen `maxSites`, which costs one mesh-wide renumber. But the cost is
+real and the default buys headroom for twelve *indices*, not twelve sites.
+Covering the whole index space would mean `S = 41`, `M = 49`, and `C = 20`
+databases — a 60% cut in database capacity to buy headroom a long-lived mesh
+reaches slowly. Recorded here as the trade rather than silently resolved;
+`docs/BACKLOG.md` carries an early-warning item so a mesh approaching the bound
+learns about it before a peer is refused.
 
 Exceeding any axis is a refusal naming which one and what the ceiling is. It is
 never a wrap, never a silent collision.

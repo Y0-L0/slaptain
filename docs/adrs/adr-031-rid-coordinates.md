@@ -678,6 +678,20 @@ so nothing has to land in a particular order.
   is right for the operator and wrong for a diagnostic: a human pasting a RID
   off a pre-upgrade stanza deserves "inside slapd's band, outside this mesh's
   matrix", not an error. The obligation lands in M6.
+- **An unresolvable external peer withholds the database's whole stanza
+  convergence, in-cluster stanzas included.** That is the honest consequence of
+  decision 6 meeting an atomic `Replace`: a set omitting one peer is a deletion
+  of that peer's links, so the pass writes nothing rather than converging a
+  short set. The cost is a behaviour change — a permanently broken peer (a bad
+  kubeconfig, say) now blocks in-cluster replication too, where it used to cost
+  only its own links. Nothing is deleted, because on a first bringup nothing
+  exists yet; what is lost is progress, and the mitigation is the diagnosis:
+  the refusal names the peer and its cause, with a distinct reason per cause,
+  so this never reads as "replication is just not working". The cleverer
+  alternative — converge everything else and preserve only the unresolved
+  peer's current stanzas, which the RID coordinate now makes identifiable via
+  `Decode` — is recorded in `docs/BACKLOG.md` and deliberately not taken before
+  the design has met a real slapd.
 - **`replicasPerPeer >= 2` is refused** until ADR-032 replaces it (decision 9).
   The only shipped use is an e2e knob added 2026-09-28; the redundancy it was
   added for is what ADR-032's site-pair `R` provides.

@@ -293,7 +293,7 @@ func (r *SlapdDatabaseReconciler) reconcileRIDSegment(
 
 // ridSegmentConditionType is where a human looks for the verdict after the
 // phase has moved on to something else.
-const ridSegmentConditionType = "RIDSegmentValid"
+const ridSegmentConditionType = "SyncreplStanzasReady"
 
 // ridSegmentCondition renders a verdict as the condition that carries it.
 func ridSegmentCondition(sd *ldapv1alpha1.SlapdDatabase, v ridSegmentVerdict) metav1.Condition {

@@ -305,7 +305,7 @@ const (
 //
 //  1. spec.replicas above the layout's podsPerSite. The withhold already
 //     happens — inClusterStanzaRIDs refuses the out-of-range ordinal — but it
-//     happens inside reconcileReplication, so RIDSegmentValid stays True, the
+//     happens inside reconcileReplication, so SyncreplStanzasReady stays True, the
 //     phase reads PartiallyApplied, and the only mention of podsPerSite is a
 //     log line. Decision 5 requires a refusal naming the axis and its ceiling.
 //     Read replicas are NOT counted: an RO pod is never a provider, so it

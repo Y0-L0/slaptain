@@ -311,7 +311,10 @@ when a cluster is reachable is strictly better. M6 decides the surface.
 
 - serverID allocation (ADR-017). Deliberately left alone; unifying two
   almost-identical schemes is what ADR-031's Context argues against.
-- The three unguarded `Replace` paths in `docs/BACKLOG.md`. Same hazard class as
-  hazard 2, pre-existing, and out of scope here.
+- ~~The three unguarded `Replace` paths in `docs/BACKLOG.md`.~~ **They are
+  M4b.** This exclusion predates M1, which added two new triggers to one of
+  them and turned a pre-existing wart into this work's own release gate.
+  Corrected 2026-10-05, found by the M4b test author reading the plan against
+  its own milestone list.
 - Rollback to `ridBase`. Untested by decision; `docs/UPGRADING.md` says so
   plainly and names the manual path.

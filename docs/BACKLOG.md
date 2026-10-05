@@ -103,6 +103,42 @@ It belongs to no milestone in `docs/RID-PLAN.md`.
 
 ---
 
+## `ExternalPeer`'s "exactly one of uri, podAddresses, or discovery" is unenforced
+
+`slapdcluster_types.go:364` documents the invariant in a comment and no CEL
+rule implements it, so a peer with none of the three is admitted and fails at
+reconcile instead. ADR-031 M4b makes that failure legible (`PeerAddressesEmpty`
+withholds and names the peer), which is the important half — but admission is
+where it belongs, and the comment currently claims a rule that does not exist.
+
+**Fix:** an `XValidation` on the `ExternalPeer` type — per item, so it costs
+nothing against the CEL budget that an unbounded list rule blew earlier.
+Red-first: a peer with no mode is refused at `Create`.
+
+Found 2026-10-05 by the M4b test author, checking whether its third refusal
+reason was reachable from an admitted CR. It is.
+
+---
+
+## Preserve an unresolved peer's stanzas instead of withholding the whole pass
+
+ADR-031 M4b withholds a database's entire stanza convergence when any external
+peer fails to resolve, in-cluster stanzas included, because a set omitting that
+peer is a deletion under the atomic `Replace`.
+
+The coordinate makes something better possible: `ridcoord.Decode` recovers the
+peer site from any stanza's rid, so the operator could read the pod's current
+`olcSyncRepl`, keep the stanzas whose rid decodes to the unresolved peer's
+remote slot, and `Replace` with the union — converging everything else while
+deleting nothing. A permanently broken peer would then stop costing in-cluster
+replication.
+
+**Not taken in M4b** because it introduces a dependency on decoding live
+`cn=config` state, and M4b lands immediately before the design's first contact
+with a real slapd. Revisit after M5.
+
+---
+
 ## A discovery refusal is invisible outside the operator log
 
 `reconcileExternalPeerStatuses` writes a discovery error into
@@ -118,6 +154,13 @@ pod named**" and `kubectl get sc -o yaml` does not name it.
 **Fix:** do not clobber a non-empty `status.lastError` with the generic
 no-addresses verdict, or give discovery its own field the CSN pass does not own.
 Found 2026-10-05 by the M1 correctness review.
+
+**This is also what blocks a finer diagnosis downstream.** ADR-031 M4b reports
+every discovery failure as one reason, `PeerProvidersUndiscovered`, because
+discovery publishes all five causes — first bringup, a bad kubeconfig, remote
+RBAC, an unparseable remote pod name, a duplicate remote ordinal — identically,
+as an empty provider list. Separating them cannot be done downstream; it has to
+be carried out of discovery, which is this entry.
 
 ---
 

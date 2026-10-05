@@ -27,7 +27,7 @@ import (
 
 // R3. Scale a cluster past the layout's local block and every stanza is
 // withheld, correctly: inClusterStanzaRIDs refuses ordinal 8 when podsPerSite
-// is 8. But the refusal happens inside reconcileReplication, so RIDSegmentValid
+// is 8. But the refusal happens inside reconcileReplication, so SyncreplStanzasReady
 // stays True, the phase reads "applied to 9 pods, 0 failed", and the only
 // mention of podsPerSite is a log line. ADR-031 decision 5 requires a refusal
 // naming the axis and its ceiling.

@@ -135,7 +135,7 @@ func (f *ridFixture) get(ctx context.Context, name string) *ldapv1alpha1.SlapdDa
 	return sd
 }
 
-// ridCondition returns the RIDSegmentValid condition, or nil when the reconcile
+// ridCondition returns the SyncreplStanzasReady condition, or nil when the reconcile
 // never published one.
 func ridCondition(sd *ldapv1alpha1.SlapdDatabase) *metav1.Condition {
 	for i := range sd.Status.Conditions {
@@ -146,7 +146,7 @@ func ridCondition(sd *ldapv1alpha1.SlapdDatabase) *metav1.Condition {
 	return nil
 }
 
-// expectRefusal asserts the database carries a False RIDSegmentValid with the
+// expectRefusal asserts the database carries a False SyncreplStanzasReady with the
 // given reason, and that its message contains every one of `naming`.
 func expectRefusal(sd *ldapv1alpha1.SlapdDatabase, reason string, naming ...string) {
 	c := ridCondition(sd)

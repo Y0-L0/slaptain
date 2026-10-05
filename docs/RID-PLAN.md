@@ -54,12 +54,18 @@ properties of allocating the segment into status, and went away with it
    no identity. The ordinal comes from the StatefulSet pod name; a name that
    will not parse is a refusal naming the pod. Landed in M1.
 
-5. **The local site's own index must not collide with a declared peer's.**
-   Under `meshRef` both come from `serverIDIndex` and ADR-028 enforces
-   uniqueness. Off-mesh, self is `serverIDBase / 100` while peers declare
-   `siteIndex`, so a hand-set base that is not a multiple of 100 — or simply
-   equal to a peer's decade — silently puts two providers in one slot. Refuse
-   where both are known.
+5. **Two peers must not declare one `siteIndex`.** A peer's RID slot is
+   `P + siteIndex`, so two peers sharing an index share a slot — one RID for
+   two providers, which is the shared-connid state slapd never rejects. Under
+   `meshRef` ADR-028's `serverIDIndex` uniqueness covers it; off-mesh a CEL
+   rule over the peer list does, and the operator refuses again for a CR
+   applied by hand.
+
+   This hazard previously read "the local site's own index must not collide
+   with a declared peer's". That was wrong and is corrected here: the local
+   block is indexed by pod ordinal and the remote block by peer site, so the
+   two never overlap and the local site needs no index at all (ADR-031
+   decision 4).
 
 ## Milestones
 

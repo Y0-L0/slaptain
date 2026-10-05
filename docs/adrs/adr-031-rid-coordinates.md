@@ -421,8 +421,22 @@ check, which is why it stayed unenforced deployer paperwork. `siteIndex` must be
 unique within *one CR's peer list*, which is a CEL rule on the list itself. The
 API server refuses a duplicate.
 
-The local site's own index is `serverIDBase / 100` (ADR-017's decade), which is
-0 for a cluster that is not in a mesh.
+**The local site has no index in this scheme, and an earlier draft of this
+decision said it did** (`serverIDBase / 100`). It is unused: decision 1 indexes
+the local block by *pod ordinal*, not by site, so a provider at your own site
+is reached without ever naming your own site. Hazard 5 of `docs/RID-PLAN.md`
+was written around the same mistake — it claimed the local index could collide
+with a peer's, which cannot happen: a peer's slot is `P + siteIndex`, in the
+remote block, and the local block is `0..P-1`. The two never overlap.
+
+What *is* a collision is two **peers** declaring one `siteIndex`, which the CEL
+rule above refuses and the operator refuses again for hand-applied CRs.
+
+A peer declaring the same index as the site it is configured on is harmless —
+it occupies one remote slot like any other — and is left alone rather than
+refused: catching it would require deriving a local index that nothing else
+needs, from a `serverIDBase` that is only a decade by convention. Found while
+briefing M4, 2026-10-05.
 
 ### 5. The envelope is mesh-scoped, and exceeding it is a refusal
 

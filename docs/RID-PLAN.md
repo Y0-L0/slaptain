@@ -162,71 +162,64 @@ not two: the hazards that justified a second axis went with the ledger.
 neither writes a stanza, a clean set converges, and `ridBase` is gone from the
 API, the charts and the fixtures.
 
-### M4 — Consumption, the gate, and off-mesh site indices
+### M4a — Stanzas take their RIDs from `ridcoord`
 
-**Goal.** Stanzas take their RID from `ridcoord`, keyed on the database's
-declared segment and the provider's identity; `externalPeers[].siteIndex` added
-with a CEL uniqueness rule over the peer list; self index derived from
-`serverIDBase / 100` with the collision refusal (hazard 5); the withhold from
-M3's detector wired into stanza convergence, leaving existing stanzas alone
-(hazard 2).
+**Goal.** The consumption seam. Every syncrepl stanza's RID comes from
+`ridcoord`, keyed on the database's declared segment and the provider's
+identity: an in-cluster peer at ordinal `k` is `Local(segment, k)`, a link to
+peer site `s` is `Remote(segment, s)`. The `legacyRIDBase` bridge is deleted,
+which lifts the temporary 0..9 ceiling back to `0..C-1`.
 
-**Also M4's: resolving the layout.** `ridLayoutFor(ctx, cluster)` in the
-SlapdDatabase controller — under `meshRef` it reads `SlapdMesh.spec.ridLayout`,
-otherwise it returns the defaults and does no I/O. Its failure mode is
-hazard 3's shape: an unreadable mesh means the layout is **unknown**, and
-unknown withholds rather than converging. `judgeRIDSegment` deliberately takes
-the layout as a parameter, which is what keeps it testable without a client.
+**Owns.** `operator/internal/controller/slapddatabase_controller.go` (the
+stanza builders and their callers), `operator/internal/controller/ridsegment.go`
+(the bridge's grave, and `ridLayoutFor`),
+`operator/api/v1alpha1/slapdcluster_types.go` (`externalPeers[].siteIndex` and
+its CEL rule), the generated CRDs, and their tests.
 
-**Also M4's, and tracked as a release gate:** `SlapdMesh.spec.ridLayout` ships
-in M3 as live API that **nothing reads** — the judgement hardcodes
-`ridcoord.DefaultLayout()`. A user can declare `{podsPerSite: 400, maxSites:
-400}` (C = 1), declare `ridSegment: 5`, and have both the API server and the
-operator accept it, because the operator is judging against the default C of
-49. ADR-024's rule is that a spec field which cannot be honoured is rejected or
-converged, never ignored. Nothing miscomputes while the bridge ignores the
-layout too; the damage lands here, when the same CR starts producing RIDs from
-a layout nobody agreed to. M4 reads the field or M4 does not ship. Found by the
-M3 correctness review, 2026-10-05.
+**Carries two of the three release gates:**
 
-**Also M4's, and it is the release gate** named below: the three pre-existing
-paths that hand `Replace` a short set (`docs/BACKLOG.md`). M1 added two triggers
-to one of them; nothing ships until this closes.
+- **`ridLayoutFor` must actually read `SlapdMesh.spec.ridLayout`.** It ships
+  unread in M3 — the judgement hardcodes `DefaultLayout()` — so a declared
+  layout is silently ignored, which ADR-024 forbids. Under `meshRef` read the
+  mesh; otherwise return the defaults and do no I/O. **An unreadable mesh
+  means the layout is unknown, and unknown withholds rather than converging**
+  (hazard 3's shape).
+- **Delete `legacyRIDBase`**, and with it the 0..9 ceiling and its field-doc
+  paragraph.
 
-**Owns.** `operator/api/v1alpha1/slapdcluster_types.go` (the peer field),
-`operator/internal/controller/slapddatabase_controller.go`,
-`operator/internal/controller/slapddatabase_ridgate.go` (new), their tests, and
-the regenerated CRDs.
+**Also M4a's:** lift the phase selection out of `Reconcile` into a pure
+`databasePhase(...)`. The precedence it encodes — a RID refusal outranks
+`PartiallyApplied` but never `NoPodsReachable` — is currently dead in every
+test, because the envtest fixtures have no pods and the phase is already
+`Error`.
 
-**Depends on** M1, M2, M3.
+**And refuse `replicasPerPeer >= 2`** (ADR-031 decision 9): the remote block is
+`S` wide because a pod holds at most one link per peer site. ADR-032 replaces
+the quantity with a site-pair `R`; until then, two links from one pod to one
+peer site have no second slot to live in.
 
-**Roles.** test-author → implementer → reviewer (correctness, with hazard 2 as
-the named target: prove that every refusal path leaves `olcSyncRepl` untouched).
+**Red-first.** The RID derivation is pure: given a segment, a layout, a local
+ordinal and a resolved peer set, return the stanza RIDs. The bridge-equivalence
+test from M3 is the thing that must now *change* — it pins the old formula, and
+M4a is what replaces it. Expect it red, and rewrite it to assert the coordinate
+rather than deleting it.
 
-**Two structural moves M4 should make while it is in this file**, both raised
-by M3 and both production code the test author could describe but not write:
+**Roles.** test-author → implementer → reviewer (correctness).
 
-- **Lift the phase selection into a pure function** — `databasePhase(pendingWork,
-  appliedPods, ridRefusal)` or similar. It is currently inline in `Reconcile`,
-  so the precedence it encodes (a RID refusal outranks `PartiallyApplied` but
-  never `NoPodsReachable`) cannot be unit-tested and is asserted nowhere. This
-  is the plan's own design corollary — push the decision into a thin pure
-  function so the e2e stays an integration shell.
-- **Delete `legacyRIDBase`.** M3's bridge keeps RIDs byte-identical by computing
-  `base = segment × 100` and refuses segments above 9 to stay inside slapd's
-  band. M4 replaces the arithmetic with `ridcoord` and the bridge goes with it,
-  which is also what lifts the temporary 0..9 ceiling back to `0..C-1`.
+### M4b — The three short-set paths (the last release gate)
 
-**Release gate, not optional (added 2026-10-05).** M1's correctness review
-confirmed that a discovery refusal reaches the atomic `Replace` as a short set,
-and that the same path opens a one-pass window on operator upgrade. Both are
-instances of the pre-existing three-path defect in `docs/BACKLOG.md`, and both
-are reachable only between M1 and M4 — which land in the same release. M4's
-hazard-2 withhold is therefore what makes M1 shippable, and M5 must not run
-before it.
+**Goal.** `docs/BACKLOG.md`'s "Three paths hand `Replace` a short set with no
+error". `olcSyncRepl` is written atomically, so a set missing a peer's stanzas
+is a deletion: an unreadable bind-password Secret, a discovery peer with no
+resolved addresses, or `len(ep.URIs) == 0` each tear that peer's cross-site
+stanzas off every pod until it resolves. M1 added two triggers to the second.
 
-**Done when** every stanza's RID is a coordinate, a missing column withholds
-without writing, and the gate has exactly one reason to withhold on.
+**Done when** an unresolvable peer withholds the pod's stanza convergence and
+reports, rather than converging to a set that omits it — red-first, with a
+cluster whose second peer has an unreadable Secret leaving *both* peers'
+stanzas in place.
+
+**Roles.** test-author → implementer → reviewer (correctness).
 
 ### M5 — First live integration (gate — nothing builds on unit-green code)
 
@@ -281,7 +274,7 @@ keeps its RID and changes only `provider=`.
 ## Dependency order
 
 ```
-M1 ─┬─► M3 ─► M4 ─► M5 ─► M6 ─► M7
+M1 ─┬─► M3 ─► M4a ─► M4b ─► M5 ─► M6 ─► M7
 M2 ─┘
 ```
 

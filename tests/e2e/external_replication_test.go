@@ -1,9 +1,11 @@
 package e2e_test
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,12 +48,26 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 		remoteAdminPW string
 		remoteRootPW  string // siteB's OWN cn=config admin password — see BeforeEach
 		replicas      int32
-		extPeerRID    string // expected RID for the first external peer (ridBase + 51)
-		// extPeerRIDBase is the fixture's ridBase + 50, i.e. the point external
-		// peer RIDs count up from: peer j (0-based) gets extPeerRIDBase+j+1.
-		// Kept alongside extPeerRID because the peer-removal spec has to name a
-		// peer OTHER than the first one.
-		extPeerRIDBase int32
+
+		// The RID coordinate system in force for this run (ADR-031). A RID is
+		// not a literal to match any more, it is a coordinate to decode:
+		//
+		//	rid = 1 + segment·(P+S) + offset
+		//	offset <  P  →  a provider at MY OWN site, at pod ordinal `offset`
+		//	offset >= P  →  MY LINK to peer site `offset − P`
+		//
+		// All three terms are read off the live cluster rather than assumed:
+		// the segment is declared on the SlapdDatabase, and P and S come from
+		// the mesh's spec.ridLayout (8 and 12 when it declares none), because
+		// the layout is mesh-scoped and a mesh is free to narrow it.
+		ridSegment int32
+		ridP, ridS int32
+		// peerSiteIndex maps a peer's name to the site index its remote slot is
+		// keyed on — the site's declared serverIDIndex under meshRef, or the
+		// peer's own spec.siteIndex off-mesh. It is the ONLY thing that decides
+		// a cross-site stanza's RID, which is why the removal spec below no
+		// longer has to drop the peer at the end of the list.
+		peerSiteIndex map[string]int32
 	)
 
 	BeforeEach(func(ctx SpecContext) {
@@ -89,60 +105,86 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 			replicas = *sts.Spec.Replicas
 		}
 
-		// Compute the expected external peer RID from the database's declared
-		// segment.
-		//
-		// TODO(M4, docs/RID-PLAN.md "M4 — Consumption"): this encodes the
-		// PRE-ADR-031 external formula — external peer j → ridBase + 50 + j + 1
-		// — and it still holds only because M3 kept every RID byte-identical
-		// through the temporary legacyRIDBase bridge (ridBase = segment × 100,
-		// operator/internal/controller/ridsegment.go). M4 replaces that formula
-		// with ridcoord.Remote, where a peer's RID is keyed on the peer's SITE
-		// INDEX rather than its position in the peer list (ADR-031 decision 1),
-		// and the arithmetic below stops being true. Rewrite this against
-		// ridcoord then; do not re-derive the old formula from the new field.
+		// Read the coordinate system off the live objects. Nothing here is a
+		// constant: the segment is the deployer's declaration, and the layout is
+		// the mesh's, so a mesh that narrows podsPerSite or widens maxSites
+		// moves every RID in the cluster and these specs follow it.
 		sd := &ldapv1alpha1.SlapdDatabase{}
 		Expect(crdClient.Get(ctx, types.NamespacedName{Name: dbCRName, Namespace: namespace}, sd)).To(Succeed())
 		Expect(sd.Spec.Replication.RIDSegment).NotTo(BeNil(), "test fixture must set spec.replication.ridSegment")
-		extPeerRIDBase = *sd.Spec.Replication.RIDSegment*100 + 50
-		extPeerRID = fmt.Sprintf("%d", extPeerRIDBase+1)
+		ridSegment = *sd.Spec.Replication.RIDSegment
+
+		ridP, ridS = ridLayoutInForce(ctx, "slapd")
+		peerSiteIndex = peerSiteIndices(ctx, "slapd")
 	}, NodeTimeout(30*time.Second))
 
-	// ── 1. Syncrepl stanzas applied ──────────────────────────────────────────
+	// ── 1. Every stanza's RID decodes to the provider it names ───────────────
 
-	It("external peer syncrepl stanzas are present in cn=config on all RW pods", func(ctx SpecContext) {
-		for i := int32(0); i < replicas; i++ {
-			podName := fmt.Sprintf("slapd-%d", i)
-			localPort := fmt.Sprintf("%d", 14000+i)
-			conn, cancel := dialPodLDAP(namespace, podName, localPort)
-			defer cancel()
-			defer conn.Close()
+	It("every syncrepl stanza's RID decodes to the provider its URI names", func(ctx SpecContext) {
+		// What this replaces, and why the replacement is stronger.
+		//
+		// Until ADR-031 this spec matched one literal — rid=151, from the
+		// pre-ADR-031 formula ridSegment*100 + 50 + j + 1, where j was a peer's
+		// POSITION in the peer list. A literal can only ever say "some stanza
+		// carries this number"; it cannot say the number belongs to the peer it
+		// is written next to, which is the property that actually matters.
+		// slapd does not reject a duplicate RID (ADR-031, "What slapd actually
+		// requires"): two stanzas sharing a number both load and share a
+		// connid, so a misattributed RID is silent at every layer below this
+		// assertion.
+		//
+		// So: decode every stanza and check it against who the stanza says it
+		// talks to. A remote stanza must decode to the remote block (offset >=
+		// P) and name the peer site whose serverIDIndex equals offset − P; the
+		// stanza's own tls_cacert=…/peers/<site>/ca.crt is the second,
+		// independent witness of which site that is, so the decode is checked
+		// against the operator's OTHER attribution of the same peer rather than
+		// against a number this spec computed for itself. An in-cluster stanza
+		// must decode to the local block and name the pod at that ordinal.
+		//
+		// Robustness: the RID is read from the live objects every pass (segment
+		// from the SlapdDatabase, P and S from the mesh), and the whole check is
+		// retried, because the suite adds and removes databases and sites around
+		// it and a pod mid-roll yields a transiently short or stale set.
+		Expect(peerSiteIndex).NotTo(BeEmpty(),
+			"external-replication specs require a cluster with external peers, and this one resolved none")
 
-			// Re-bind as cn=admin,cn=config to read olcSyncRepl. dialPodLDAP
-			// targets a LOCAL (siteA) pod, so the suite-wide rootPW — siteA's own
-			// config password — is the right credential here. Remote pods need
-			// remoteRootPW instead; see the note in BeforeEach.
-			Expect(conn.Bind("cn=admin,cn=config", rootPW)).To(Succeed())
+		Eventually(ctx, func() error {
+			return checkRWPodStanzas(replicas, func(pod string, stanzas []string) error {
+				return checkStanzaCoordinates(pod, stanzas, ridSegment, ridP, ridS, peerSiteIndex)
+			})
+		}).WithTimeout(3*time.Minute).WithPolling(5*time.Second).Should(Succeed(),
+			"every olcSyncRepl value on every read-write pod must decode to the provider it points at")
+	}, NodeTimeout(5*time.Minute))
 
-			sr, err := conn.Search(ldap.NewSearchRequest(
-				"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
-				0, 0, false, fmt.Sprintf("(olcSuffix=%s)", baseDN),
-				[]string{"olcSyncRepl"}, nil))
-			Expect(err).NotTo(HaveOccurred())
-			Expect(sr.Entries).NotTo(BeEmpty(), "data DB entry not found on %s", podName)
+	// ── 1a. Every declared peer actually has its stanza ──────────────────────
 
-			syncreplVals := sr.Entries[0].GetEqualFoldAttributeValues("olcSyncRepl")
-			hasExternal := false
-			for _, v := range syncreplVals {
-				if containsRID(v, extPeerRID) {
-					hasExternal = true
-					break
+	It("every external peer the operator resolved has a stanza at its own site coordinate", func(ctx SpecContext) {
+		// The complement of the decode check above, and it is a separate
+		// assertion because the two fail for opposite reasons. The decode check
+		// is satisfied by a pod carrying NO external stanzas at all — which is
+		// precisely what a short set under the atomic Replace looks like
+		// (RID-PLAN hazard 2, and the failure mode M4b exists for). This one
+		// asserts presence, peer by peer, at the exact coordinate that peer's
+		// declared site index gives it.
+		Expect(peerSiteIndex).NotTo(BeEmpty(),
+			"external-replication specs require a cluster with external peers, and this one resolved none")
+
+		Eventually(ctx, func() error {
+			return checkRWPodStanzas(replicas, func(pod string, stanzas []string) error {
+				for name, idx := range peerSiteIndex {
+					want := remoteRIDFor(ridSegment, idx, ridP, ridS)
+					if !hasRID(stanzas, want) {
+						return fmt.Errorf("%s has no stanza for peer %q at rid=%03d "+
+							"(segment %d, site index %d, layout P=%d S=%d); stanzas: %v",
+							pod, name, want, ridSegment, idx, ridP, ridS, stanzas)
+					}
 				}
-			}
-			Expect(hasExternal).To(BeTrue(),
-				"pod %s should have external peer syncrepl stanza (rid=%s), got: %v", podName, extPeerRID, syncreplVals)
-		}
-	}, NodeTimeout(3*time.Minute))
+				return nil
+			})
+		}).WithTimeout(3*time.Minute).WithPolling(5*time.Second).Should(Succeed(),
+			"each resolved external peer must have its syncrepl stanza on every read-write pod")
+	}, NodeTimeout(5*time.Minute))
 
 	// ── 1b. The remote site's cn=config is actually readable ─────────────────
 	//
@@ -291,16 +333,27 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 			Expect(peerNames).NotTo(BeEmpty(),
 				"external-replication specs require a cluster with external peers, and this one reports none")
 
-			// Drop the LAST peer, and only the last one. A peer's RID is positional
-			// — external peer j gets ridBase+50+j+1 (ADR-003) — so removing a site
-			// in the middle renumbers every peer after it, and an assertion on
-			// "rid X is gone" would then be reading a RID that still exists under a
-			// different peer. Removing the tail leaves every surviving stanza
-			// byte-identical, which is also what lets the survivors serve as the
-			// control below.
+			// Drop the last peer. Until ADR-031 that was a REQUIREMENT, because a
+			// peer's RID was its position in the list (ridBase+50+j+1, ADR-003):
+			// removing a site in the middle renumbered every peer after it, so
+			// "rid X is gone" could be reading a number that still existed under a
+			// different peer. Under ADR-031 the slot is keyed on the peer's
+			// declared site index, so removing any site renumbers nothing at all
+			// (decision 2, "fan-out is not a dimension") — the tail is now just
+			// the simplest victim to name, and the survivors' RIDs being
+			// unchanged is a property of the scheme rather than of this choice.
+			//
+			// That makes the control assertion below sharper: it no longer says
+			// "the other stanzas are still somewhere", it says each surviving peer
+			// still holds the exact coordinate its own site index gives it.
 			victim := peerNames[len(peerNames)-1]
 			survivors := peerNames[:len(peerNames)-1]
-			victimRID := fmt.Sprintf("%d", extPeerRIDBase+int32(len(peerNames)))
+			victimIdx, known := peerSiteIndex[victim]
+			Expect(known).To(BeTrue(),
+				"peer %q has no resolved site index, so its RID coordinate is unknowable; "+
+					"under meshRef that index is the site's serverIDIndex (ADR-028 amendment), "+
+					"off-mesh it is externalPeers[].siteIndex (ADR-031 decision 4)", victim)
+			victimRID := remoteRIDFor(ridSegment, victimIdx, ridP, ridS)
 
 			var victimSite *ldapv1alpha1.MeshSite
 			remaining := make([]ldapv1alpha1.MeshSite, 0, len(mesh.Spec.Sites))
@@ -350,17 +403,24 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 			// ADR-028 §4 refuses to reach silently.
 			Eventually(ctx, func() error {
 				return checkRWPodStanzas(replicas, func(pod string, stanzas []string) error {
-					if containsAnyRID(stanzas, victimRID) {
-						return fmt.Errorf("%s still carries the dropped peer's stanza (rid=%s)", pod, victimRID)
+					if hasRID(stanzas, victimRID) {
+						return fmt.Errorf("%s still carries the dropped peer's stanza (rid=%03d)", pod, victimRID)
 					}
 					if namesPeerCAPath(stanzas, victim) {
 						return fmt.Errorf("%s still names the dropped peer in a tls_cacert path (peers/%s/)", pod, victim)
 					}
 					for j := range survivors {
-						rid := fmt.Sprintf("%d", extPeerRIDBase+int32(j)+1)
-						if !containsAnyRID(stanzas, rid) {
-							return fmt.Errorf("%s lost surviving peer %q (rid=%s) as well — the derivation "+
-								"collapsed rather than dropping one site", pod, survivors[j], rid)
+						idx, known := peerSiteIndex[survivors[j]]
+						if !known {
+							return fmt.Errorf("%s: surviving peer %q has no resolved site index",
+								pod, survivors[j])
+						}
+						rid := remoteRIDFor(ridSegment, idx, ridP, ridS)
+						if !hasRID(stanzas, rid) {
+							return fmt.Errorf("%s lost surviving peer %q (rid=%03d) as well — the derivation "+
+								"collapsed rather than dropping one site, OR it renumbered the survivors, "+
+								"which ADR-031 decision 2 says a topology change must never do",
+								pod, survivors[j], rid)
 						}
 					}
 					return nil
@@ -388,8 +448,8 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 
 			Eventually(ctx, func() error {
 				return checkRWPodStanzas(replicas, func(pod string, stanzas []string) error {
-					if !containsAnyRID(stanzas, victimRID) {
-						return fmt.Errorf("%s has not regained the restored peer's stanza (rid=%s)", pod, victimRID)
+					if !hasRID(stanzas, victimRID) {
+						return fmt.Errorf("%s has not regained the restored peer's stanza (rid=%03d)", pod, victimRID)
 					}
 					return nil
 				})
@@ -495,25 +555,20 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 	}, NodeTimeout(30*time.Second))
 })
 
-// containsRID checks if an olcSyncRepl value contains the given RID.
-// Handles the {N} ordering prefix that OpenLDAP adds internally.
-func containsRID(stanza, rid string) bool {
-	s := stanza
-	// Strip {N} prefix if present.
-	if len(s) > 0 && s[0] == '{' {
-		if idx := strings.Index(s, "}"); idx >= 0 {
-			s = s[idx+1:]
-		}
-	}
-	s = strings.TrimSpace(s)
-	prefix := "rid=" + rid
-	return strings.HasPrefix(s, prefix) && (len(s) == len(prefix) || s[len(prefix)] == ' ')
-}
-
-// containsAnyRID reports whether any stanza in the list carries the given RID.
-func containsAnyRID(stanzas []string, rid string) bool {
-	for _, s := range stanzas {
-		if containsRID(s, rid) {
+// hasRID reports whether any stanza carries the given RID, compared as a
+// NUMBER.
+//
+// It replaces a pair of string helpers (containsRID / containsAnyRID) that
+// matched "rid=" + the caller's decimal text, and that is a trap worth
+// recording rather than quietly deleting: the operator renders the value with
+// %03d, so a stanza reads `rid=030`, while a caller formatting the same number
+// with %d produces "30" and the prefix match silently fails. Under the
+// pre-ADR-031 scheme every external RID was >= 100 and already three digits, so
+// the two agreed by accident for as long as the old formula lasted. ADR-031's
+// coordinates start at 1, which is exactly the range where the accident stops.
+func hasRID(stanzas []string, rid int32) bool {
+	for _, st := range stanzas {
+		if got, err := stanzaRID(st); err == nil && got == rid {
 			return true
 		}
 	}
@@ -812,3 +867,338 @@ var _ = Describe("external replication of every database", Label("external-repli
 		}
 	}, NodeTimeout(5*time.Minute))
 })
+
+// ── RID coordinates (ADR-031) ────────────────────────────────────────────────
+//
+// A RID is a coordinate in a static matrix, not an address:
+//
+//	rid = 1 + segment·M + offset              M = P + S
+//	offset <  P   →  a provider at MY OWN site, at pod ordinal `offset`
+//	offset >= P   →  MY LINK to peer site `offset − P`
+//
+// WHY THIS IS SPELLED OUT HERE rather than called from internal/ridcoord, which
+// is where the operator's single implementation lives (RID-PLAN hazard 1: one
+// coordinate function, not two).
+//
+// Mechanically, it cannot be imported: tests/e2e is its own Go module and
+// ridcoord sits under operator/internal/, so the compiler refuses
+// ("use of internal package … not allowed"). That is worth fixing — a `slctl
+// rid decode` subcommand is already planned for M6 and would give this suite a
+// supported decoder — and until it exists the choice is between restating the
+// formula and not asserting the property at all.
+//
+// It is also, on its own terms, the right thing for a CHECK. Hazard 1 is about
+// code that PRODUCES RIDs: two producers drift and slapd accepts the result in
+// silence. A test that computed its expectation by calling the same function
+// the operator called would agree with the operator by construction and could
+// only ever catch a crash. The eight lines below are an independent reading of
+// ADR-031 decision 1, which is what makes disagreeing with the operator
+// meaningful.
+
+// ridLayoutInForce returns the P and S of the layout this cluster computes
+// coordinates in: the mesh's spec.ridLayout, defaulted PER AXIS, or the
+// defaults (8, 12) for a cluster with no meshRef.
+//
+// Per-axis defaulting matters because the API server fills a field's default
+// only when its parent object is present: a mesh declaring just maxSites
+// reaches the operator with podsPerSite = 0, and the operator reads that as
+// "unset", not as "zero".
+func ridLayoutInForce(ctx context.Context, clusterName string) (int32, int32) {
+	// ridcoord.DefaultLayout(), restated: P=8, S=12 → M=20, 49 segments.
+	p, sMax := int32(8), int32(12)
+
+	sc := &ldapv1alpha1.SlapdCluster{}
+	Expect(crdClient.Get(ctx, types.NamespacedName{Name: clusterName, Namespace: namespace}, sc)).To(Succeed())
+	if sc.Spec.MeshRef == "" {
+		return p, sMax
+	}
+
+	mesh := &ldapv1alpha1.SlapdMesh{}
+	Expect(crdClient.Get(ctx, types.NamespacedName{Name: sc.Spec.MeshRef, Namespace: namespace}, mesh)).
+		To(Succeed(), "cluster %q references SlapdMesh %q", clusterName, sc.Spec.MeshRef)
+	if mesh.Spec.RIDLayout == nil {
+		return p, sMax
+	}
+	if mesh.Spec.RIDLayout.PodsPerSite != 0 {
+		p = mesh.Spec.RIDLayout.PodsPerSite
+	}
+	if mesh.Spec.RIDLayout.MaxSites != 0 {
+		sMax = mesh.Spec.RIDLayout.MaxSites
+	}
+	return p, sMax
+}
+
+// peerSiteIndices maps each of the cluster's external peers to the site index
+// its remote RID slot is keyed on.
+//
+// Under meshRef that index is the peer SITE's declared serverIDIndex, read off
+// the SlapdMesh — not the site's position in spec.sites, which is freely
+// reorderable and would name a different site tomorrow. Off-mesh it is the
+// peer's own spec.siteIndex (ADR-031 decision 4), which is required there
+// precisely because nothing else can supply it.
+//
+// Peers are taken from the RESOLVED set (clusterExternalPeerNames), so a
+// mesh-driven cluster — whose spec.replication.externalPeers is empty by
+// design — is read correctly rather than reported as having no peers.
+func peerSiteIndices(ctx context.Context, clusterName string) map[string]int32 {
+	names := clusterExternalPeerNames(ctx, clusterName)
+	out := make(map[string]int32, len(names))
+
+	sc := &ldapv1alpha1.SlapdCluster{}
+	Expect(crdClient.Get(ctx, types.NamespacedName{Name: clusterName, Namespace: namespace}, sc)).To(Succeed())
+
+	if sc.Spec.MeshRef == "" {
+		for _, ep := range sc.Spec.Replication.ExternalPeers {
+			Expect(ep.SiteIndex).NotTo(BeNil(),
+				"hand-written external peer %q declares no siteIndex: a replicating cluster outside a "+
+					"mesh must declare one, because nothing else gives the peer a slot in the remote "+
+					"block (ADR-031 decision 4)", ep.Name)
+			out[ep.Name] = *ep.SiteIndex
+		}
+		return out
+	}
+
+	mesh := &ldapv1alpha1.SlapdMesh{}
+	Expect(crdClient.Get(ctx, types.NamespacedName{Name: sc.Spec.MeshRef, Namespace: namespace}, mesh)).
+		To(Succeed(), "cluster %q references SlapdMesh %q", clusterName, sc.Spec.MeshRef)
+
+	byName := make(map[string]int32, len(mesh.Spec.Sites))
+	for i := range mesh.Spec.Sites {
+		site := mesh.Spec.Sites[i]
+		Expect(site.ServerIDIndex).NotTo(BeNil(),
+			"mesh %q declares site %q with no serverIDIndex", mesh.Name, site.Name)
+		byName[site.Name] = *site.ServerIDIndex
+	}
+
+	for _, name := range names {
+		idx, known := byName[name]
+		Expect(known).To(BeTrue(),
+			"the operator resolved a peer %q that mesh %q does not declare as a site — peer names ARE "+
+				"mesh site names (ADR-028 §4), so a mismatch means the derivation and the object disagree",
+			name, mesh.Name)
+		out[name] = idx
+	}
+	return out
+}
+
+// remoteRIDFor is the coordinate of a link to the peer site at siteIndex, for
+// the database holding segment: ADR-031's rid = 1 + segment·(P+S) + P +
+// siteIndex.
+func remoteRIDFor(segment, siteIndex, p, sMax int32) int32 {
+	return 1 + segment*(p+sMax) + p + siteIndex
+}
+
+// decodeStanzaRID inverts the formula: which segment the RID belongs to, which
+// of the two blocks the offset fell in, and the index within that block.
+func decodeStanzaRID(rid, p, sMax int32) (segment int32, remote bool, index int32) {
+	m := p + sMax
+	offset := (rid - 1) % m
+	segment = (rid - 1) / m
+	if offset < p {
+		return segment, false, offset
+	}
+	return segment, true, offset - p
+}
+
+// stanzaRID reads a stanza's rid=NNN, tolerating the X-ORDERED {N} prefix slapd
+// renders values with.
+func stanzaRID(stanza string) (int32, error) {
+	s := strings.TrimSpace(stanza)
+	if strings.HasPrefix(s, "{") {
+		if i := strings.Index(s, "}"); i >= 0 {
+			s = s[i+1:]
+		}
+	}
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "rid=") {
+		return 0, fmt.Errorf("stanza does not start with rid=: %q", stanza)
+	}
+	field := s[len("rid="):]
+	if i := strings.IndexByte(field, ' '); i >= 0 {
+		field = field[:i]
+	}
+	n, err := strconv.Atoi(field)
+	if err != nil {
+		return 0, fmt.Errorf("stanza carries a non-numeric rid %q: %w", field, err)
+	}
+	return int32(n), nil
+}
+
+// stanzaField returns the value of `name=` in a stanza, or "".
+func stanzaField(stanza, name string) string {
+	for _, tok := range strings.Fields(stanza) {
+		if v, ok := strings.CutPrefix(tok, name+"="); ok {
+			return strings.Trim(v, `"`)
+		}
+	}
+	return ""
+}
+
+// stanzaPeerCASite returns the peer name a stanza's tls_cacert path names
+// (/etc/openldap/tls/peers/<name>/ca.crt), or "" when the stanza carries no
+// per-peer CA — an in-cluster stanza, or a cross-site one on a TLS-less
+// fixture.
+//
+// This is the second, independent witness of which site a stanza talks to: the
+// operator writes the peer's NAME into that path (ADR-028 §4) by a completely
+// different code path than the one that computes the RID, so agreement between
+// the two is evidence and not tautology.
+func stanzaPeerCASite(stanza string) string {
+	const marker = "/peers/"
+	path := stanzaField(stanza, "tls_cacert")
+	i := strings.Index(path, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := path[i+len(marker):]
+	j := strings.IndexByte(rest, '/')
+	if j < 0 {
+		return ""
+	}
+	return rest[:j]
+}
+
+// stanzaProviderOrdinal returns the pod ordinal a stanza's provider= URI names,
+// for an in-cluster provider addressed by its stable pod DNS
+// (ldaps://<cluster>-<ordinal>.<headless>…). It returns false for anything else
+// — notably a provider addressed by IP, which happens when the replication
+// network is used for in-cluster traffic too (ADR-007 useForInCluster).
+func stanzaProviderOrdinal(stanza, clusterName string) (int32, bool) {
+	uri := stanzaField(stanza, "provider")
+	host := uri
+	if i := strings.Index(host, "://"); i >= 0 {
+		host = host[i+3:]
+	}
+	if i := strings.IndexByte(host, ':'); i >= 0 {
+		host = host[:i]
+	}
+	label := host
+	if i := strings.IndexByte(label, '.'); i >= 0 {
+		label = label[:i]
+	}
+	tail, ok := strings.CutPrefix(label, clusterName+"-")
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.Atoi(tail)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return int32(n), true
+}
+
+// checkStanzaCoordinates is the assertion ADR-031 asks for, per pod: every
+// stanza's RID decodes to the provider the stanza itself points at.
+//
+// Four things are checked, and each one is a different silent failure:
+//
+//   - the segment. Every stanza on this database's entry must decode to the
+//     segment the SlapdDatabase declares; one that decodes elsewhere is a
+//     stanza wearing another database's number, which is a cross-database RID
+//     collision on the same pod (a RID is unique per SERVER, not per database).
+//   - uniqueness. Two stanzas sharing a RID both load and share a connid, and
+//     slapd says nothing.
+//   - remote attribution. offset − P must equal the peer site's declared index,
+//     cross-checked against the peer name in the stanza's own tls_cacert path.
+//   - local attribution. offset must be the pod ordinal the provider URI names,
+//     and must never be the reading pod's own ordinal — a pod replicating from
+//     itself is a loop.
+//
+// It returns errors rather than asserting, so it composes with Eventually while
+// the suite rolls pods and edits the mesh underneath it.
+func checkStanzaCoordinates(pod string, stanzas []string, segment, p, sMax int32, peerIdx map[string]int32) error {
+	// The reading pod's own ordinal, from its StatefulSet name. Parsed rather
+	// than passed in so a caller cannot get the two out of step; a name that
+	// does not parse simply disables the self-stanza check below instead of
+	// failing the pass, since it is the weakest of the four assertions and the
+	// pod name is the suite's, not the operator's.
+	selfOrdinal := int32(-1)
+	if tail, ok := strings.CutPrefix(pod, "slapd-"); ok {
+		if n, err := strconv.Atoi(tail); err == nil {
+			selfOrdinal = int32(n)
+		}
+	}
+
+	if len(stanzas) == 0 {
+		return fmt.Errorf("%s carries no olcSyncRepl at all: on a replicating cluster that is an "+
+			"empty atomic Replace, not a settled state (RID-PLAN hazard 2)", pod)
+	}
+
+	seen := map[int32]string{}
+	for _, st := range stanzas {
+		rid, err := stanzaRID(st)
+		if err != nil {
+			return fmt.Errorf("%s: %w", pod, err)
+		}
+		if rid < 1 || rid > 999 {
+			return fmt.Errorf("%s: rid %d is outside slapd's 0..999 band: %s", pod, rid, st)
+		}
+		if prev, dup := seen[rid]; dup {
+			return fmt.Errorf("%s: rid %d is carried by two stanzas, which share one connid and are "+
+				"indistinguishable in the logs:\n  %s\n  %s", pod, rid, prev, st)
+		}
+		seen[rid] = st
+
+		gotSegment, remote, index := decodeStanzaRID(rid, p, sMax)
+		if gotSegment != segment {
+			return fmt.Errorf("%s: rid %d decodes to segment %d, but this database declares segment %d "+
+				"(layout P=%d S=%d) — the stanza is wearing another database's number: %s",
+				pod, rid, gotSegment, segment, p, sMax, st)
+		}
+
+		if remote {
+			site := stanzaPeerCASite(st)
+			if site == "" {
+				// No per-peer CA to cross-check against (a TLS-less fixture).
+				// The coordinate must still be one a declared peer owns.
+				owned := false
+				for _, idx := range peerIdx {
+					if idx == index {
+						owned = true
+						break
+					}
+				}
+				if !owned {
+					return fmt.Errorf("%s: rid %d is a link to peer site index %d, which no resolved "+
+						"peer declares (resolved: %v): %s", pod, rid, index, peerIdx, st)
+				}
+				continue
+			}
+			want, known := peerIdx[site]
+			if !known {
+				return fmt.Errorf("%s: rid %d points at peer %q (from its tls_cacert path), which is "+
+					"not in the resolved peer set %v: %s", pod, rid, site, peerIdx, st)
+			}
+			if want != index {
+				return fmt.Errorf("%s: rid %d decodes to peer site index %d, but the peer it names "+
+					"(%q, from its tls_cacert path) declares site index %d. The stanza talks to one "+
+					"site and is numbered for another; slapd accepts that in silence: %s",
+					pod, rid, index, site, want, st)
+			}
+			continue
+		}
+
+		// Local block.
+		if site := stanzaPeerCASite(st); site != "" {
+			return fmt.Errorf("%s: rid %d decodes to the LOCAL block (pod ordinal %d) but the stanza "+
+				"points at peer site %q: %s", pod, rid, index, site, st)
+		}
+		if selfOrdinal >= 0 && index == selfOrdinal {
+			return fmt.Errorf("%s: rid %d is this pod's own ordinal (%d) — a pod never replicates "+
+				"from itself: %s", pod, rid, index, st)
+		}
+		ordinal, ok := stanzaProviderOrdinal(st, "slapd")
+		if !ok {
+			// Provider addressed by IP (ADR-007 useForInCluster). The ordinal
+			// is unrecoverable from the URI, so attribution is not assertable
+			// here; the segment, band and uniqueness checks above still hold.
+			continue
+		}
+		if ordinal != index {
+			return fmt.Errorf("%s: rid %d decodes to in-cluster pod ordinal %d, but its provider URI "+
+				"names pod %d. The stanza replicates from one pod under another pod's number: %s",
+				pod, rid, index, ordinal, st)
+		}
+	}
+	return nil
+}

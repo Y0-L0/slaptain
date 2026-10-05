@@ -367,6 +367,17 @@ clusters:
 - **New keys claim free columns in ascending key order.** "Lowest free" fixes
   which columns are used and not who gets which. Any other order satisfies
   every other rule here while producing different numbers.
+- **Refusals have a precedence, because each names a different fix.**
+  `LayoutInvalid` first: no column exists at all while the layout is unusable,
+  so nothing else can be judged. Then `ColumnSpaceExhausted`: the fit check is
+  `len(desired) > C`, which does not read the stored map, so a corrupt ledger
+  cannot *cause* exhaustion — and when the topology genuinely does not fit, no
+  amount of clearing the map helps. Then `LedgerCorrupt`, whose remedy is to
+  clear the map and accept a renumber, which only works once the set fits.
+  (An earlier draft ran `LedgerCorrupt` ahead of exhaustion on the premise
+  that a corrupt map often makes the space look full. It cannot; the fit check
+  never reads it. Corrected 2026-10-05 from the M3 reviews, which found a
+  narrowed layout reporting "clear the map" where clearing never helps.)
 - **A corrupt ledger is reported, never repaired.** Two databases holding one
   column, or a column outside the layout, stalls with `LedgerCorrupt` naming
   the entries. The operator does not deduplicate and carry on: the recovery is

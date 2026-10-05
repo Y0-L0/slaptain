@@ -315,6 +315,63 @@ func TestDeriveClusterWiring(t *testing.T) {
 			self:       "site-2",
 			wantReason: reasonServerIDCeiling,
 		},
+		{
+			// ADR-028's amendment of 2026-10-05, operator side. The CEL rule on
+			// SlapdMesh refuses this index at admission; this row covers the CR
+			// that reached the cluster another way — an object that predates the
+			// rule, a restore, an apply with validation off — which is the whole
+			// reason a second layer exists at all.
+			//
+			// Index 5 is deliberately unremarkable: it is legal under the
+			// default layout and illegal only because THIS mesh declared a
+			// 4-wide remote block. A check that read the default rather than
+			// the mesh's own layout passes every other row in this table and
+			// fails here.
+			//
+			// What the refusal prevents is quiet: the derivation would hand back
+			// a peer whose siteIndex has no slot, judgeExternalPeers would then
+			// refuse the database one layer down, and the message a human reads
+			// would name externalPeers[].siteIndex — a field nobody typed,
+			// because under meshRef the whole peer list is derived.
+			name: "a site index past this mesh's own maxSites is refused",
+			mesh: &ldapv1alpha1.SlapdMeshSpec{
+				Sites: []ldapv1alpha1.MeshSite{
+					{Name: "site-1", ServerIDIndex: si(0)},
+					{Name: "site-2", ServerIDIndex: si(5)},
+				},
+				RIDLayout: &ldapv1alpha1.RIDLayout{PodsPerSite: 8, MaxSites: 4},
+			},
+			spec:       ldapv1alpha1.SlapdClusterSpec{MeshRef: "mesh"},
+			self:       "site-1",
+			wantReason: reasonSiteIndexPastLayout,
+		},
+		{
+			// The tier order, which is load-bearing and otherwise rests on the
+			// single pre-existing ceiling row above.
+			//
+			// Index 41 breaches BOTH bounds at once: slapd's decade ceiling of
+			// 40, and this mesh's maxSites of 4. Both statements are true and
+			// only one is useful, so the reason must be the CEILING: 40 comes
+			// from olcServerID's 4095 and no field widens it, while
+			// "widen spec.ridLayout.maxSites" is advice that cannot work here —
+			// a deployer who followed it would raise maxSites to 42, re-apply,
+			// and be refused again by a bound they were never told about.
+			//
+			// Same rule that produced RIDSegmentUnverified and
+			// RIDLayoutUnresolved: a reason is a diagnosis. Here it decides
+			// which of two true statements a human is handed.
+			name: "slapd's immovable ceiling outranks the layout's movable one",
+			mesh: &ldapv1alpha1.SlapdMeshSpec{
+				Sites: []ldapv1alpha1.MeshSite{
+					{Name: "site-1", ServerIDIndex: si(0)},
+					{Name: "site-2", ServerIDIndex: si(41)},
+				},
+				RIDLayout: &ldapv1alpha1.RIDLayout{PodsPerSite: 8, MaxSites: 4},
+			},
+			spec:       ldapv1alpha1.SlapdClusterSpec{MeshRef: "mesh"},
+			self:       "site-1",
+			wantReason: reasonServerIDCeiling,
+		},
 	}
 
 	for _, tc := range tests {

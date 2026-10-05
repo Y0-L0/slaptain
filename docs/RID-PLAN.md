@@ -338,10 +338,12 @@ What remains for M1 is unchanged and smaller: discovery must return
 identity instead of IP-sort position, and a pod name that will not parse is a
 refusal naming the pod.
 
-**Whether `slctl decode` needs the cluster at all.** Everything but `column` is
-globally declared; the column needs the ledger. A decode that prints
-`column 13` without resolving the name is still useful offline, and resolving it
-when a cluster is reachable is strictly better. M6 decides the surface.
+**Whether `slctl rid decode` needs the cluster at all.** Settled when the
+surface was pinned: it works offline against a layout, does better with a
+cluster (resolving the segment to the database that declares it and the site
+index to the site that declares it), and says plainly what it could not
+resolve rather than guessing. "Not consulted" and "consulted, found nothing"
+are distinct answers in its output.
 
 ---
 

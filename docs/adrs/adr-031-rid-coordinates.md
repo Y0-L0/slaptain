@@ -677,7 +677,18 @@ so nothing has to land in a particular order.
   operator.** `Decode` refuses 981..999 because they are not coordinates, which
   is right for the operator and wrong for a diagnostic: a human pasting a RID
   off a pre-upgrade stanza deserves "inside slapd's band, outside this mesh's
-  matrix", not an error. The obligation lands in M6.
+  matrix", not an error.
+
+  **This generalises, and the generalisation is the design.** A diagnostic has
+  no failure channel for a number it was asked about — it has *answers*. Five,
+  each a different thing a human then does: a coordinate; `rid = 0`, reserved,
+  so look for a forgotten assignment; inside slapd's band but above `C·M`, so
+  look for a pre-renumber stanza; outside 0..999, so it is not a replica ID at
+  all; and a layout that can produce no segment, so the fault is the layout and
+  not the number. Giving the decoder no error channel is what makes that
+  structural rather than a courtesy somebody has to remember — recorded
+  2026-10-05, when the `rid decode` surface was pinned and only the first of
+  the five turned out to be written down.
 - **An unresolvable external peer withholds the database's whole stanza
   convergence, in-cluster stanzas included.** That is the honest consequence of
   decision 6 meeting an atomic `Replace`: a set omitting one peer is a deletion

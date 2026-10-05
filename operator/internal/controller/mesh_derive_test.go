@@ -376,16 +376,23 @@ func TestExternalPeersForSite(t *testing.T) {
 			// RID — the number is 1 + segment*M + P + siteIndex, so a peer
 			// given position 0 instead of index 7 writes a stanza in another
 			// site's slot, and slapd takes it without a word.
+			//
+			// The indices are 7 and 9 rather than anything larger: the property
+			// needs them to DIFFER from the list position, not to be big, and
+			// since the ADR-028 amendment of 2026-10-05 an index must be below
+			// the mesh's ridLayout.maxSites — 12 by default. A fixture at 39
+			// would be a site no RID could address, which the API server now
+			// refuses outright.
 			name: "a peer carries its declared index, not its list position",
 			sites: []ldapv1alpha1.MeshSite{
 				{Name: "site-1", ServerIDIndex: si(7)},
 				{Name: "site-2", ServerIDIndex: si(0)},
-				{Name: "site-3", ServerIDIndex: si(39)},
+				{Name: "site-3", ServerIDIndex: si(9)},
 			},
 			self: "site-2",
 			want: []ldapv1alpha1.ExternalPeer{
 				peer("site-1", 7, "site-1-ca", "site-1-kubeconfig"),
-				peer("site-3", 39, "site-3-ca", "site-3-kubeconfig"),
+				peer("site-3", 9, "site-3-ca", "site-3-kubeconfig"),
 			},
 		},
 		{

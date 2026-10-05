@@ -197,14 +197,22 @@ type MeshIssuerRef struct {
 // spec changes must additionally be additive and tolerant, because adding a
 // site means editing the mesh everywhere and the sites run different
 // generations during that rollout.
+// +kubebuilder:validation:XValidation:rule="self.sites.all(s, s.serverIDIndex < (has(self.ridLayout) && has(self.ridLayout.maxSites) ? self.ridLayout.maxSites : 12))",message="every site's serverIDIndex must be below spec.ridLayout.maxSites (default 12): a peer's syncrepl RID slot is podsPerSite + serverIDIndex, so an index at or above maxSites has no slot in the RID matrix and no RID could address that site (ADR-031 decision 4, ADR-028 amendment 2026-10-05). Lower the index, or widen spec.ridLayout.maxSites — which renumbers the mesh."
 type SlapdMeshSpec struct {
 	// sites lists the mesh's sites. Order is presentation only: each site's
 	// serverID decade comes from its own serverIDIndex field, so the list may
 	// be reordered or edited in the middle freely. Order IS preserved in the
 	// derived external peer set, purely so an unchanged mesh keeps producing an
 	// unchanged cn=config.
+	// The ceiling is 41 because serverIDIndex is capped at 40 and indices are
+	// unique, so no mesh can hold more sites than that however the RID layout
+	// is set. It is declared mainly to give the CEL rule above a bounded cost:
+	// an unbounded list makes the API server estimate the rule against its own
+	// worst case, and a rule it refuses takes the whole CRD down with it, not
+	// just the rule.
 	// +required
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=41
 	// +listType=map
 	// +listMapKey=name
 	Sites []MeshSite `json:"sites"`

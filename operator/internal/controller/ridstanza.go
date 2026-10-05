@@ -277,3 +277,103 @@ func judgeExternalPeers(sc *ldapv1alpha1.SlapdCluster, layout ridcoord.Layout) r
 
 	return ridSegmentVerdict{OK: true, Reason: reasonRIDSegmentOK}
 }
+
+// Reasons a cluster's own shape — not its databases, not its peer list —
+// cannot be given coordinates.
+const (
+	// reasonRIDPodsPerSiteExceeded — spec.replicas is larger than the layout's
+	// local block, so the fleet's highest ordinals have no slot. ADR-031
+	// decision 5: exceeding an axis is a refusal naming which one and what the
+	// ceiling is, never a wrap and never a silent collision.
+	reasonRIDPodsPerSiteExceeded = "PodsPerSiteExceeded"
+	// reasonConsumerOnlyReadReplicas — a consumer-only cluster has no
+	// in-cluster mesh (ADR-010), so its read-only pods have no provider to
+	// consume from: no local block, and the read-only builder writes no
+	// external stanzas at all. The combination is already refused by a CEL rule
+	// on SlapdClusterSpec; it is refused again here because an operator that
+	// trusts admission writes an EMPTY olcSyncRepl Replace to every read-only
+	// pod when the CR got in another way (RID-PLAN hazard 2).
+	reasonConsumerOnlyReadReplicas = "ConsumerOnlyReadReplicasUnsupported"
+)
+
+// judgeClusterFleet decides whether the cluster's own pod fleet fits the layout
+// and can be addressed at all.
+//
+// Two refusals, both of which withhold exactly as a refused segment does
+// (ADR-031 decision 6), and both of which are currently SILENT:
+//
+//  1. spec.replicas above the layout's podsPerSite. The withhold already
+//     happens — inClusterStanzaRIDs refuses the out-of-range ordinal — but it
+//     happens inside reconcileReplication, so RIDSegmentValid stays True, the
+//     phase reads PartiallyApplied, and the only mention of podsPerSite is a
+//     log line. Decision 5 requires a refusal naming the axis and its ceiling.
+//     Read replicas are NOT counted: an RO pod is never a provider, so it
+//     occupies no slot in the local block (ADR-031 Consequences).
+//  2. consumer-only with readReplicas > 0. Its read-only pods would be handed
+//     an empty RID set, every lookup would miss, and the pod's whole stanza set
+//     would be Replace()d with nothing.
+//
+// Pure. Only OK, Reason and Message are meaningful; Segment is not a
+// cluster-level quantity and stays zero.
+func judgeClusterFleet(sc *ldapv1alpha1.SlapdCluster, layout ridcoord.Layout) ridSegmentVerdict {
+	panic("not implemented")
+}
+
+// reasonRIDLayoutUnresolved — the layout could not be READ, so it is unknown
+// rather than wrong.
+//
+// Distinct from reasonRIDLayoutInvalid on purpose, and for the reason
+// reasonRIDSegmentUnverified exists in the opposite direction: a reason is a
+// diagnosis, and alerting and slctl key on it. RIDLayoutInvalid says "spec.
+// ridLayout on the SlapdMesh admits no segment — go fix that field", which when
+// the mesh simply could not be read sends a human to a field that may be
+// perfectly correct, while the API server, the operator's RBAC or its cache is
+// what actually failed.
+const reasonRIDLayoutUnresolved = "RIDLayoutUnresolved"
+
+// judgeRIDLayout turns ridLayoutFor's two return values into the verdict that
+// must precede every segment judgement.
+//
+// It exists because the two failure modes are indistinguishable downstream: a
+// failed read yields a zero Layout, and a zero Layout is also what a mesh
+// declaring an unusable ridLayout produces, so a caller that passes the layout
+// on and drops the error gets the WRONG diagnosis published — which is what
+// shipped, and what this closes.
+//
+// Returns nil when the layout is usable and the judgement may proceed:
+//
+//   - err != nil → a refusal with reasonRIDLayoutUnresolved, naming the mesh
+//     and carrying the underlying error.
+//   - err == nil but the layout does not validate → a refusal with
+//     reasonRIDLayoutInvalid, which is the declared-but-unusable case
+//     judgeRIDSegment already words.
+//   - otherwise → nil.
+//
+// Wiring, because a pure function cannot assert its own call site: it belongs
+// at the top of reconcileRIDSegment, which takes ridLayoutFor's error alongside
+// the layout, and its refusal is published and returned exactly like any other.
+func judgeRIDLayout(sc *ldapv1alpha1.SlapdCluster, layout ridcoord.Layout, err error) *ridSegmentVerdict {
+	panic("not implemented")
+}
+
+// stanzaRIDFor is the one lookup into a resolved RID map, and it REFUSES a
+// miss.
+//
+// Both stanza builders currently read the map with `coord, known := rids[i]`
+// and `continue` when the ordinal is absent, on the reasoning that the caller
+// already decided which providers to address. That reasoning is a convention
+// held at a distance, and it has already failed once: a consumer-only cluster
+// hands the read-only builder an empty map, every lookup misses, every stanza
+// is skipped, and the pod's whole set is Replace()d with nothing — a deletion
+// of live replication with no error anywhere (RID-PLAN hazard 2).
+//
+// It is the same class of bug selfOrdinal's pointer type exists to make
+// unexpressible, one level down: a caller that must remember something.
+// Whichever provider a builder intends to address, it asks for that provider's
+// RID here, and a miss ends the build.
+//
+// The error names the ordinal and the map it was not in, because the question a
+// human then has is "who was supposed to put it there".
+func stanzaRIDFor(rids map[int32]int32, ordinal int32) (int32, error) {
+	panic("not implemented")
+}

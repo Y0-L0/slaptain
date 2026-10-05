@@ -172,6 +172,17 @@ hazard 3's shape: an unreadable mesh means the layout is **unknown**, and
 unknown withholds rather than converging. `judgeRIDSegment` deliberately takes
 the layout as a parameter, which is what keeps it testable without a client.
 
+**Also M4's, and tracked as a release gate:** `SlapdMesh.spec.ridLayout` ships
+in M3 as live API that **nothing reads** — the judgement hardcodes
+`ridcoord.DefaultLayout()`. A user can declare `{podsPerSite: 400, maxSites:
+400}` (C = 1), declare `ridSegment: 5`, and have both the API server and the
+operator accept it, because the operator is judging against the default C of
+49. ADR-024's rule is that a spec field which cannot be honoured is rejected or
+converged, never ignored. Nothing miscomputes while the bridge ignores the
+layout too; the damage lands here, when the same CR starts producing RIDs from
+a layout nobody agreed to. M4 reads the field or M4 does not ship. Found by the
+M3 correctness review, 2026-10-05.
+
 **Also M4's, and it is the release gate** named below: the three pre-existing
 paths that hand `Replace` a short set (`docs/BACKLOG.md`). M1 added two triggers
 to one of them; nothing ships until this closes.

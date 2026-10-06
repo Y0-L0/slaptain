@@ -108,9 +108,14 @@ func resolveLDAPTarget(
 		return nil, err
 	}
 
-	db, err := pickDatabase(ctx, k8sClient, ns, sc.Name, f.database)
-	if err != nil {
-		return nil, err
+	// Only looked up when the requested bind identity is defined by a
+	// database; cn=config and anonymous reads work on a cluster that has none.
+	var db *ldapv1alpha1.SlapdDatabase
+	if bindNeedsDatabase(f) {
+		db, err = pickDatabase(ctx, k8sClient, ns, sc.Name, f.database)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	bindDN, password, err := resolveBind(ctx, coreClient, ns, sc, db, f)
@@ -201,7 +206,9 @@ func pickDatabase(ctx context.Context, k8sClient client.Client, ns, clusterName,
 	}
 	switch len(forCluster) {
 	case 0:
-		return nil, fmt.Errorf("no SlapdDatabase for cluster %q in namespace %q", clusterName, ns)
+		return nil, fmt.Errorf("no SlapdDatabase for cluster %q in namespace %q "+
+			"(bind as cn=admin,cn=config with --as config, or use --anonymous, to read a cluster that has none)",
+			clusterName, ns)
 	case 1:
 		return &forCluster[0], nil
 	default:
@@ -216,6 +223,30 @@ func pickDatabase(ctx context.Context, k8sClient client.Client, ns, clusterName,
 
 // ── Bind resolution ───────────────────────────────────────────────────────────
 
+// bindNeedsDatabase reports whether the requested bind identity can only be
+// resolved with a SlapdDatabase in hand.
+//
+// A cluster is a legitimate thing to talk to before any database exists — a
+// freshly applied SlapdCluster, or one whose SlapdDatabase CRs have not landed
+// yet — and `cn=config` is precisely what you want to read in that window. So
+// the database lookup is conditional on the bind, not unconditional: only the
+// identities DEFINED by a database (its rootDN, its credentials Secret, its
+// suffix) require one.
+func bindNeedsDatabase(f *ldapTargetFlags) bool {
+	if f.anonymous {
+		return false
+	}
+	switch f.as {
+	case "config":
+		return false
+	case "admin", "", "replication":
+		return true
+	}
+	// A literal DN stands on its own unless it is one of the short forms
+	// resolveBind completes with the database's suffix.
+	return strings.HasSuffix(f.as, ",") || !strings.Contains(f.as, "=")
+}
+
 func resolveBind(
 	ctx context.Context,
 	coreClient kubernetes.Interface,
@@ -228,7 +259,12 @@ func resolveBind(
 		return "", "", nil
 	}
 
-	suffix := db.Spec.Suffix
+	// nil for the identities bindNeedsDatabase lets through; the suffix is
+	// only consulted by the ones it does not.
+	var suffix string
+	if db != nil {
+		suffix = db.Spec.Suffix
+	}
 
 	switch f.as {
 	case "admin", "":

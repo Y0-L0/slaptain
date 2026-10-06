@@ -239,9 +239,13 @@ func singleQuote(s string) string {
 
 const ldapLongCommon = `slctl flags (long-form only; short flags pass through to the tool):
   --cluster <name>     SlapdCluster (default: the only one in the namespace)
-  --database <name>    SlapdDatabase (default: the only one for the cluster)
-  --as <ident>         'admin' (default), 'config', 'replication', or a literal DN
-  --anonymous          bind anonymously
+  --database <name>    SlapdDatabase (default: the only one for the cluster).
+                       Only consulted for binds a database defines; a cluster
+                       with no SlapdDatabase at all is still readable
+  --as <ident>         'admin' (default), 'config', 'replication', or a literal DN.
+                       'config' needs no database — it binds cn=admin,cn=config
+                       from the cluster's own Secret
+  --anonymous          bind anonymously (needs no database either)
   --password <pw>      bind password (only with a literal --as DN)
   --pod <ord|name>     bypass the Service, talk to one pod (direct pod IP when
                        this host has a route to the pod network, else a
@@ -276,7 +280,9 @@ var ldapsearchCmd = &cobra.Command{
 	DisableFlagParsing: true,
 	SilenceUsage:       true,
 	Long: `Wraps the system ldapsearch with -H/-D/-w filled in from a SlapdCluster
-and its SlapdDatabase.
+and, when the bind identity needs one, its SlapdDatabase. '--as config' and
+'--anonymous' need none, so a freshly applied cluster is readable before any
+SlapdDatabase exists.
 
 Examples:
   slctl ldapsearch -b 'ou=People,dc=example,dc=org' '(uid=alice)'

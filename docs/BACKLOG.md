@@ -95,6 +95,41 @@ tests, so the atomic `Replace` remains guarded by prose.
 
 ---
 
+## A scaled-away pod's mkdir Job is never reaped, only TTL'd
+
+`reapSupersededDirJobs` is called from exactly one place — inside
+`ensureDirJob`, for a pod the operator is currently ensuring a Job *for*
+(`dirjob.go:109`). So the reap only ever visits pods that still exist.
+
+Scale a cluster up and back down and the departed pod's completed mkdir Job
+survives with its pod, which under ADR-018 is a **deletion lease on that pod's
+PVCs**: `slapd-3-mkdir-… (succeeded) holds data-slapd-3, accesslog-slapd-3`.
+Nothing reaps it, because nothing ever calls `ensureDirJob("slapd-3")` again.
+
+**Bounded, not permanent.** `dirJobTTL` is 300 s and the file calls it "the
+ADR-018 R4 crash backstop", so the lease clears after ~5 minutes. But ADR-018's
+contract is that the operator reaps every Job it creates and TTL is a backstop
+for a crash, not the mechanism — and for five minutes the PVCs of a scaled-away
+pod cannot be deleted, which is exactly the window ADR-012 case-2 recovery
+needs.
+
+**Fix:** reap by cluster rather than by pod. When reconciling, list Jobs
+carrying `dirJobLabel` for this cluster and reap any whose pod no longer exists
+— the same list the per-pod reap already does, widened by one selector. Note
+`reapSupersededDirJobs` is deliberately pod-label-scoped so it can never touch a
+backup or restore Job; preserve that.
+
+**Found 2026-10-05** by a manual full-gate e2e run (`E2E_BACKUP=1
+E2E_SCALEUP=1 E2E_SCALE=1 E2E_RESILIENCE=1`, seed `1791221440`). It is
+**pre-existing and unrelated to ADR-031** — `dirjob.go` is untouched by that
+work, and both specs involved predate it. It needs two things to surface in one
+suite: the ungated `scale-topology` spec scaling 3→4→3 to create and orphan the
+Job, and `E2E_BACKUP=1` to enable `job_lease_test`, which the ADR-031 runs never
+set. Spec order decides whether it fires at all, so it is **flaky by
+construction** until fixed — a green run proves nothing here.
+
+---
+
 ## `spec.replicas` above the RID layout's `P` has no cluster-level diagnosis
 
 ADR-031 decision 5 says exceeding an axis is "a refusal naming which one and

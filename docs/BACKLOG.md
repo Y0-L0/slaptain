@@ -1844,3 +1844,48 @@ the largest untested claim into a spec without needing a real legacy slapd.
 Foreign-serverID and demotion are separate pieces; the multi-pod variant depends
 on the same "specs cannot provision their own topology" framework gap as the
 `slapd-init` pinning entry above.
+
+---
+
+## `cross-site-csn` Unreachable is a hard `fail`, so a bootstrap blip red-exits `slctl inspect`
+
+Carried out of GitHub issue #1 when it was closed (2026-10-06). Everything else
+that issue raised has landed; this one item it filed as "owner unsure — needs a
+decision", and the decision was never taken.
+
+`slctl inspect` grades the `cross-site-csn` check as `warn` when a peer is
+**Lagging** (data is flowing, just behind) and `fail` when it is **Unreachable**
+(`operator/cmd/slctl/cmd/inspect.go:873`). `fail` sets the exit code, so any
+pass with an Unreachable peer is red in CI and e2e.
+
+The problem is that Unreachable has two populations behind it, and the check
+cannot tell them apart:
+
+- **Transient.** Measured on a fresh three-site pod-routed bring-up: every
+  remote pod CSN query timed out for ~1 minute while cross-site routing
+  converged, and `cross-site-csn` hard-failed — while replication itself was
+  never broken (the local `contextCSN` already carried the remote serverIDs).
+  It self-healed to 13 passed / 0 failed with no code or config change. The
+  probe was wrong about the thing it was probing.
+- **Persistent.** A genuinely dead cross-site link, which is exactly what the
+  check exists to catch and should stay a hard fail.
+
+**The open question is not "warn or fail"** — it is what distinguishes the two
+without a timer that lies. Candidates, none costed:
+
+- A bootstrap/grace window: suppress to `warn` while the cluster is young or
+  while `status.externalPeerStatuses[].lastChecked` shows the peer has never yet
+  been reached. Cheap, but "young" is a guess, the same class of admitted guess
+  as ADR-030's startup budget.
+- Grade on **duration**, not state: the peer status already carries
+  `lastChecked`, and a never-reached peer is distinguishable from one that was
+  Synced five minutes ago. This is the honest version and needs a status field
+  that records when the peer was last *reachable*, which does not exist today.
+- Leave `fail` and fix the caller: have e2e tolerate the window explicitly
+  rather than teaching the diagnostic to be vague. Keeps `inspect` honest at the
+  cost of pushing the judgement into every consumer.
+
+Note that `PartiallyVerified` (ADR-008 amendment, 2026-09-14) already solved the
+*adjacent* case — the peer answered but some database yielded no readable
+contextCSN — and deliberately did not touch the nothing-answered-anywhere case,
+which stays Unreachable. Whatever lands here should keep that split intact.

@@ -2,7 +2,7 @@ slapd-mesh {{ .Chart.Version }} — mesh {{ .Values.mesh.name }}, cluster {{ .Va
 
 Sites in this mesh:
 {{- range .Values.mesh.sites }}
-  - {{ .name }} (serverID decade {{ mul .serverIDIndex 100 }})
+  - {{ .name }} (serverIDs {{ add (mul .serverIDIndex 16) 1 }}+, hex {{ printf "%03x" (int (add (mul .serverIDIndex 16) 1)) }}+)
 {{- end }}
 
 Apply these same values at EVERY site. Every object this chart renders is
@@ -21,7 +21,7 @@ Check it landed:
 MeshResolved=False with reason SiteIdentityMissing means that operator has no
 siteName; SiteNotInMesh means its siteName is not one of the sites above.
 Nothing is wired until it resolves — deliberately, because guessing a site is
-how two sites end up sharing a serverID decade.
+how two sites end up sharing a serverID stride slot.
 {{- $seedless := list }}
 {{- range .Values.databases }}
 {{- $seed := default (dict) (default (dict) .spec).seed }}

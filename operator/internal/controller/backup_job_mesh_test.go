@@ -59,7 +59,7 @@ import (
 func TestBackupJobMountsAccesslogOnSingleReplicaMeshMember(t *testing.T) {
 	idx := func(i int32) *int32 { return &i }
 
-	// A three-site mesh, indices 0/1/2 → serverID decades 0/100/200, which is
+	// A three-site mesh, indices 0/1/2 → serverID bases 0/16/32, which is
 	// the lab's shape and what tests/e2e.sh generates.
 	mesh := &ldapv1alpha1.SlapdMesh{
 		ObjectMeta: metav1.ObjectMeta{Name: "slapd-mesh", Namespace: "ns"},

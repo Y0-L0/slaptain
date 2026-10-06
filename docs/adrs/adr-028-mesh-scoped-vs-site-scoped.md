@@ -510,3 +510,121 @@ Sites are static in practice — a mesh is built with its sites and then runs �
 so this is a bound to state and validate, not a lifecycle to engineer around.
 `docs/BACKLOG.md` is where any add/remove-site work belongs if it ever earns
 its place.
+
+## Amendment (2026-10-05): the serverID stride is 16, because a CSN is hex
+
+The original decision gave each site a **decade** of 100: `serverIDBase =
+serverIDIndex × 100`, so site 1's pods are 101, 102, 103. Everything above and
+everything in `docs/MULTI-SITE.md` reasons in those numbers, and so did every
+conversation about a live mesh.
+
+Nobody ever sees those numbers. A serverID is read in exactly one place — the
+`#sid#` field of a CSN — and slapd renders that field as **three hex digits**.
+So a three-site mesh reports:
+
+```
+contextCSN (dc=second,dc=example,dc=net):
+  20261005183045.802002Z#000000#001#000000
+  20261005183049.075984Z#000000#065#000000
+  20261005183050.304084Z#000000#0c9#000000
+```
+
+`065` is 101 and `0c9` is 201. The scheme was legible in a notation it never
+appears in, and every reading of a contextCSN vector began with a base
+conversion — at precisely the moment one is least inclined to do arithmetic.
+
+**The stride is now 16 (0x10).** Site 1's base is 16 and its first pod is sid
+17, which reads `011`: site digit, then pod digit, with nothing between the
+number on screen and the pod it names. The decimal convention everyone already
+spoke — "hundreds for the site, units for the pod" — becomes *true* rather than
+aspirational, in the only base that matters.
+
+### What is and is not a free choice
+
+`olcServerID` requires exactly three things, and we checked: an integer in
+0..4095 (the CSN field is three hex digits), non-zero and unique within one
+replication topology, and **stable for the life of the data** — `contextCSN` is
+a vector keyed by sid, so a server that changes its sid orphans its own history
+under the old key and starts a new one at zero. slapd never parses the number,
+never orders by it, never derives anything from it, and accepts unknown sids
+seen on the wire (ADR-017).
+
+Everything else is ours: `serverIDBase + ordinal + 1` (ADR-011/ADR-017), sid ≥ 1
+from birth, and the per-site stride. The stride is therefore a free choice in
+the only sense that matters — no server behaviour depends on it — and
+constrained in the sense that matters more: **changing it for a site that
+already exists is a migration, not an edit.**
+
+### Why 4 bits for the pod and 8 for the site
+
+12 bits split at a nibble boundary two ways. We took 8+4:
+
+| stride | site indices | pods/site | CSN reads as |
+|---|---|---|---|
+| 100 (before) | 0..40 | 95 | `065` = site 1 pod 0 |
+| 0x100 = 256 | 0..15 | 255 | `101` = site 1 pod 0 |
+| **0x10 = 16** | **0..255** | **15** | **`011` = site 1 pod 0** |
+
+A non-nibble split (6+6, 5+7) was rejected outright: it gives up the
+legibility that is the entire motivation and leaves arithmetic *worse* than the
+decimal scheme it replaces. A configurable split was considered and rejected as
+over-engineering — restricted to nibble boundaries it is a boolean, not a knob,
+and it would be a second layout axis beside `ridLayout`, able to disagree with
+the first.
+
+The asymmetry is deliberate and rests on how the two axes consume their space.
+**Pod ordinals are reused** — a StatefulSet that scales down and back up takes
+ordinal 2 again. **Site indices are retired, never reused** (this ADR's own
+rule, so a new site cannot inherit a retired site's CSN lineage), so the site
+axis monotonically burns address space and is the one that needs the room. 255
+site indices is a retirement a year for two and a half centuries; 15 RW pods at
+one site is ample where N-way multi-provider is already poor practice past
+about five, and read-only replicas carry no serverID at all (ADR-017).
+
+One property no stride can buy: the site digit is hex, so index 12 reads `c`.
+Hand out indices 0–9 first if that matters.
+
+### The new bound this creates
+
+At stride 100 the ceiling "99 pods per site" was slack enough to leave unwritten.
+At stride 16 it is real: a site's pod ordinal 15 takes the serverID that is the
+**next** site's base, and two pods in two sites writing under one sid is exactly
+the collision this whole scheme exists to prevent — undetected by slapd,
+invisible on the wire, symptom "some writes never propagate".
+
+The bound is enforced on `spec.ridLayout.podsPerSite` (capped at 15), **not** on
+`spec.replicas`. The operator already refuses `replicas > podsPerSite`
+(`PodsPerSiteExceeded`, ADR-031), so capping the declared layout keeps
+`podsPerSite` the *single* bound on replicas. A second, independently-reasoned
+replicas check is how a cluster ends up legal by one bound and illegal by the
+other.
+
+The two site-index ceilings stay separate and are checked in the same order as
+before: slapd's (now index 255, from 4095 ÷ 16) first, because it is a limit of
+the server that no field widens and deserves the message that says so; then
+`ridLayout.maxSites`, which is configurable and gets a message naming a field a
+human can change. In practice `maxSites` (default 12) binds first and slapd's
+ceiling is slack — which is the correct shape, since the leaky axis is the wide
+one.
+
+### Migration
+
+**There is none, and that is a statement about timing, not about safety.** A
+live site cannot be re-striped: its pods' history stays filed under the old sid,
+the old sid sits in every peer's `contextCSN` vector forever without advancing,
+and per-site CSN tracking stops being comparable with itself (MESH-PLAN hazard
+2). The change was taken while every deployment was a disposable lab, recreated
+rather than migrated.
+
+This retires one claim made above in §4 and in `serverIDBaseForSite`: that
+indices 0/1/2 yield 0/100/200 — "the values every existing multi-site deployment
+is already running, so adopting the mesh costs no migration." That was true when
+written. It is now false for any cluster built before this amendment, and such a
+cluster must either keep its old bases by setting `serverIDIndex` to leave them
+unchanged (impossible under the new stride for any index but 0) or be rebuilt.
+Anything else is a renumber of live pods, which the operator does not do and a
+human should not do either.
+
+A cluster outside a mesh is unaffected: `spec.replication.serverIDBase` is a
+bare integer with no stride attached, and a hand-set 100 remains perfectly legal
+— ADR-011's legacy two-site layout (101-104 / 201-204) included.

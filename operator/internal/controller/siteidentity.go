@@ -31,7 +31,7 @@ import (
 // An unset or empty SITE_NAME is legal and returns "" — it means "no mesh
 // features", which is what every single-site deployment wants. It is not an
 // error and never defaults to a guessed site: getting the identity wrong at two
-// sites collides their serverID decades (ADR-017), so a wrong guess is worse
+// sites collides their serverID stride slots (ADR-017), so a wrong guess is worse
 // than no identity at all.
 //
 // The name is not validated against a site inventory here, because no SlapdMesh

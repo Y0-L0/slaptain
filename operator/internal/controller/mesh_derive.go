@@ -45,7 +45,7 @@ import (
 var (
 	// errSiteUnknown: a site name was not found in the mesh. Always loud —
 	// never a silent fallback to the first site, which would hand this site a
-	// serverID decade another site is already using.
+	// serverID stride slot another site is already using.
 	errSiteUnknown = errors.New("site is not a member of the mesh")
 	// errSiteNotSelected: this site is a mesh member, but the cluster's site
 	// selector does not include it — so this cluster does not span this site.
@@ -59,12 +59,12 @@ var (
 	// errMeshSites: the site list itself is unusable — empty, or carrying a
 	// blank or duplicated name, or a missing, negative or duplicated
 	// serverIDIndex. Both duplicate classes are two sites claiming one
-	// serverID decade: the collision ADR-028 §4 names as the first thing to
+	// serverID stride slot: the collision ADR-028 §4 names as the first thing to
 	// verify.
 	errMeshSites = errors.New("malformed mesh site list")
-	// errServerIDCeiling: the decade-per-site scheme has run out of room. See
+	// errServerIDCeiling: the stride-per-site scheme has run out of room. See
 	// maxSiteIndex.
-	errServerIDCeiling = errors.New("site index exceeds the serverID decade ceiling")
+	errServerIDCeiling = errors.New("site index exceeds the serverID stride ceiling")
 	// errSiteIndexPastLayout: a site declares a serverIDIndex at or above the
 	// mesh's own ridLayout.maxSites, so the remote block of every segment has
 	// no slot for it and no syncrepl RID can address that site (ADR-028
@@ -76,35 +76,67 @@ var (
 )
 
 const (
-	// serverIDDecade is the per-site stride. It is NOT a free choice: it
-	// reproduces, value for value, the site_idx*100 arithmetic that
-	// tests/e2e.sh has been applying by hand, and that every existing
-	// multi-site deployment is therefore already running.
+	// serverIDStride is the per-site stride: a site's serverIDBase is its
+	// declared serverIDIndex times this value.
 	//
-	// olcServerID is baked into every CSN a pod writes (timestamp#count#sid#mod).
-	// Changing what this derivation returns for a site that already exists
-	// would file that site's future writes under a different sid from its
-	// history, and per-site CSN tracking would stop being comparable with
-	// itself. A derivation that changes a running pod's serverID is a defect,
-	// not a migration (MESH-PLAN hazard 2, ADR-017).
-	serverIDDecade = 100
+	// It is 0x10, and the hex matters. olcServerID is stamped into every CSN a
+	// pod writes, and a CSN renders that field as three hex digits
+	// (timestamp#count#sid#mod). Under the original decimal stride of 100 the
+	// numbers everyone reasoned in — "101 is the second site's first pod" —
+	// were not the numbers anyone could read: 101 renders as 065, 201 as 0c9,
+	// and every diagnosis began by converting. A stride of 16 puts the site in
+	// the leading hex digit and the pod ordinal in the trailing one, so the
+	// sid reads as the coordinate it is: 011 is site 1 pod 0, 0c3 is site 12
+	// pod 2. Nothing downstream parses it — ADR-017's derivation is
+	// serverIDBase + ordinal + 1 whatever the stride is — so the change buys
+	// legibility and costs only the migration below.
+	//
+	// 4 bits for the pod and 8 for the site is the deliberate split of slapd's
+	// 12-bit sid space, and it is NOT symmetric by accident. Pod ordinals are
+	// reused: a StatefulSet that scales down and back up takes ordinal 2
+	// again. Site indices are retired, never reused — a decommissioned site's
+	// index stays burnt so a later site cannot inherit its CSN lineage — so
+	// the site axis is the one that monotonically consumes address space and
+	// the one that gets the spare nibble. 15 pods per site is ample where
+	// N-way multi-provider is already poor practice past about 5, and
+	// read-only replicas carry no serverID at all (ADR-017).
+	//
+	// Changing this value again is a MIGRATION, not an edit. A site that
+	// already exists would file its future writes under a different sid from
+	// its history, its old sid would sit in every peer's contextCSN vector
+	// forever without advancing, and per-site CSN tracking would stop being
+	// comparable with itself (MESH-PLAN hazard 2, ADR-017). The move from 100
+	// to 16 was taken while the only deployments were labs, recreated rather
+	// than migrated; see ADR-028's amendment of 2026-10-05.
+	serverIDStride = 16
 
 	// maxSiteIndex is where the scheme runs out. slapd caps olcServerID at 4095
 	// and SlapdCluster.spec.replication.serverIDBase at 4094, so the last index
-	// that can be given a whole decade is 40 (base 4000, leaving pod serverIDs
-	// 4001..4095 — 95 pods, far more than a site will run).
+	// that can be given a whole stride slot is 255 (base 4080, leaving pod
+	// serverIDs 4081..4095).
 	//
 	// It is a bound on the INDEX, not on the number of sites: indices are
 	// sparse-legal (a decommissioned site's index is retired rather than
-	// reused), so a two-site mesh can breach this just as easily as a 41-site
-	// one.
+	// reused), so a two-site mesh can breach this just as easily as a 256-site
+	// one. That sparseness is exactly why the site axis is the wide one.
+	//
+	// It is also, in practice, the slack ceiling of the two that bound a site
+	// index. ridLayout.maxSites (default 12) is far lower and is the one a
+	// deployer actually meets; validateSiteIndicesAgainstLayout checks this
+	// one first anyway, because a limit of the server cannot be widened and
+	// deserves the message that says so.
 	//
 	// A breach is refused loudly rather than wrapped, clamped or shared: every
-	// alternative silently gives two sites one decade, which is the exact
-	// failure mode this whole scheme exists to prevent. A mesh that genuinely
-	// outgrows 41 decades needs a narrower stride, and that is a migration with
-	// a plan, not a fallback inside a derivation.
-	maxSiteIndex = 4094 / serverIDDecade // 40
+	// alternative silently gives two sites one slot, which is the exact
+	// failure mode this whole scheme exists to prevent.
+	maxSiteIndex = 4094 / serverIDStride // 255
+
+	// maxPodsPerSite is the other half of the split: a site may hold at most
+	// stride-1 pods, because ordinal `stride-1` at site N takes the sid the
+	// stride reserved as site N+1's base. See
+	// validateLayoutAgainstServerIDStride for where this is enforced and why
+	// it is enforced on the declared layout rather than on spec.replicas.
+	maxPodsPerSite = serverIDStride - 1 // 15
 )
 
 // meshSiteIndex resolves a site name to its POSITION in the slice, applying the
@@ -117,13 +149,13 @@ const (
 //
 // The list is validated wholesale, names and indices together, so a malformed
 // mesh fails every derivation rather than half of them: a mesh with two sites
-// on one decade is broken for the peer set too, even though peers never read an
+// on one stride slot is broken for the peer set too, even though peers never read an
 // index.
 //
 // Comparison semantics are decideSeedSite's, deliberately: both sides trimmed,
 // case NOT folded (ADR-028 §3 amendment). A site is whatever the operator chart
 // was given; folding would let two distinct SITE_NAME values collide, which is
-// precisely the decade collision §4 warns about.
+// precisely the stride-slot collision §4 warns about.
 func meshSiteIndex(sites []ldapv1alpha1.MeshSite, name string) (int, error) {
 	if len(sites) == 0 {
 		return 0, fmt.Errorf("%w: no sites declared", errMeshSites)
@@ -139,7 +171,7 @@ func meshSiteIndex(sites []ldapv1alpha1.MeshSite, name string) (int, error) {
 		}
 		if _, dup := seen[n]; dup {
 			return 0, fmt.Errorf("%w: site %q is declared twice — two sites claiming "+
-				"one identity share one serverID decade", errMeshSites, n)
+				"one identity share one serverID stride slot", errMeshSites, n)
 		}
 		seen[n] = struct{}{}
 
@@ -157,7 +189,7 @@ func meshSiteIndex(sites []ldapv1alpha1.MeshSite, name string) (int, error) {
 		}
 		if other, dup := seenIdx[si]; dup {
 			return 0, fmt.Errorf("%w: sites %q and %q both claim serverIDIndex %d — "+
-				"they would share one serverID decade, and slapd validates nothing: "+
+				"they would share one serverID stride slot, and slapd validates nothing: "+
 				"contextCSN keeps the highest CSN per serverID, so each site's writes "+
 				"read as already-seen at the other", errMeshSites, other, n, si)
 		}
@@ -193,7 +225,7 @@ func meshSiteIndex(sites []ldapv1alpha1.MeshSite, name string) (int, error) {
 //
 // A configured identity that is absent from the mesh is an error the caller
 // must surface, never a silent default to some site. Defaulting is how two
-// sites end up sharing a serverID decade, and that failure is invisible: slapd
+// sites end up sharing a serverID stride slot, and that failure is invisible: slapd
 // validates nothing, contextCSN tracks the highest CSN per serverID, and the
 // only symptom is that some writes never propagate.
 func validateSelfSite(sites []ldapv1alpha1.MeshSite, identity string) error {
@@ -201,9 +233,12 @@ func validateSelfSite(sites []ldapv1alpha1.MeshSite, identity string) error {
 	return err
 }
 
-// serverIDBaseForSite derives the site's serverID decade from its DECLARED
-// serverIDIndex: index × 100, with ADR-017's serverIDBase + ordinal + 1 applied
-// downstream unchanged. Index 2, pod 3 → 203, readable straight out of a CSN.
+// serverIDBaseForSite derives the site's serverID stride slot from its DECLARED
+// serverIDIndex: index × serverIDStride, with ADR-017's serverIDBase + ordinal
+// + 1 applied downstream unchanged. Index 2, pod ordinal 3 → sid 36, which is
+// where the hex stride earns its keep: the CSN field reads 024, site digit then
+// pod digit, with no arithmetic between the number on screen and the pod it
+// names.
 //
 // The number comes from the field and never from the site's position in
 // spec.sites. That is the point: olcServerID is baked into every CSN a pod has
@@ -214,18 +249,20 @@ func validateSelfSite(sites []ldapv1alpha1.MeshSite, identity string) error {
 // sorting the list. Bound to a field, spec.sites is freely reorderable and the
 // identity is immovable.
 //
-// A three-site mesh declaring indices 0/1/2 therefore yields 0/100/200 — the
-// values every existing multi-site deployment is already running, so adopting
-// the mesh costs no migration.
+// A three-site mesh declaring indices 0/1/2 yields bases 0/16/32, whose pods
+// read 001.. / 011.. / 021.. in a CSN. This is NOT what a pre-stride mesh ran
+// (it had 0/100/200, reading 001 / 065 / 0c9), and that discontinuity is
+// deliberate: see serverIDStride for why re-striding an existing site is a
+// migration and ADR-028's amendment of 2026-10-05 for how the labs took it.
 //
 // Indices are mesh-wide, never per-cluster-selector: two clusters on one mesh
-// spanning different subsets must still agree about who owns decade 100. (Two
+// spanning different subsets must still agree about who owns stride slot 1. (Two
 // clusters may safely share serverID values with EACH OTHER — a CSN is only
 // compared within one replication topology, and clusters with different
 // suffixes never exchange CSNs. What must not happen is two SITES sharing a
-// decade inside one topology.)
+// stride slot inside one topology.)
 //
-// See serverIDDecade for why the stride is not a free choice, and maxSiteIndex
+// See serverIDStride for why the stride is not a free choice, and maxSiteIndex
 // for where it stops.
 func serverIDBaseForSite(sites []ldapv1alpha1.MeshSite, identity string) (int32, error) {
 	pos, err := meshSiteIndex(sites, identity)
@@ -236,17 +273,17 @@ func serverIDBaseForSite(sites []ldapv1alpha1.MeshSite, identity string) (int32,
 	// unique across the mesh.
 	idx := *sites[pos].ServerIDIndex
 	if idx > maxSiteIndex {
-		return 0, fmt.Errorf("%w: site %q declares serverIDIndex %d; the decade-per-site "+
+		return 0, fmt.Errorf("%w: site %q declares serverIDIndex %d; the stride-per-site "+
 			"scheme allows at most %d before olcServerID's 4095 limit",
 			errServerIDCeiling, normalizeSiteName(identity), idx, maxSiteIndex)
 	}
-	return idx * serverIDDecade, nil
+	return idx * serverIDStride, nil
 }
 
 // validateSiteIndicesAgainstLayout refuses any site whose declared
 // serverIDIndex cannot be addressed, under the two ceilings that bound it.
 //
-// They are checked in that order on purpose. slapd's decade ceiling is a
+// They are checked in that order on purpose. slapd's serverID ceiling is a
 // property of the server and cannot be widened, so an index past it gets the
 // reason that says so; the layout's maxSites is configurable, so an index past
 // only that one gets a reason naming the field a human can actually change.
@@ -267,7 +304,7 @@ func validateSiteIndicesAgainstLayout(sites []ldapv1alpha1.MeshSite, layout ridc
 		}
 		idx := *s.ServerIDIndex
 		if idx > maxSiteIndex {
-			return fmt.Errorf("%w: site %q declares serverIDIndex %d; the decade-per-site "+
+			return fmt.Errorf("%w: site %q declares serverIDIndex %d; the stride-per-site "+
 				"scheme allows at most %d before olcServerID's 4095 limit",
 				errServerIDCeiling, normalizeSiteName(s.Name), idx, maxSiteIndex)
 		}
@@ -411,3 +448,38 @@ func externalPeersForSite(sites []ldapv1alpha1.MeshSite, selector []string, iden
 // it is set explicitly here so the derived peer is complete on its own rather
 // than depending on API defaulting having run.
 const externalPeerLDAPSPort = 1025
+
+// errPodsPerSitePastStride: the mesh declares a RID layout whose podsPerSite
+// exceeds what one serverID stride slot can hold. See
+// validateLayoutAgainstServerIDStride.
+var errPodsPerSitePastStride = errors.New("podsPerSite exceeds the serverID stride")
+
+// validateLayoutAgainstServerIDStride refuses a RID layout whose podsPerSite
+// cannot fit inside one serverID stride slot.
+//
+// The two schemes are independent — a RID is a coordinate in ADR-031's matrix,
+// a serverID is a site slot plus a pod ordinal — but they share one physical
+// quantity: how many pods a site may run. The RID matrix would happily accept
+// podsPerSite 64; the serverID stride would then hand site N's ordinal 15 the
+// sid that is site N+1's base, and two pods in different sites would write
+// under one sid. Nothing reports that. slapd validates no serverID, peers
+// accept any sid seen on the wire (ADR-017), and the symptom is each site's
+// writes reading as already-seen at the other.
+//
+// The bound is enforced on the DECLARED layout rather than on spec.replicas on
+// purpose. The operator already refuses replicas > podsPerSite
+// (reasonRIDPodsPerSiteExceeded), so capping podsPerSite keeps that one check
+// the single bound on replicas. A second, independently-reasoned replicas
+// check could disagree with the first, and two bounds on one quantity is how a
+// cluster ends up legal by one and illegal by the other.
+func validateLayoutAgainstServerIDStride(layout ridcoord.Layout) error {
+	if layout.PodsPerSite > maxPodsPerSite {
+		return fmt.Errorf("%w: spec.ridLayout.podsPerSite is %d and the serverID stride is %d, "+
+			"so a site's pod ordinal %d would take serverID %d — the base of the NEXT site, "+
+			"whose own pods would then write under a sid this site already uses. Declare "+
+			"podsPerSite in 1..%d",
+			errPodsPerSitePastStride, layout.PodsPerSite, serverIDStride,
+			maxPodsPerSite, serverIDStride, maxPodsPerSite)
+	}
+	return nil
+}

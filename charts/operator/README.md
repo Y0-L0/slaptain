@@ -46,7 +46,7 @@ kubectl apply --server-side -f charts/operator/crds/
 
 | Key | Default | Description |
 |---|---|---|
-| `siteName` | `""` | **The single per-site value in the whole system**, and the only argument that differs between sites: which site of the `SlapdMesh` this operator runs at. It lives here rather than in any CR because every mesh-scoped resource is applied byte-identically everywhere (ADR-028). Empty is legal and simply disables mesh features — that is what a single-site deployment wants. Two sites sharing a name collide their serverID decades, which slapd does not validate. |
+| `siteName` | `""` | **The single per-site value in the whole system**, and the only argument that differs between sites: which site of the `SlapdMesh` this operator runs at. It lives here rather than in any CR because every mesh-scoped resource is applied byte-identically everywhere (ADR-028). Empty is legal and simply disables mesh features — that is what a single-site deployment wants. Two sites sharing a name collide their serverID stride slots, which slapd does not validate. |
 | `clusterDomain` | `""` | Kubernetes cluster DNS domain used to build pod FQDNs (serverID URLs, syncrepl provider URIs, operator→pod connections). Empty auto-discovers from the operator pod's `/etc/resolv.conf`; set explicitly for a non-standard domain or when running the operator off-cluster. |
 | `image.repository` | `ghcr.io/chuck-chuck-chuck-net/slaptain/operator` | Operator image repository. |
 | `image.tag` | `""` | Image tag. Empty falls back to the chart's `appVersion` (set at package time from the git tag, matching the published image tag). |

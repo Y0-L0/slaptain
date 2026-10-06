@@ -9,7 +9,7 @@ clusterDomain: ""
 # every other mesh-scoped resource is applied byte-identically everywhere, which
 # is why the identity lives here, in the operator's own installation config,
 # rather than in any CR. Two sites sharing a name collide their serverID
-# decades. Leave empty for a single-site deployment: unset is legal and simply
+# stride slots. Leave empty for a single-site deployment: unset is legal and simply
 # disables mesh features. See ADR-028.
 siteName: ""
 

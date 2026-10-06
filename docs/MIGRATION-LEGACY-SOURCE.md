@@ -279,6 +279,13 @@ IDs (`serverIDBase + ordinal + 1`) don't overlap with the source's. Examples:
 | 101-104 + 201-204 (two sites, per ADR-011) | 500 | 501, 502, 503 |
 | 1-3 (small homelab) | 100 | 101, 102, 103 |
 
+These are hand-set on a standalone cluster, where the only requirement is that
+the ranges do not overlap — `serverIDBase` is a bare integer and any value in
+`0..4094` is legal. A cluster under a `SlapdMesh` does not get this choice: its
+base is derived as `serverIDIndex × 16` (ADR-028 amendment 2026-10-05), so if
+the migration target will later join a mesh, prefer a base on that stride —
+e.g. `80` (index 5) rather than `500` — and the handover needs no renumber.
+
 Record the source's IDs somewhere stable (your cutover runbook, or a tagged
 comment on the SlapdCluster manifest).
 

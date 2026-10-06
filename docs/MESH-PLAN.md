@@ -39,6 +39,12 @@ cluster that already exists. Treat a derivation that changes an existing pod's
 `serverID` as a defect, not a migration. Assert it in a unit test with the lab's
 actual values (`scm-s1`→0, `scm-s2`→100, `scm-s3`→200).
 
+> **Superseded 2026-10-05.** The stride moved from 100 to 16 so the sid is
+> legible in the hex field of a CSN, so the same three sites now derive 0/16/32.
+> The hazard this section states is unchanged and was honoured: re-striding a
+> *live* site is still a defect, which is why the change was taken while every
+> deployment was a recreatable lab. See ADR-028's amendment.
+
 ## Conventions this plan follows
 
 - Test-first, red-first (CLAUDE.md "Test Discipline"). Every derivation is a pure
@@ -122,8 +128,9 @@ merged and green.
 - Types: `sites[]` (name, endpoint, kubeconfig secret name), `network`
   (`pod-routed` | `multus` + NAD), trust (CA secret names / issuer ref).
 - Pure functions, no client, no I/O:
-  - `serverIDBaseForSite(mesh, siteName) (int32, error)` — **must** reproduce
-    site-index × 100; see hazard 2.
+  - `serverIDBaseForSite(mesh, siteName) (int32, error)` — site-index × the
+    stride; see hazard 2 (the stride was 100 when this was written, 16 since
+    2026-10-05).
   - `externalPeersForSite(mesh, cluster, siteName) []ExternalPeer` — honours the
     `sites` selector on `SlapdCluster`, excludes self, produces exactly the peer
     set `e2e.sh` produces today.
@@ -272,8 +279,9 @@ exists to prevent, so the red was load-bearing, not ceremony.
 
 *Landed 2026-09-18.* **Multi-site `meshRef` is proven end-to-end** — the claim
 every phase since 3 deferred. `MeshResolved=True` at all three sites, the
-`SlapdCluster` byte-identical everywhere with nothing per-site in it, decades
-reproducing the hand-wired scheme exactly (`olcServerID` 1 / 101 / 201), stanzas
+`SlapdCluster` byte-identical everywhere with nothing per-site in it, serverID
+slots reproducing the hand-wired scheme exactly (`olcServerID` 1 / 101 / 201 —
+1 / 17 / 33 under the hex stride adopted 2026-10-05), stanzas
 naming logical site names, and `slctl inspect --short` 17/17 at every site.
 
     mesh path     87 of 93, 0 failed
@@ -320,7 +328,7 @@ writing them is refused by design.
 
 *Landed 2026-09-18.* There is one deployment path and no flag selects it.
 `E2E_MESH` is gone, and with it `setup_slapd_clusters`' peer-wiring loop, the
-`site_idx * 100` arithmetic, the dual context-vs-site naming helpers
+`site_idx * <stride>` arithmetic, the dual context-vs-site naming helpers
 (`peer_name` in full; `peer_ca_secret` and `peer_kubeconfig_secret` survive as
 one-line statements of the operator's convention), `discover_multus_ips`,
 `configure_multus_external_peers*` and the `STATIC_PODADDRESSES` knob.
@@ -332,7 +340,7 @@ one-line statements of the operator's convention), `discover_multus_ips`,
 88/93 is the **default-path** number Phase 6 measured, not the 87/93 the mesh
 path scored there: re-expressing peer removal closed the one-spec gap, so the
 mesh path now matches the path it replaced spec for spec. The single-site run
-is a one-site mesh (index 0 → decade 0) and behaves exactly as a standalone
+is a one-site mesh (index 0 → serverID base 0) and behaves exactly as a standalone
 cluster always has, teardown included.
 
 **Peer removal was re-expressed against the mesh FIRST**, because deleting the

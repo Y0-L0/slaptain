@@ -30,7 +30,8 @@ neighbour would itself be a per-site behaviour and thus the very thing ADR-028
 Four classes, all of them failures the API server cannot catch for us:
 
   1. A missing or duplicated site name / serverIDIndex. Two sites sharing one
-     decade is the collision ADR-028 §4 names as the first thing to verify:
+     serverID stride slot is the collision ADR-028 §4 names as the first thing
+     to verify:
      slapd validates nothing, contextCSN keeps the highest CSN per serverID, and
      the only symptom is that some writes never propagate.
   2. A site selector naming a site the mesh does not declare — a typo that would
@@ -49,7 +50,7 @@ Invoked once, from slapdmesh.yaml, which is always rendered.
 {{- define "slapd-mesh.validate" -}}
 {{- $sites := .Values.mesh.sites -}}
 {{- if not $sites -}}
-{{- fail "slapd-mesh: mesh.sites is required and must list every site of the mesh. There is deliberately no default: a chart that quietly renders a one-site mesh would hand every site the same serverID decade the moment a second one is added." -}}
+{{- fail "slapd-mesh: mesh.sites is required and must list every site of the mesh. There is deliberately no default: a chart that quietly renders a one-site mesh would hand every site the same serverID stride slot the moment a second one is added." -}}
 {{- end -}}
 {{- $names := list -}}
 {{- $indices := list -}}
@@ -72,7 +73,7 @@ Invoked once, from slapdmesh.yaml, which is always rendered.
          check whose whole job is catching a silent collision. */ -}}
   {{- $idx := printf "%v" $s.serverIDIndex -}}
   {{- if has $idx $indices -}}
-  {{- fail (printf "slapd-mesh: serverIDIndex %s is claimed by two sites (at mesh.sites[%d], %s). Two sites on one decade merge into one contextCSN bucket and each other's writes read as already-seen." $idx $i $s.name) -}}
+  {{- fail (printf "slapd-mesh: serverIDIndex %s is claimed by two sites (at mesh.sites[%d], %s). Two sites on one stride slot merge into one contextCSN bucket and each other's writes read as already-seen." $idx $i $s.name) -}}
   {{- end -}}
   {{- $names = append $names $s.name -}}
   {{- $indices = append $indices $idx -}}
@@ -97,6 +98,18 @@ Invoked once, from slapdmesh.yaml, which is always rendered.
   {{- fail (printf "slapd-mesh: site %q declares serverIDIndex %v, and this mesh's ridLayout.maxSites is %v, so a peer's RID slot (podsPerSite + %v) falls outside the remote block. Declare an index in 0..%v, or widen mesh.ridLayout.maxSites — which renumbers the mesh once (ADR-031 decision 5)." $s.name $s.serverIDIndex $maxSites $s.serverIDIndex (sub (int $maxSites) 1)) -}}
   {{- end -}}
 {{- end -}}
+
+{{- /* podsPerSite past the serverID stride. The RID matrix would take it; the
+       serverID scheme cannot, because a site's pod ordinal 15 takes the sid
+       that is the next site's base and two pods in two sites then write under
+       one sid — which nothing on the wire detects (ADR-028 amendment
+       2026-10-05). The API server refuses it too; the same reasoning as the
+       maxSites check above applies to catching it here. */}}
+{{- with .Values.mesh.ridLayout }}{{- with .podsPerSite -}}
+  {{- if gt (int .) 15 -}}
+  {{- fail (printf "slapd-mesh: mesh.ridLayout.podsPerSite is %v, and the serverID stride is 16, so a site's pod ordinal 15 would take the serverID that is the next site's base. Declare podsPerSite in 1..15 (ADR-028 amendment 2026-10-05)." .) -}}
+  {{- end -}}
+{{- end }}{{- end }}
 
 {{- $multiSite := gt (len $sites) 1 -}}
 {{- $ridSegments := list -}}

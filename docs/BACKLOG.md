@@ -95,6 +95,37 @@ tests, so the atomic `Replace` remains guarded by prose.
 
 ---
 
+## `ensureServerIDs` will renumber a live pod if the derivation ever moves again
+
+`ensureServerIDs` converges `olcServerID` per pod: it compares the derived value
+against the live one and `Replace`s when they differ (ADR-017). That was written
+when the derivation could not move, so the Replace was a no-op for every
+correctly-booted pod and only ever repaired a sid-0 pod or a pre-ADR-017 URL
+list.
+
+The serverID stride change of 2026-10-05 (ADR-028 amendment) moved it. On a mesh
+upgraded across that release the operator renumbers every pod at index ≥ 1,
+once, silently — and a renumbered pod's history stays filed under its old sid in
+every peer's `contextCSN` vector, forever, without advancing. `docs/UPGRADING.md`
+says do not do it; nothing stops someone doing it.
+
+The gap is that the operator cannot tell "this pod booted wrong and needs
+repair" from "this pod is correct and my derivation changed underneath it". Both
+look like `current != desired`.
+
+Worth considering, in rough order of cost:
+
+- refuse to Replace a non-zero, non-URL-list `olcServerID` with a *different*
+  non-zero bare integer, and report it as a condition instead — that is exactly
+  the renumber case, and it leaves both legitimate repairs (sid 0, URL list)
+  untouched;
+- or record the derivation's generation somewhere node-local so the operator can
+  distinguish the two.
+
+Not urgent while there is one stride and no intent to change it again. It
+becomes urgent the moment a second stride is contemplated — which is also when
+it is too late to add cheaply.
+
 ## A scaled-away pod's mkdir Job is never reaped, only TTL'd
 
 `reapSupersededDirJobs` is called from exactly one place — inside

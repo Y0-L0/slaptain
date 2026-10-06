@@ -748,15 +748,18 @@ spec:
                       no validation slapd performs at startup; the only symptom is "my
                       writes don't propagate," visible only via contextCSN inspection.
 
-                      Convention: assign each site/cluster its own decade or hundred. ADR-011
-                      codifies a legacy two-site layout (site A 101-104, site B 201-204); slaptain's
-                      e2e-multisite test uses site_idx*100. A standalone cluster (no
-                      externalPeers, no plans to add any) can leave this at 0.
+                      Convention: assign each site/cluster its own stride slot of 16, i.e.
+                      site_index*16, so the sid reads as site-digit + pod-digit in the hex
+                      field of a CSN (ADR-028 amendment 2026-10-05). ADR-011 codifies a legacy
+                      two-site layout on the older decimal convention (site A 101-104, site B
+                      201-204), which remains perfectly legal here — any base is, this field
+                      is a bare integer. A standalone cluster (no externalPeers, no plans to
+                      add any) can leave this at 0.
 
                       Valid range is 0..4094 (slapd caps ServerID at 4095).
                       DERIVED when spec.meshRef is set, from the site's declared serverIDIndex
                       (ADR-028 §4); setting it alongside meshRef is REFUSED unless it happens
-                      to equal this exact site's decade.
+                      to equal this exact site's stride slot.
                     format: int32
                     maximum: 4094
                     minimum: 0
@@ -1113,9 +1116,9 @@ spec:
 
                   Unset means every site in the mesh, which is what a cluster gets when it
                   says nothing. The selector narrows the derived PEER set only; it never
-                  touches the serverID decade, which is mesh-wide by construction — two
+                  touches the serverID stride slot, which is mesh-wide by construction — two
                   clusters spanning different subsets must still agree about who owns
-                  which decade.
+                  which slot.
 
                   A name the mesh does not declare, or a selector that excludes this
                   operator's own site, is an error condition rather than a silently

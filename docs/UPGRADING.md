@@ -6,6 +6,47 @@ needs this file.
 
 ---
 
+## ADR-028 amendment: the serverID stride becomes hex (100 → 16)
+
+**There is no upgrade path, and this is the one entry in this file that says
+so.** A site's `serverIDBase` is derived as `serverIDIndex × 16` instead of
+`× 100`, so every pod of every site but index 0 would change its `olcServerID`.
+
+`olcServerID` is stamped into every CSN a pod has ever written, and `contextCSN`
+is a vector keyed by it. Renumbering a running pod leaves its entire history
+filed under the old sid — which then sits in every peer's vector forever without
+advancing — and starts a fresh lineage at zero. Nothing detects this and nothing
+repairs it.
+
+And the operator **will** write it. `ensureServerIDs` converges `olcServerID`
+per pod on every reconcile (ADR-017), comparing the derived value against the
+live one and `Replace`-ing when they differ — which until now was a no-op for
+any correctly-booted pod, because the derivation never moved. It moves here. So
+on an existing mesh the new operator renumbers the pods, once, silently, and
+there is no undo.
+
+Do not upgrade a live multi-site mesh across this release:
+
+- **a single-site cluster at index 0** is unaffected — base 0 either way;
+- **a standalone cluster** with a hand-set `spec.replication.serverIDBase` is
+  unaffected: that field is a bare integer, is not derived, and any value in
+  `0..4094` remains legal (ADR-011's 101-104 / 201-204 layout included);
+- **a multi-site mesh at indices ≥ 1** must be rebuilt, not upgraded. The change
+  was taken deliberately while every deployment was a recreatable lab.
+
+Also new, and worth checking before you apply a mesh: `spec.ridLayout.podsPerSite`
+is now capped at **15**. A site's pod ordinal 15 would take the serverID that is
+the next site's base. The chart refuses it at render time and the API server at
+admission.
+
+Why it was done at all: a serverID is read in exactly one place, the `#sid#`
+field of a CSN, and slapd renders that field as three hex digits. Under the
+decimal stride the numbers everyone reasoned in were not the numbers anyone
+could read — site 1 pod 0 was 101, shown as `065`. At stride 16 it is `011`.
+See ADR-028's amendment of 2026-10-05.
+
+---
+
 ## ADR-031: RIDs become coordinates (`ridBase` → `ridSegment`)
 
 `spec.replication.ridBase` is gone. Each `SlapdDatabase` now declares

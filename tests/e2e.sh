@@ -2,7 +2,7 @@
 # Unified e2e test orchestration. Single entry point for single-site and
 # multi-site test runs — the script branches on the number of contexts:
 #
-#   N=1  single-site:  one cluster, a one-site mesh (index 0 → decade 0), no
+#   N=1  single-site:  one cluster, a one-site mesh (index 0 → serverID base 0), no
 #                      external peers, basic LDAP/ACL/schema coverage.
 #                      E2E_EXTERNAL_REPL is NOT set.
 #   N≥2  multi-site:   N clusters, a full cross-site peer set, cross-site CSN
@@ -383,7 +383,7 @@ assign_site_names() {
         if [[ -z "$index" || "$index" == "-1" ]]; then
             if [[ -n "${E2E_CONFIG:-}" && -n "${LAB_SITE_NAMES[*]:-}" ]] && \
                printf '%s\n' "${LAB_CONTEXTS[@]}" | grep -qxF "$ctx"; then
-                die "$E2E_CONFIG: site '$name' has no serverIDIndex. It is required and never inferred from list position — the index is the site's serverID decade, baked into every CSN its pods have written (ADR-017, ADR-028)."
+                die "$E2E_CONFIG: site '$name' has no serverIDIndex. It is required and never inferred from list position — the index is the site's serverID stride slot, baked into every CSN its pods have written (ADR-017, ADR-028)."
             fi
             index=$((idx - 1))
         fi
@@ -618,12 +618,13 @@ MESH_VALUES_FILE=""
 # The chart values for one run of the fixture. Three parts:
 #
 #   mesh     — sites (name + serverIDIndex) and the fabric. serverIDIndex is
-#              (position - 1) so site-1/2/3 → decades 0/100/200, which is EXACTLY
-#              what the pre-ADR-028 harness produced with site_idx*100.
-#              Reproducing it is mandatory, not tidy: olcServerID is baked into
-#              every CSN a pod has written, so a derivation that renumbers a live
-#              site splits its history across two sids (MESH-PLAN hazard 2,
-#              ADR-017).
+#              (position - 1), so site-1/2/3 take serverID bases 0/16/32 and
+#              their pods read 001.. / 011.. / 021.. straight out of a CSN —
+#              the hex stride of ADR-028's 2026-10-05 amendment. The fixture
+#              is created fresh every run, so it simply adopted the new stride;
+#              a LIVE site cannot, because olcServerID is baked into every CSN
+#              its pods have written and renumbering splits that history across
+#              two sids (MESH-PLAN hazard 2, ADR-017).
 #   cluster  — tests/values.slapd-persistent.yaml, lifted under `cluster:` plus
 #              the images. Read from that file rather than retyped here so the
 #              fixture has one definition, shared with every other consumer of
@@ -722,8 +723,8 @@ build_mesh_values() {
 # site; the only per-site input in the whole system is the operator's siteName,
 # which setup_foundation already passed to charts/operator.
 #
-# What a pre-ADR-028 harness computed at this point — the serverIDBase decade
-# and the N-1 external peers with their CA and kubeconfig Secret names — is
+# What a pre-ADR-028 harness computed at this point — the serverIDBase stride
+# slot and the N-1 external peers with their CA and kubeconfig Secret names — is
 # absent on purpose. The operator derives all of it from the mesh plus its own
 # identity, and a cluster that both references a mesh and hand-writes one of those fields
 # is refused outright with MeshResolved=False (ADR-028 §4). So the absence here
@@ -1549,7 +1550,7 @@ require_discovery_transport() {
 declare -A NODE_IPS          # node k8s InternalIP — the cross-site API-server address
 declare -A NODE_ACCESS_IPS   # address used to reach node NodePorts + cert SAN (override: E2E_NODE_ACCESS_IP[S])
 declare -A SITE_NAMES        # logical per-site identity handed to the operator (ADR-028 §4)
-declare -A SITE_INDICES      # that site's serverID slot; decade = index * 100 (ADR-017)
+declare -A SITE_INDICES      # that site's serverID slot; base = index * 16 (ADR-017, ADR-028)
 
 assign_site_names
 

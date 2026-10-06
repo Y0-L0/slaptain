@@ -251,7 +251,7 @@ image pair — needed for hot-migration clusters that must match a 2.6 source.
 - **Security**: rootless execution (UID 1024), no privilege escalation, read-only root filesystem, distroless runtime images, TLS encryption.
 - **Database lifecycle**: cleanup policy (Retain/Delete) controls what happens when a `SlapdDatabase` CR is deleted. Default: Retain (database stays in slapd, becomes unmanaged).
 - **Backup & restore**: on-demand and scheduled `slapcat`→S3 backups with retention (`SlapdBackup` / `SlapdScheduledBackup`); restore into a fresh database (`SlapdDatabase.spec.bootstrapFrom`) or roll back an existing one in place (`SlapdRestore`). See [Backup & Restore](docs/BACKUP.md).
-- **Multi-site meshes**: describe the sites once in a `SlapdMesh` and apply one chart with one values file at every site; the operator derives each site's serverID decade, its cross-site peers, the network mode and the trust wiring from the mesh plus its own `siteName`. See [Multi-Site Deployments](docs/MULTI-SITE.md).
+- **Multi-site meshes**: describe the sites once in a `SlapdMesh` and apply one chart with one values file at every site; the operator derives each site's serverID stride slot, its cross-site peers, the network mode and the trust wiring from the mesh plus its own `siteName`. See [Multi-Site Deployments](docs/MULTI-SITE.md).
 - **Diagnostics**: `slctl` inspects every pod directly and judges what it finds — CSN convergence per database, topology, stanza counts, suffix visibility — and collects a full incident bundle with `debug-dump`. See [slctl](docs/slctl.md).
 - **Server-side apply**: all resource management uses SSA — no optimistic concurrency conflicts.
 

@@ -18,7 +18,7 @@ metadata:
 spec:
   sites:
     - name: site-a
-      # serverIDIndex fixes this site's serverID decade (index * 100); pod N then
+      # serverIDIndex fixes this site's serverID stride slot (index * 16); pod N then
       # gets base + N + 1, so site 2 / pod 3 reads 203 straight out of a CSN.
       # Explicit, not the list position: reordering this list must never
       # renumber a live site. Unique per mesh, gaps are fine, ceiling is 40.

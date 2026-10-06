@@ -107,15 +107,15 @@ func TestDeriveClusterWiring(t *testing.T) {
 			spec: ldapv1alpha1.SlapdClusterSpec{MeshRef: "mesh"},
 			self: "site-2",
 			want: &meshWiring{
-				ServerIDBase:  100,
+				ServerIDBase:  16,
 				ExternalPeers: peersForSite2(),
 				Network:       &ldapv1alpha1.ReplicationNetworkConfig{Mode: ldapv1alpha1.NetworkModePodRouted},
 			},
 		},
 		{
-			// Golden: the lab's live decades. A derivation that moves any of
+			// Golden: the lab's live stride slots. A derivation that moves any of
 			// these is a defect, not a migration (MESH-PLAN hazard 2).
-			name: "first site keeps decade 0",
+			name: "first site keeps stride slot 0",
 			mesh: meshSpec(),
 			spec: ldapv1alpha1.SlapdClusterSpec{MeshRef: "mesh"},
 			self: "site-1",
@@ -135,10 +135,10 @@ func TestDeriveClusterWiring(t *testing.T) {
 			},
 		},
 		{
-			// A subset selector narrows the PEERS and nothing else: the decade
+			// A subset selector narrows the PEERS and nothing else: the stride slot
 			// stays mesh-wide, because two clusters spanning different subsets
-			// must still agree about who owns decade 100.
-			name: "site selector narrows the peer set but not the decade",
+			// must still agree about who owns stride slot 1.
+			name: "site selector narrows the peer set but not the stride slot",
 			mesh: meshSpec(),
 			spec: ldapv1alpha1.SlapdClusterSpec{
 				MeshRef: "mesh",
@@ -146,7 +146,7 @@ func TestDeriveClusterWiring(t *testing.T) {
 			},
 			self: "site-2",
 			want: &meshWiring{
-				ServerIDBase: 100,
+				ServerIDBase: 16,
 				ExternalPeers: []ldapv1alpha1.ExternalPeer{
 					{Name: "site-3", SiteIndex: si(2), Port: 1025, TLSSecretName: "site-3-ca",
 						Discovery: &ldapv1alpha1.ExternalPeerDiscovery{
@@ -159,7 +159,7 @@ func TestDeriveClusterWiring(t *testing.T) {
 		{
 			// An explicit serverIDBase alongside meshRef is refused rather
 			// than silently overridden in either direction. Silently
-			// preferring the spec hands this site a decade the mesh gave to
+			// preferring the spec hands this site a stride slot the mesh gave to
 			// someone else; silently preferring the mesh discards a value the
 			// user believed was in force. Both are how a serverID collision
 			// gets in quietly, and slapd validates nothing.
@@ -180,11 +180,11 @@ func TestDeriveClusterWiring(t *testing.T) {
 			mesh: meshSpec(),
 			spec: ldapv1alpha1.SlapdClusterSpec{
 				MeshRef:     "mesh",
-				Replication: ldapv1alpha1.SlapdReplicationConfig{ServerIDBase: 100},
+				Replication: ldapv1alpha1.SlapdReplicationConfig{ServerIDBase: 16},
 			},
 			self: "site-2",
 			want: &meshWiring{
-				ServerIDBase:  100,
+				ServerIDBase:  16,
 				ExternalPeers: peersForSite2(),
 				Network:       &ldapv1alpha1.ReplicationNetworkConfig{Mode: ldapv1alpha1.NetworkModePodRouted},
 			},
@@ -195,7 +195,7 @@ func TestDeriveClusterWiring(t *testing.T) {
 			// It is therefore read as UNSET, and the mesh's value wins. Safe in
 			// the only direction that matters: the mesh value is the
 			// collision-free one, and 0 at a site the mesh did not put on
-			// decade 0 is precisely the collision.
+			// stride slot 0 is precisely the collision.
 			name: "explicit zero serverIDBase reads as unset",
 			mesh: meshSpec(),
 			spec: ldapv1alpha1.SlapdClusterSpec{
@@ -204,7 +204,7 @@ func TestDeriveClusterWiring(t *testing.T) {
 			},
 			self: "site-2",
 			want: &meshWiring{
-				ServerIDBase:  100,
+				ServerIDBase:  16,
 				ExternalPeers: peersForSite2(),
 				Network:       &ldapv1alpha1.ReplicationNetworkConfig{Mode: ldapv1alpha1.NetworkModePodRouted},
 			},
@@ -252,7 +252,7 @@ func TestDeriveClusterWiring(t *testing.T) {
 			},
 			self: "site-2",
 			want: &meshWiring{
-				ServerIDBase:  100,
+				ServerIDBase:  16,
 				ExternalPeers: peersForSite2(),
 				Network:       nil,
 			},
@@ -260,7 +260,7 @@ func TestDeriveClusterWiring(t *testing.T) {
 		{
 			// No SITE_NAME while meshRef is set: withhold and stay loud, the
 			// Phase 2 precedent. Never a guess at the first site — that hands
-			// this site a decade another site already owns.
+			// this site a stride slot another site already owns.
 			name: "no site identity",
 			mesh: meshSpec(),
 			spec: ldapv1alpha1.SlapdClusterSpec{MeshRef: "mesh"},
@@ -306,11 +306,17 @@ func TestDeriveClusterWiring(t *testing.T) {
 			wantReason: reasonMeshSitesInvalid,
 		},
 		{
-			name: "serverID decade ceiling",
-			mesh: &ldapv1alpha1.SlapdMeshSpec{Sites: []ldapv1alpha1.MeshSite{
-				{Name: "site-1", ServerIDIndex: si(0)},
-				{Name: "site-2", ServerIDIndex: si(41)},
-			}},
+			// maxSites is set wide on purpose so that ONLY slapd's ceiling is
+			// breached: index 256 is the first that cannot be given a stride
+			// slot under serverIDStride 16 (base 4096, past the 4094 cap).
+			name: "serverID stride ceiling",
+			mesh: &ldapv1alpha1.SlapdMeshSpec{
+				Sites: []ldapv1alpha1.MeshSite{
+					{Name: "site-1", ServerIDIndex: si(0)},
+					{Name: "site-2", ServerIDIndex: si(256)},
+				},
+				RIDLayout: &ldapv1alpha1.RIDLayout{PodsPerSite: 8, MaxSites: 999},
+			},
 			spec:       ldapv1alpha1.SlapdClusterSpec{MeshRef: "mesh"},
 			self:       "site-2",
 			wantReason: reasonServerIDCeiling,
@@ -349,12 +355,12 @@ func TestDeriveClusterWiring(t *testing.T) {
 			// The tier order, which is load-bearing and otherwise rests on the
 			// single pre-existing ceiling row above.
 			//
-			// Index 41 breaches BOTH bounds at once: slapd's decade ceiling of
-			// 40, and this mesh's maxSites of 4. Both statements are true and
-			// only one is useful, so the reason must be the CEILING: 40 comes
-			// from olcServerID's 4095 and no field widens it, while
+			// Index 256 breaches BOTH bounds at once: slapd's serverID ceiling
+			// of 255, and this mesh's maxSites of 4. Both statements are true
+			// and only one is useful, so the reason must be the CEILING: 255
+			// comes from olcServerID's 4095 and no field widens it, while
 			// "widen spec.ridLayout.maxSites" is advice that cannot work here —
-			// a deployer who followed it would raise maxSites to 42, re-apply,
+			// a deployer who followed it would raise maxSites to 257, re-apply,
 			// and be refused again by a bound they were never told about.
 			//
 			// Same rule that produced RIDSegmentUnverified and
@@ -364,7 +370,7 @@ func TestDeriveClusterWiring(t *testing.T) {
 			mesh: &ldapv1alpha1.SlapdMeshSpec{
 				Sites: []ldapv1alpha1.MeshSite{
 					{Name: "site-1", ServerIDIndex: si(0)},
-					{Name: "site-2", ServerIDIndex: si(41)},
+					{Name: "site-2", ServerIDIndex: si(256)},
 				},
 				RIDLayout: &ldapv1alpha1.RIDLayout{PodsPerSite: 8, MaxSites: 4},
 			},

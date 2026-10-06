@@ -127,7 +127,17 @@ func deriveClusterWiring(mesh *ldapv1alpha1.SlapdMeshSpec, spec ldapv1alpha1.Sla
 	// another way, because the alternative is a cluster deriving a peer whose
 	// cross-site stanzas judgeExternalPeers will then refuse one layer down,
 	// with a message about a field the deployer never typed.
-	if err := validateSiteIndicesAgainstLayout(mesh.Sites, meshRIDLayout(mesh)); err != nil {
+	layout := meshRIDLayout(mesh)
+	if err := validateSiteIndicesAgainstLayout(mesh.Sites, layout); err != nil {
+		return nil, meshDerivationError(spec.MeshRef, err)
+	}
+
+	// The other half of the same yield: ADR-031's layout may declare more pods
+	// per site than one serverID stride slot can hold, and the overflow is a
+	// silent cross-site sid collision rather than a refusal anywhere
+	// downstream. Admission caps podsPerSite on the SlapdMesh itself; this is
+	// the same refusal for a mesh that reached the cluster another way.
+	if err := validateLayoutAgainstServerIDStride(layout); err != nil {
 		return nil, meshDerivationError(spec.MeshRef, err)
 	}
 
@@ -154,7 +164,7 @@ func deriveClusterWiring(mesh *ldapv1alpha1.SlapdMeshSpec, spec ldapv1alpha1.Sla
 // hand-writes something the mesh derives.
 //
 // The brief for this is "reject, never silently prefer one". Silently
-// preferring the spec hands this site a decade the mesh gave to someone else;
+// preferring the spec hands this site a stride slot the mesh gave to someone else;
 // silently preferring the mesh discards a value the user believed was in force.
 // Both end in a serverID collision, which slapd does not validate and whose
 // only symptom is that some writes never propagate.
@@ -201,7 +211,7 @@ func checkMeshSpecConflicts(mesh *ldapv1alpha1.SlapdMeshSpec, spec ldapv1alpha1.
 	if spec.Replication.ServerIDBase != 0 {
 		// Identity is not available here, and must not be: a conflict is a
 		// property of the spec, not of which site is reading it. Compare
-		// against every decade the mesh hands out — if the typed value is one
+		// against every stride slot the mesh hands out — if the typed value is one
 		// of them it is at best redundant and at worst this site's neighbour's,
 		// and only the exactly-right site may keep it.
 		derived, err := serverIDBaseForSiteOfValue(mesh.Sites, spec.Replication.ServerIDBase)
@@ -227,13 +237,13 @@ func checkMeshSpecConflicts(mesh *ldapv1alpha1.SlapdMeshSpec, spec ldapv1alpha1.
 	}
 }
 
-// serverIDBaseForSiteOfValue reports whether value is a decade the mesh
+// serverIDBaseForSiteOfValue reports whether value is a stride slot the mesh
 // actually hands out. It is the "agreeing value is not a conflict" half of the
 // rule above, and it is deliberately identity-free: a typed serverIDBase is
-// either one of the mesh's decades or it is wrong, and which site is asking
+// either one of the mesh's slots or it is wrong, and which site is asking
 // does not change that.
 //
-// The narrower check ("is it THIS site's decade?") was considered and rejected:
+// The narrower check ("is it THIS site's slot?") was considered and rejected:
 // it makes the same object valid at one site and invalid at its neighbour,
 // which destroys the byte-identical property (ADR-028 §3) for the one field
 // most likely to be left behind during an upgrade.
@@ -242,7 +252,7 @@ func serverIDBaseForSiteOfValue(sites []ldapv1alpha1.MeshSite, value int32) (boo
 		if s.ServerIDIndex == nil {
 			return false, errMeshSites
 		}
-		if *s.ServerIDIndex*serverIDDecade == value {
+		if *s.ServerIDIndex*serverIDStride == value {
 			return true, nil
 		}
 	}

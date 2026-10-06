@@ -124,24 +124,32 @@ spec:
                       podsPerSite is P: the largest number of slapd pods any one site of this
                       mesh may run. It sizes the local block of every database's segment, so
                       raising it is a renumber and not an in-place widening.
+
+                      Capped at 15 by the OTHER scheme that counts pods per site: a serverID
+                      is serverIDIndex*16 + ordinal + 1, so a site's ordinal 15 would take the
+                      serverID that is the next site's base, and two pods in two sites would
+                      write under one sid — which nothing detects (ADR-028 amendment
+                      2026-10-05). The cap lives here, on the declared layout, so that
+                      podsPerSite stays the single bound on spec.replicas rather than gaining
+                      a second one that could disagree with it.
                     format: int32
-                    maximum: 999
+                    maximum: 15
                     minimum: 1
                     type: integer
                 type: object
               sites:
                 description: |-
                   sites lists the mesh's sites. Order is presentation only: each site's
-                  serverID decade comes from its own serverIDIndex field, so the list may
-                  be reordered or edited in the middle freely. Order IS preserved in the
-                  derived external peer set, purely so an unchanged mesh keeps producing an
-                  unchanged cn=config.
-                  The ceiling is 41 because serverIDIndex is capped at 40 and indices are
-                  unique, so no mesh can hold more sites than that however the RID layout
-                  is set. It is declared mainly to give the CEL rule above a bounded cost:
-                  an unbounded list makes the API server estimate the rule against its own
-                  worst case, and a rule it refuses takes the whole CRD down with it, not
-                  just the rule.
+                  serverID stride slot comes from its own serverIDIndex field, so the list
+                  may be reordered or edited in the middle freely. Order IS preserved in
+                  the derived external peer set, purely so an unchanged mesh keeps
+                  producing an unchanged cn=config.
+                  The ceiling is 256 because serverIDIndex is capped at 255 and indices
+                  are unique, so no mesh can hold more sites than that however the RID
+                  layout is set. It is declared mainly to give the CEL rule above a
+                  bounded cost: an unbounded list makes the API server estimate the rule
+                  against its own worst case, and a rule it refuses takes the whole CRD
+                  down with it, not just the rule.
                 items:
                   description: |-
                     MeshSite describes one site of a mesh: a Kubernetes cluster that carries
@@ -155,7 +163,7 @@ spec:
                     ResolveSiteName).
 
                     The site's position in spec.sites is deliberately NOT load-bearing. The
-                    serverID decade comes from the explicit serverIDIndex field below, so the
+                    serverID stride slot comes from the explicit serverIDIndex field below, so
                     list may be reordered, sorted or edited in the middle without touching any
                     site's identity. See that field for why.
                   properties:
@@ -215,16 +223,19 @@ spec:
                         names differ only in case are two sites.
 
                         Names must be unique within the mesh: two sites claiming one identity
-                        collide their serverID decades, which is the failure ADR-028 §4 calls out
-                        as the first thing to verify.
+                        collide their serverID stride slots, which is the failure ADR-028 §4 calls
+                        out as the first thing to verify.
                       minLength: 1
                       type: string
                     serverIDIndex:
                       description: |-
                         serverIDIndex fixes this site's slot in the serverID space. The site's
-                        serverID decade is serverIDIndex * 100, and ADR-017's
-                        serverIDBase + ordinal + 1 then gives each pod its own: index 2, pod 3 →
-                        203. That reads straight out of a CSN, which is the point of the scheme.
+                        serverIDBase is serverIDIndex * 16, and ADR-017's
+                        serverIDBase + ordinal + 1 then gives each pod its own: index 2, pod
+                        ordinal 3 → sid 36. A CSN renders that field in hex, so it reads 024 —
+                        site digit, then pod digit, with no arithmetic between the number on
+                        screen and the pod it names. That legibility is the point of the stride
+                        being 16 rather than a round decimal (ADR-028 amendment 2026-10-05).
 
                         It is an EXPLICIT field rather than the site's position in spec.sites,
                         and that is the whole design of this field. olcServerID is baked into
@@ -242,24 +253,31 @@ spec:
                         one edit that matters.
 
                         Indices must be unique across the mesh — two sites on one index share one
-                        decade, and slapd validates nothing: contextCSN keeps the highest CSN per
-                        serverID, so colliding sites merge into one bucket and each other's
-                        writes read as already-seen. Gaps are legal and expected: a decommissioned
-                        site's index is retired, not reused, so 0/1/2 becoming 0/2 is the correct
-                        way to remove a site.
+                        serverID stride slot, and slapd validates nothing: contextCSN keeps the
+                        highest CSN per serverID, so colliding sites merge into one bucket and
+                        each other's writes read as already-seen. Gaps are legal and expected: a
+                        decommissioned site's index is retired, not reused, so 0/1/2 becoming
+                        0/2 is the correct way to remove a site.
 
-                        The ceiling is index 40: slapd caps olcServerID at 4095 and
-                        SlapdCluster.spec.replication.serverIDBase at 4094, so index 40 (decade
-                        4000) is the last one a whole decade fits in.
+                        The index is the SITE half of the serverID: a site's pods take serverIDs
+                        serverIDIndex*16 + ordinal + 1, so index 1 pod 0 is sid 17, which a CSN
+                        renders as 011 — site digit, then pod digit, no arithmetic. That the
+                        stride is 16 rather than a round decimal is the whole point: a CSN shows
+                        the field in hex (ADR-028 amendment 2026-10-05).
+
+                        The ceiling is index 255: slapd caps olcServerID at 4095 and
+                        SlapdCluster.spec.replication.serverIDBase at 4094, so index 255 (base
+                        4080) is the last one a whole stride slot fits in. In practice
+                        spec.ridLayout.maxSites (default 12) binds long before this does.
                       format: int32
-                      maximum: 40
+                      maximum: 255
                       minimum: 0
                       type: integer
                   required:
                   - name
                   - serverIDIndex
                   type: object
-                maxItems: 41
+                maxItems: 256
                 minItems: 1
                 type: array
                 x-kubernetes-list-map-keys:

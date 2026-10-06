@@ -16,7 +16,7 @@
 #         helm upgrade --install slaptain ./charts/operator \
 #           --set siteName=site-a
 #
-#     Get it wrong at two sites and they collide their serverID decades, which
+#     Get it wrong at two sites and they collide their serverID stride slots, which
 #     slapd does not validate and whose only symptom is that some writes never
 #     propagate. It is the first thing to verify.
 #
@@ -58,7 +58,7 @@ mesh:
 
   # -- REQUIRED. Every site of the mesh. There is deliberately no default: a
   # chart that quietly rendered a one-site mesh would be wrong in the way that
-  # is hardest to notice, and it would hand every site the same serverID decade
+  # is hardest to notice, and it would hand every site the same serverID stride slot
   # the moment a second one appeared.
   #
   # Each entry is written from the point of view of every OTHER site — it says
@@ -69,12 +69,14 @@ mesh:
   #                   SITE_NAME: trimmed, never case-folded. `site-a` and
   #                   `SITE-A` are two different sites.
   #   serverIDIndex   (required) this site's slot in the serverID space. The
-  #                   decade is index * 100, and ADR-017's
+  #                   base is index * 16, and ADR-017's
   #                   serverIDBase + ordinal + 1 then gives each pod its own:
-  #                   index 2, pod 3 -> 203, which is how a CSN is read.
+  #                   index 2, pod ordinal 3 -> sid 36, which a CSN renders as
+  #                   024 — site digit, pod digit, no arithmetic. The stride is
+  #                   hex for exactly that reason (ADR-028 amendment).
   #                   Explicit, never the list position — olcServerID is baked
   #                   into every CSN a pod has written, so a site whose number
-  #                   moves splits its history across two sids. Unique, 0..40,
+  #                   moves splits its history across two sids. Unique, 0..255,
   #                   gaps are legal and are how a site is decommissioned.
   #   endpoint        (optional) the site's Kubernetes API URL on the network
   #                   the other sites reach it over. Read by the bootstrap CLI
@@ -141,7 +143,7 @@ cluster:
   # -- Narrow this cluster to a SUBSET of the mesh's sites, so cluster X may
   # span sites A+B while cluster Y on the same mesh spans A+B+C. Empty means
   # every site, which is what a cluster gets when it says nothing. The selector
-  # narrows the derived PEER set only; it never touches the serverID decade,
+  # narrows the derived PEER set only; it never touches the serverID stride slot,
   # which is mesh-wide by construction.
   sites: []
 

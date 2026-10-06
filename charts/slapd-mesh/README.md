@@ -76,7 +76,7 @@ things from the mesh plus its own `siteName` (ADR-028 §4):
 
 | Derived | From |
 |---|---|
-| `spec.replication.serverIDBase` | the site's `serverIDIndex × 100` |
+| `spec.replication.serverIDBase` | the site's `serverIDIndex × 16` |
 | `spec.replication.externalPeers` | every other site the cluster spans |
 | `spec.replication.network` | `mesh.network` |
 | trust wiring (CA mounts) | each site's `caSecretName` |
@@ -89,9 +89,15 @@ slapd validates nothing — the only symptom is that some writes never propagate
 
 ## serverIDIndex
 
-Each site declares a `serverIDIndex`. The site's serverID decade is
-`index × 100`, and ADR-017's `serverIDBase + ordinal + 1` then gives each pod
-its own: index 2, pod 3 → serverID 203, which is how a CSN is read by eye.
+Each site declares a `serverIDIndex`. The site's `serverIDBase` is
+`index × 16`, and ADR-017's `serverIDBase + ordinal + 1` then gives each pod its
+own: index 2, pod ordinal 3 → serverID 36.
+
+The stride is 16 so that the number is readable where it is actually seen. A
+CSN renders the serverID field as three hex digits, so sid 36 appears as `024`
+— site digit, then pod digit. Under the old decimal stride of 100 the values
+everyone reasoned in were not the values anyone could read: site 1 pod 0 was
+101, which a CSN shows as `065`.
 
 It is **required and never inferred from list position**. `olcServerID` is baked
 into every CSN a pod has ever written, so a site whose number moves files its

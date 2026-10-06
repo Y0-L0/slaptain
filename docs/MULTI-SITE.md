@@ -85,7 +85,7 @@ the wiring rather than making you write it:
 
 | Derived | From |
 |---|---|
-| `spec.replication.serverIDBase` | the site's `serverIDIndex × 100` |
+| `spec.replication.serverIDBase` | the site's `serverIDIndex × 16` |
 | `spec.replication.externalPeers` | every other site the cluster spans |
 | `spec.replication.network` | `mesh.network` |
 | trust wiring (peer CA mounts) | each site's `caSecretName` |
@@ -106,7 +106,7 @@ properties of the artifact you apply, checked by hash and by tooling.
 
 | Fact | Rule across sites | How it is held |
 |---|---|---|
-| `serverIDBase` | **differs** — one decade per site | derived from `serverIDIndex` |
+| `serverIDBase` | **differs** — one stride slot of 16 per site | derived from `serverIDIndex` |
 | `externalPeers` | N×(N−1), full mesh | derived from `sites[]` |
 | network mode | identical | derived from `mesh.network` |
 | trust wiring (CA mounts) | N×(N−1) | derived from each site's `caSecretName` |
@@ -160,16 +160,35 @@ Pick logical, stable names — `site-a`, `ams`, `fra`. They are matched
 **verbatim**: trimmed of whitespace, never case-folded, so `site-a` and
 `SITE-A` are two different sites.
 
-Assign each a `serverIDIndex`. The decade is `index × 100`, and each pod then
-gets `serverIDBase + ordinal + 1`, so index 2, pod 3 reads as serverID `203` in
-a CSN — which is how these are actually debugged.
+Assign each a `serverIDIndex`. The site's `serverIDBase` is `index × 16`, and
+each pod then gets `serverIDBase + ordinal + 1`.
 
-Indices must be **unique**, are bounded `0..40`, and gaps are legal. Retiring a
+**The stride is 16 so the number is readable where you actually read it.** A
+serverID appears in exactly one place — the `#sid#` field of a CSN — and slapd
+renders that field in hex. With a stride of 16 the site is the leading digit
+and the pod ordinal the trailing one:
+
+```
+contextCSN (dc=second,dc=example,dc=net):
+  20261005183045.802002Z#000000#001#000000   ← site 0, pod 0
+  20261005183049.075984Z#000000#011#000000   ← site 1, pod 0
+  20261005183050.304084Z#000000#021#000000   ← site 2, pod 0
+```
+
+Site index 12 reads as `c`, since the field is hex all the way; hand out
+indices 0–9 first if that bothers you.
+
+Indices must be **unique**, are bounded `0..255`, and gaps are legal. Retiring a
 decommissioned site's index, rather than reusing it, is how you remove a site
 without renumbering its neighbours. The index is declared and never inferred
 from list position, because `olcServerID` is baked into every CSN a pod has
 ever written: a site whose number moves files its future writes under a
 different sid from its history.
+
+In practice the binding ceiling is `mesh.ridLayout.maxSites` (default 12), not
+255 — raise it (and renumber the mesh once) if you need more sites. The same
+layout's `podsPerSite` is capped at **15**, because a site's pod ordinal 15
+would take the serverID that is the next site's base.
 
 ### 1b. Write the two values files
 
@@ -498,7 +517,7 @@ on.
 
 What the operator does with it:
 
-- picks its own `serverIDIndex` out of `mesh.sites`, and therefore its decade;
+- picks its own `serverIDIndex` out of `mesh.sites`, and therefore its serverIDs;
 - builds its peer set as *every other site* the cluster spans;
 - decides whether `seed.site` names it, and seeds or withholds accordingly.
 
@@ -508,9 +527,9 @@ What the operator does with it:
 |---|---|
 | unset | `meshRef` cannot resolve: `MeshResolved=False` with reason `SiteIdentityMissing`, `phase: Error`, and nothing else is reconciled. A `seed.site` naming any site withholds — unreadable identity never counts as a match. |
 | set to a name the mesh does not declare | The same shape, reason `SiteNotInMesh`. A loud error, never a silent default to the first site. |
-| set to the *wrong* site's name (a name the mesh does declare) | **The dangerous one.** The site adopts another site's decade. Two sites sharing one `serverID` collide in every `contextCSN`: slapd keeps the highest CSN per serverID, so each other's writes read as already-seen and some simply never propagate. slapd validates nothing here and no condition goes red. |
+| set to the *wrong* site's name (a name the mesh does declare) | **The dangerous one.** The site adopts another site's serverIDs. Two sites sharing one `serverID` collide in every `contextCSN`: slapd keeps the highest CSN per serverID, so each other's writes read as already-seen and some simply never propagate. slapd validates nothing here and no condition goes red. |
 
-A stalled cluster is recoverable; a collided decade is data quietly not
+A stalled cluster is recoverable; a collided serverID is data quietly not
 arriving. That is why the identity is the first thing to check when a mesh
 misbehaves, and why the failure directions above are deliberately asymmetric:
 anything the operator cannot read makes it do *nothing*, which is loud and

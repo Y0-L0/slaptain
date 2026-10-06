@@ -75,9 +75,9 @@ for i in $(seq 0 $((count - 1))); do
     name=$(yq -r ".sites[$i].name // \"\"" "$LAB")
     index=$(yq -r ".sites[$i].serverIDIndex // \"\"" "$LAB")
     [[ -z "$name" ]] && die "$LAB: sites[$i] has no name. The name IS the site identity — it becomes the operator's SITE_NAME, the <site>-ca and <site>-kubeconfig Secret names, and what seed.site is matched against."
-    [[ -z "$index" ]] && die "$LAB: site '$name' has no serverIDIndex. Required and never inferred from position: the index is the site's serverID decade (index × 100), and olcServerID is baked into every CSN its pods have written."
-    [[ -n "${seen_name[$name]:-}" ]] && die "$LAB: two sites are named '$name'. Two sites claiming one identity collide their serverID decades."
-    [[ -n "${seen_index[$index]:-}" ]] && die "$LAB: serverIDIndex $index is claimed by '${seen_index[$index]}' and '$name'. One decade cannot hold two sites — their writes read as already-seen."
+    [[ -z "$index" ]] && die "$LAB: site '$name' has no serverIDIndex. Required and never inferred from position: the index is the site's serverID stride slot (index × 16), and olcServerID is baked into every CSN its pods have written."
+    [[ -n "${seen_name[$name]:-}" ]] && die "$LAB: two sites are named '$name'. Two sites claiming one identity collide their serverID stride slots."
+    [[ -n "${seen_index[$index]:-}" ]] && die "$LAB: serverIDIndex $index is claimed by '${seen_index[$index]}' and '$name'. One stride slot cannot hold two sites — their writes read as already-seen."
     seen_name[$name]=1
     seen_index[$index]="$name"
 done

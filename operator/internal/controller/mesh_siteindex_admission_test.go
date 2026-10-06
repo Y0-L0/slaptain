@@ -122,14 +122,27 @@ var _ = Describe("serverIDIndex is bounded by the mesh's own ridLayout (ADR-028 
 			&ldapv1alpha1.RIDLayout{PodsPerSite: 8, MaxSites: 16}, 0, 14))).To(Succeed())
 	})
 
-	It("keeps slapd's own ceiling of 40 above the layout's", func() {
-		// ADR-028's original bound survives as a hard ceiling: olcServerID caps
-		// at 4095, so index 40 is the last whole decade whatever the RID layout
-		// says. A layout wide enough to admit 41 must still not get it.
+	It("keeps slapd's own ceiling of 255 above the layout's", func() {
+		// ADR-028's original bound survives as a hard ceiling, moved by the
+		// hex stride: olcServerID caps at 4095 and the stride is 16, so index
+		// 255 is the last whole stride slot whatever the RID layout says. A
+		// layout wide enough to admit 256 must still not get it.
 		ns := meshAdmissionNamespace(ctx)
 		err := k8sClient.Create(ctx, meshWithSites(ns,
-			&ldapv1alpha1.RIDLayout{PodsPerSite: 8, MaxSites: 100}, 0, 41))
+			&ldapv1alpha1.RIDLayout{PodsPerSite: 8, MaxSites: 300}, 0, 256))
 		Expect(err).To(HaveOccurred(),
-			"index 41 is past slapd's serverID decade ceiling even though this layout has a slot for it")
+			"index 256 is past slapd's serverID stride ceiling even though this layout has a slot for it")
+	})
+
+	It("refuses a podsPerSite that the serverID stride cannot hold", func() {
+		// The other half of the 2026-10-05 amendment: the RID matrix would
+		// take podsPerSite 16 happily, but a site's pod ordinal 15 would then
+		// take the serverID that is the next site's base, and nothing on the
+		// wire detects two pods writing under one sid.
+		ns := meshAdmissionNamespace(ctx)
+		err := k8sClient.Create(ctx, meshWithSites(ns,
+			&ldapv1alpha1.RIDLayout{PodsPerSite: 16, MaxSites: 12}, 0, 1))
+		Expect(err).To(HaveOccurred(),
+			"podsPerSite 16 overruns the serverID stride of 16 at pod ordinal 15")
 	})
 })

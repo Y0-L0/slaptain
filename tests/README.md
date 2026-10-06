@@ -350,9 +350,11 @@ What that means in practice:
   of its CA mount path and therefore ends up in every external stanza's
   `tls_cacert`. `./tests/e2e.sh config` prints the resolved names.
 - **`serverIDIndex` is the context's position minus one**, so site-1/2/3 get
-  decades 0/100/200 — exactly what the pre-ADR-028 harness produced with
-  `site_idx * 100`. That is a hard requirement, not a nicety: `olcServerID` is
-  baked into every CSN a pod has written (MESH-PLAN hazard 2).
+  serverID bases 0/16/32, whose pods read `001`../`011`../`021`.. in a CSN.
+  That the number is stable is a hard requirement, not a nicety: `olcServerID`
+  is baked into every CSN a pod has written (MESH-PLAN hazard 2). The fixture
+  is created fresh every run, which is why it could adopt the hex stride at
+  all (ADR-028 amendment 2026-10-05).
 
 Multi-site needs a **discovery** transport (`POD_ROUTED=1` or
 `MULTUS_NETWORK=…`) — see the table above for what that leaves uncovered.

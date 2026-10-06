@@ -483,7 +483,7 @@ databases:
     spec:
       suffix: "dc=example,dc=org"
       replication:
-        ridSegment: 1
+        ridSegment: 0
         deltaSync: true
       seed:
         site: site-a          # the founder, named — not edited in

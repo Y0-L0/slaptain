@@ -56,6 +56,13 @@ once.
 **Convert by dividing by 100:** `0` stays `0`, `100` becomes `1`, `200`
 becomes `2`.
 
+That conversion preserves your existing numbering, and because the `ridBase`
+convention started at `100`, a converted mesh usually begins at segment 1 and
+leaves **segment 0 unused**. Segment 0 is perfectly legal — it owns rids 1..20
+at the default layout; it is `rid` 0 that is reserved, not the segment. Losing
+it costs one segment of 49 and nothing else, so reclaim it only if you want to,
+and only by renumbering deliberately.
+
 Everything below was measured on a three-site, 12-pod, 2-database lab mesh,
 upgrading `v0.2.2` to the ADR-031 build.
 

@@ -303,7 +303,7 @@ databases: []
 #        - "entryCSN eq"
 #        - "entryUUID eq"
 #      replication:
-#        ridSegment: 1         # unique per database within the mesh (ADR-031)
+#        ridSegment: 0         # unique per database within the mesh; 0 is legal and is the natural first (ADR-031)
 #        deltaSync: true
 #        syncprovCheckpoint: "500 15"
 #        accesslogPurge: "2+00:00 1+00:00"

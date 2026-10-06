@@ -197,7 +197,7 @@ metadata:
 spec:
   clusterRef: my-cluster
   suffix: dc=example,dc=org
-  replication: { enabled: true, ridSegment: 1 }
+  replication: { enabled: true, ridSegment: 0 }
   bootstrapFrom:
     backupRef: nightly-2026-06-08     # a SlapdBackup in this namespace
     # — or restore directly from an object, e.g. a legacy slapcat dump:

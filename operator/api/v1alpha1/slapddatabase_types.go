@@ -99,6 +99,13 @@ type DatabaseReplicationConfig struct {
 	// Required when replication is enabled. Migrating from ridBase: divide by
 	// 100 — 0 stays 0, 100 becomes 1, 200 becomes 2.
 	//
+	// SEGMENT 0 IS A LEGAL SEGMENT and is the natural first one: it owns rids
+	// 1..20 at the default layout. Nothing reserves it (rid 0 is reserved; the
+	// segment is not). Worth saying because the ridBase convention started at
+	// 100, so a converted mesh begins at segment 1 and leaves segment 0 unused
+	// — harmless, one segment of 49, and reclaimable by renumbering if you
+	// care.
+	//
 	// The usable range is the layout's own C = floor(999 / (podsPerSite +
 	// maxSites)) — 0..48 at the default layout. The bound this field declares
 	// is the loosest any layout can admit; the operator refuses the segment

@@ -259,11 +259,31 @@ site from the SlapdMesh removes that peer's syncrepl stanza"*, the only spec
 that watches a remote block slot being **vacated**. Those five are untested,
 not green. Rewrite the assertion, then re-run.
 
-**Not demonstrated by this run, and recorded rather than assumed:**
+**Full gate set, 2026-10-05 (manual run, seed `1791221440`): 99 of 100 specs,
+98 passed, 1 failed, 1 skipped, 23.5 minutes.** `E2E_BACKUP`, `E2E_SCALE`,
+`E2E_SCALEUP` and `E2E_RESILIENCE` all ran for the first time against ADR-031.
+That closes the largest gap the first run recorded — the backup/restore path,
+which the tester called "the shape most likely to expose a withhold ordering
+bug" because it scales a cluster to 0 and back. It did not: both `bootstrapFrom`
+and replicated in-place restores drove scale-to-0 → `slapadd`-all-pods →
+scale-up with the RID gate in force, and the preflight refusals still fired
+correctly.
 
-- **M4a's release gate.** The mesh left `spec.ridLayout` unset throughout, so
-  `ridLayoutFor` only ever ran its default branch. "It must actually read the
-  mesh's layout" is unit-tested and **unexercised live**.
+The one failure is **unrelated and pre-existing** — a scaled-away pod's mkdir
+Job is never reaped, only TTL'd (`docs/BACKLOG.md`). `dirjob.go` is untouched by
+this work and both specs involved predate it; it needs the ungated
+scale-topology spec and `E2E_BACKUP=1` in the same suite, in that order, so it
+is flaky by construction. The skip is the documented one: in-place restore is a
+local re-seed rather than a rollback on a cluster with external peers (ADR-014
+amendment).
+
+**Still not demonstrated, and recorded rather than assumed:**
+
+- ~~**M4a's release gate.**~~ **Closed on the re-run**: patching
+  `{podsPerSite: 4, maxSites: 6}` identically at all three sites moved the whole
+  matrix (`M = 20 → 10`), 72/72 decoded correctly under it, `slctl inspect`
+  18/18, and the full external-replication suite passed. Reverting restored the
+  default coordinates on the first read.
 - `uri` and `podAddresses` peers — untestable through `tests/e2e.sh` since
   ADR-028 Phase 7, and ADR-031 puts new requirements on both.
 - A permanently unresolvable peer — the behaviour change ADR-031 calls the most

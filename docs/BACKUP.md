@@ -151,6 +151,39 @@ as fresh as the cluster's CSN monitoring tick (60 s), and an idle database reads
 converged even across a broken link (ADR-008 amendment) — it is a recorded
 observation, not a guarantee.
 
+### Looking at the object — `slctl aws`
+
+The CR says what it did; the bucket says what is there. `slctl aws` runs your
+**local** `aws` CLI with the endpoint and credentials taken from a slaptain
+resource, so inspecting a backup needs no in-cluster client pod:
+
+```bash
+slctl aws --from slapdbackup/nightly-2026-06-08 \
+  s3 ls s3://slaptain-backups/ --recursive --human-readable
+
+KEY=$(kubectl get slapdbackup nightly-2026-06-08 -o jsonpath='{.status.path}')
+slctl aws --from slapdbackup/nightly-2026-06-08 s3 cp "s3://slaptain-backups/$KEY" - | gzip -dc | head
+```
+
+Everything slctl does not recognise is handed to `aws` verbatim, so `s3api`,
+`--profile`-free one-offs and shell pipelines all work normally.
+
+Two properties worth knowing:
+
+- **The source is always named.** `SlapdBackup`, `SlapdScheduledBackup`,
+  `SlapdDatabase` (`spec.bootstrapFrom.s3`) and `SlapdRestore`
+  (`spec.source.s3`) all carry an `S3StorageSpec`, and on a real cluster they
+  disagree — a nightly writing one bucket, a restore reading another. So
+  `--from <kind>/<name>` is required; the short names `sb`/`ssb`/`sd`/`sr`
+  work. slctl discovers *connection details*, it does not guess *intent*.
+- **A cluster-internal endpoint is port-forwarded.** `spec.storage.endpoint` is
+  written for the pods that use it, so it is usually a Service DNS name that
+  does not resolve on your machine; slctl forwards to the Service's pod and
+  rewrites the endpoint to `localhost`. An external endpoint is used as-is, and
+  an empty one means real AWS S3. Credentials go into the `aws` process's
+  environment, never its command line. `--verbose` prints the port-forward and
+  the full invocation, with the secret access key masked.
+
 ### Scheduling
 
 The backup Job is pinned (required PodAffinity) to the node running pod-0 so it

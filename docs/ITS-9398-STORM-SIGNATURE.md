@@ -80,9 +80,14 @@ SEARCH RESULT tag=101 err=4096 … text=sync cookie is stale
 
 **The second pass indicts a sid the first pass removed microseconds earlier.**
 
-Nothing converges: the consumer full-refreshes, reconnects, sends the identical
-cookie, and both passes run identically. There is no window and no backoff — it
-is a steady state, which is why the CPU cost is flat rather than bursty.
+Nothing converges *by this path*: the consumer full-refreshes, reconnects, sends
+the identical cookie, and both passes run identically. There is no window and no
+backoff, which is why the CPU cost is flat rather than bursty.
+
+It is not unconditionally permanent, though — see *It can clear by itself*. A
+full refresh carries the provider's whole `contextCSN`, which can restore the
+sid the consumer was missing and dissolve the contradiction. Whether that
+happens appears to depend on which link is storming.
 
 ---
 
@@ -134,22 +139,83 @@ site-2  slapd-0 438m   slapd-1 439m   slapd-2 1685m
 site-3  slapd-0   4m   slapd-1   7m   slapd-2  727m
 ```
 
-**One broken pod, many hot pods.** This is the most useful thing in the capture:
-`s2 slapd-2` burns 1685m with a perfectly consistent `minCSN`/`contextCSN` pair.
-The CPU is the cost of *being refused* — every consumer that pulls `example-db`'s
-log from `s1 slapd-2` full-refreshes in a loop, and pays for it at its own end.
+### Two instances in one mesh, not one
 
-So **CPU does not localise the fault, and the storming pod is usually not the
-broken one.** Look for the self-contradictory entry, not for the busiest
-process.
+The table above samples a single moment, and it is **later** than the CPU
+reading. Read together with the pod log, the mesh held **two** broken providers:
+`s1 slapd-2` *and* `s2 slapd-2`, mutually refusing each other and each also
+refusing its own in-cluster consumers.
 
-### Why ordinal 2 everywhere — hypothesis, not a finding
+600 lines off `s1 slapd-2` show it as victim and culprit at once. As **provider**
+it issued 30 stale refusals to four distinct consumers:
 
-Every site's `slapd-2` is hot while ordinals 0 and 1 sit at a uniform baseline.
-ADR-031 maps cross-site links as local pod `i` → remote pod `(i+k) % N`, so
-cross-site peering is ordinal-correlated; the pods whose link happens to land on
-`s1 slapd-2` would be hot together. This was not verified before the lab was
-wiped, and no stanza-level evidence was captured for it.
+```
+14x  cookie=rid=023,sid=002     s1 slapd-1          (in-cluster)
+12x  cookie=rid=023,sid=001     s1 slapd-0          (in-cluster)
+10x  cookie=rid=029,sid=023     sid 0x023 = 35 = site-3 pod 2
+ 9x  cookie=rid=029,sid=013     sid 0x013 = 19 = site-2 pod 2
+```
+
+As **consumer** it restarted refresh ten times, all on one rid:
+
+```
+10x  ldap_sync_search: rid=030 starting refresh
+```
+
+`slctl rid decode 030` resolves to segment 1, peer site index 1 — **site-2**. At
+`replicasPerPeer: 1` ADR-031 maps local pod `i` to remote pod `(i+k) % N`, so the
+provider refusing it is `s2 slapd-2`.
+
+**The CPU distribution is the clearest evidence, and the idle pods carry it:**
+
+| | pods 0/1 | pod 2 | RO |
+|---|---|---|---|
+| site-1 | **409 / 411** | 1698 | 412 |
+| site-2 | **437 / 443** | 1696 | 4 |
+| site-3 | **11 / 13** | 735 | 6 |
+
+Sites 1 and 2 each host a broken provider, so their in-cluster consumers burn
+~400m being refused. Site-3 hosts none, so its pods 0 and 1 sit at 11-13m, and
+only its pod 2 is hot — the one whose cross-site link lands on a broken
+provider elsewhere.
+
+A single-source model cannot produce that. If `s1 slapd-2` were the only broken
+pod, site-2's pods 0/1 had no reason to burn 440m while site-3's identically
+placed pods idled at 11m: both sites are equidistant from site-1. **Count the
+sites whose ordinals 0/1 are busy — that is the number of broken providers.**
+
+So CPU *does* localise the fault, better than first thought — but at SITE
+granularity, not pod granularity. Within a site the busiest pod is as likely to
+be a refused consumer as the broken provider; only the `minCSN`/`contextCSN`
+predicate separates those two.
+
+### It can clear by itself
+
+`s2 slapd-2` reads clean (6 = 6) in the table above, yet the log shows it
+refusing `s1 slapd-2` minutes earlier, and a one-off read of that same pod
+during the investigation returned **7 minCSN against 6 contextCSN**. The most
+likely reading is that it was broken and **healed between samples**.
+
+That matters twice over:
+
+- the storm is **not** an unconditional steady state, so "it never recovers" is
+  too strong a claim. A plausible mechanism is the full refresh itself: it
+  delivers the provider's complete `contextCSN`, which would restore the
+  consumer's missing sid and dissolve the contradiction;
+- it makes a single clean sample **non-conclusive for absence**. One sample
+  still proves a storm when the predicate fires, but a clean read only means
+  clean *now*. Sample on the CPU signal, not on a schedule.
+
+The inverted question is then the interesting one: not why these pods storm, but
+why `s1 slapd-2` did **not** heal, when its in-cluster links to pods 0 and 1
+were working throughout — only `rid=030`, the cross-site link, was restarting.
+
+### Unexplained
+
+`s2 slapd-readonly-0` sat at **4m** while site-1's RO burned 412m. If
+`s2 slapd-2` was refusing its in-cluster consumers the way `s1 slapd-2`
+demonstrably was, that RO should have been refused too. No evidence was
+captured either way before the lab was wiped.
 
 ---
 
@@ -163,9 +229,13 @@ slctl ldapsearch -n <ns> --database <db> --pod <ord> --as config \
       -b cn=accesslog-<db> -s base '*' +
 ```
 
-and assert **every `minCSN` sid appears in `contextCSN`**. It needs no
-cross-pod comparison, no log scraping and no timing window: the contradiction is
-local to one entry, and it is a steady state, so a single sample is conclusive.
+and assert **every `minCSN` sid appears in `contextCSN`**. It needs no cross-pod
+comparison and no log scraping: the contradiction is local to one entry.
+
+A firing sample is conclusive. A **clean** sample is not — the condition can
+clear between reads (see above), so absence of the signature means "not right
+now", not "never happened". Pair it with the CPU signal: a site whose pod
+ordinals 0 and 1 are busy has a broken provider in it.
 
 Not yet implemented. Two places it belongs:
 

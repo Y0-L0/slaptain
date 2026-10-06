@@ -6,7 +6,7 @@ needs this file.
 
 ---
 
-## ADR-028 amendment: the serverID stride becomes hex (100 → 16)
+## v0.3.0 — ADR-028 amendment: the serverID stride becomes hex (100 → 16)
 
 **There is no upgrade path, and this is the one entry in this file that says
 so.** A site's `serverIDBase` is derived as `serverIDIndex × 16` instead of
@@ -47,7 +47,7 @@ See ADR-028's amendment of 2026-10-05.
 
 ---
 
-## ADR-031: RIDs become coordinates (`ridBase` → `ridSegment`)
+## v0.3.0 — ADR-031: RIDs become coordinates (`ridBase` → `ridSegment`)
 
 `spec.replication.ridBase` is gone. Each `SlapdDatabase` now declares
 `spec.replication.ridSegment`, and every syncrepl RID on every pod is renumbered

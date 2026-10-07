@@ -602,11 +602,20 @@ spec:
                       cluster an N-way multi-master; it is also the prerequisite for
                       readReplicas and for externalPeers.
 
-                      Changing it does NOT restart any pod. Every RW pod carries the accesslog
-                      mount and loads the accesslog/syncprov modules whether or not replication
-                      is on, precisely so this field can be flipped on a live cluster — gating
-                      those on it put them in the pod template, where turning replication on
-                      replaced pod-0 (ADR-013 amendment 2026-10-07).
+                      Turning it ON is a supported live transition and restarts no pod. Every RW
+                      pod carries the accesslog mount and loads the accesslog/syncprov modules
+                      whether or not replication is on, precisely so this can be flipped on a
+                      running cluster — gating those on it put them in the pod template, where
+                      turning replication on replaced pod-0 (ADR-013 amendment 2026-10-07).
+
+                      Turning it OFF again is NOT a supported transition and is not a way to
+                      pause replication. It is a one-way door: the operator removes the syncprov
+                      and accesslog overlays and DROPS each database's accesslog DB (the change
+                      journal is destroyed), but it never clears the olcSyncRepl stanzas or
+                      olcMultiProvider — those are only ever written on the enabled path. Each
+                      pod is left consuming from peers that no longer serve syncrepl. To demote
+                      a replicating cluster, use mode: consumer-only, which is the designed
+                      transition and converges the stanzas (ADR-010).
                     type: boolean
                   externalPeers:
                     description: |-

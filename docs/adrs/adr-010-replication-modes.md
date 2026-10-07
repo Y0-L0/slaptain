@@ -196,3 +196,71 @@ status:
   both modes)
 - ADR-011: Hot migration topology contract (consumes this ADR's mode-transition
   semantics)
+
+## Amendment, 2026-10-07: `replication.enabled: false` is not the demotion path
+
+This ADR designs demotion as a *mode* transition, `peer → consumer-only`. It did
+not say anything about the field one layer up, `spec.replication.enabled`,
+because at the time nobody expected it to be read as a switch. It is, and the
+question came up directly: "why would anyone ever set `replication.enabled:
+false`? To stop replication for maintenance?"
+
+**No. It is a creation-time declaration — "this cluster is standalone" — and a
+one-way on-ramp.** The default is `false`; `false → true` on a live cluster is
+designed, supported and covered by `scaleup_test.go`. Since the ADR-013
+amendment of the same date it also rolls no pod.
+
+**`true → false` on a live replicated cluster is a half-teardown.** Nothing
+rejects it (there is no admission webhook), and what the operator then does is
+split across two code paths that are gated differently:
+
+| | on `enabled: false` |
+|---|---|
+| syncprov overlay on the data DB | **removed** — `wantsSyncProv` includes `Replication.Enabled` |
+| accesslog overlay | **removed** |
+| accesslog DB `cn=accesslog-<db>` | **dropped — the change journal is destroyed** |
+| `olcSyncRepl` stanzas | **left in place** — step 10 is `if enabled { … }` with no else |
+| `olcMultiProvider` | **left `TRUE`** — only ever written on the enabled path |
+
+Every pod is left consuming from peers that no longer serve syncrepl, which
+surfaces as slapd's *"got search entry without Sync State control"*. Replication
+stops, but by breaking rather than by being switched off, and the journals do
+not survive it.
+
+**Why the asymmetry exists, and why it is not simply a bug to patch.** Removing
+stanzas is not the mirror image of writing them. `olcSyncRepl` is installed with
+one atomic Replace, so converging a shorter set *is* a deletion of live
+replication — the hazard ADR-031 decision 6 is built around, and the reason
+every withhold in the SlapdDatabase controller is written to leave the pod's
+stanzas alone. A disable path would have to perform exactly the destructive
+write that every other path is careful not to perform, on node-local `cn=config`
+state, with no confirmation that the operator is the only writer (ADR-026 R2).
+The overlay teardown predates that caution and does not share it.
+
+`mode: consumer-only` has none of this problem because it keeps
+`enabled: true`: `reconcileReplication` still runs and *rewrites* the stanza set
+(in-cluster providers emptied, `olcMultiProvider: FALSE`, data DB
+`olcReadOnly: TRUE`). The set converges instead of being abandoned. That is why
+it is the demotion path and `enabled` is not.
+
+### Decision
+
+Document the one-way door; do not implement a disable path on speculation.
+Recorded here, in the field's own description (so `kubectl explain` carries it),
+and as a backlog item for the observability half — a condition that notices pods
+still carrying stanzas while `enabled` is false, which the operator can see,
+since it already reads every pod's `cn=config` every pass.
+
+A real teardown stays unbuilt until someone needs to un-replicate a cluster.
+When that day comes it is an ADR of its own and not a quiet addition: ADR-005 is
+the standing lesson that teardown of replicated state is where this codebase
+goes wrong, and it went wrong there undetected for a year.
+
+### Related
+
+- ADR-013 amendment 2026-10-07 — the on-ramp stopped rolling pods, which is what
+  prompted the question.
+- ADR-031 decision 6 — a short stanza set is a deletion; the withhold rule.
+- ADR-026 R2 — do not destroy shared `cn=config` state on evidence the operator
+  does not own.
+- ADR-005 — the cleanupPolicy teardown that could not delete what it existed for.

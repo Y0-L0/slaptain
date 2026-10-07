@@ -690,6 +690,16 @@ to be misled.
 Decide whether the two concepts are genuinely distinct (then the bodies should
 diverge, or one should call the other) or the same (then one should go).
 
+*Update 2026-10-07:* still open, and the quoted bodies have since drifted apart
+(`NeedsAccesslogVolume` now also tests `Replication.Enabled` and the
+`AccesslogEnabled` override), so the line numbers above are stale. The
+observed-cost paragraph is now history rather than a live trap: the
+accesslog-*mount* guard it refers to no longer exists — ADR-013's amendment of
+2026-10-07 made the mount unconditional on RW pods, because gating it put it in
+the pod template. `NeedsAccesslogVolume` now serves only the ephemeral
+backup/restore/mkdir Jobs, and the name is wrong for that: nothing it decides is
+a volume any more.
+
 ---
 
 ## Two cross-site transports have no e2e coverage any more

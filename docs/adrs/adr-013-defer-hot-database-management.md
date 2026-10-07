@@ -409,6 +409,98 @@ produced, because all three are *absences* rather than failures:
    syncrepl on the FIRST data database only, including `rid-uniqueness`, whose
    entire purpose is a collision *between* databases.
 
+## Amendment, 2026-10-07 (third): the count was not zero — two gates survived the audit
+
+The second amendment retired the last *sanctioned* roll trigger and put the
+count at zero. The count was two. Both were missed because the audit looked for
+things that varied with the **database set**, which is what that amendment was
+about, and these vary with the **replication posture**:
+
+| Gate | What it put in the pod template |
+|---|---|
+| `NeedsAccesslogVolume()` — `replication.enabled && (replicas > 1 \|\| externalPeers > 0)` | the `/accesslog` volumeMount, on the init AND slapd containers |
+| `spec.replication.enabled` | `LDAP_REPLICATION_ENABLED=true` on the init container |
+
+Both flip on the same edit, and it is the commonest edit there is: a standalone
+cluster becoming an HA one raises `spec.replicas` and sets `replication.enabled`
+in one apply. The StatefulSet then creates the new pods at the new revision,
+finds pod-0 stale, and replaces it.
+
+### How it reads from outside
+
+As a cluster that reaches `Running` and then goes `Degraded` for no stated
+reason. Caught on a live demo, scaling `1 -> 3`:
+
+```
+Degraded 1/1 → Degraded 1/2 → Degraded 2/3 → Running 3/3 → Degraded 2/3 → Running 3/3
+```
+
+The `Running` **precedes** the `Degraded`, which is what makes it unreadable.
+With `OrderedReady` the StatefulSet brings every new pod to Ready before it
+touches the stale one, so the operator sees `readyReplicas == spec.replicas` and
+reports `Running` while a pod replacement is still queued behind it.
+
+The evidence that identifies it, none of which is where one looks first:
+
+- `restartCount: 0` on every pod. It is a delete/recreate, not a restart, so the
+  counter everyone reaches for is silent.
+- **pod-0 is younger than pod-1 and pod-2.** Under `OrderedReady` pod-0 is
+  created first and must be the oldest; an inverted age is the fingerprint.
+- Two `ControllerRevision`s for the StatefulSet, the second created at the
+  scale-up.
+
+### Decision
+
+Neither gate earns its keep. Both effects are carried unconditionally on every
+RW pod:
+
+- **the mount** — the accesslog *volume* was already unconditional, because
+  `volumeClaimTemplates` is immutable and a later add would have needed a manual
+  STS recreate with `--cascade=orphan`. The mount now follows the volume it has
+  always had. A standalone pod gets empty `/accesslog/<db>` directories and no
+  LMDB.
+- **the env** — two extra `moduleload` lines (accesslog, syncprov) in the
+  bootstrap `slapd.conf`. Modules can only be loaded at slapd startup, which is
+  precisely why the gate was wrong: it read the condition at the one moment the
+  answer was still "no". The runtime fallback (`ensureModulesLoaded`,
+  `docs/reconcile-loop-fixes.md` 2026-07-15) stays for pods bootstrapped by an
+  older operator.
+
+This is the rule `olcServerID` has followed since ADR-017 — stamped on every RW
+pod including a standalone one, because identity and capability are cheap to
+carry and expensive to acquire later. The gates were an attempt to keep a
+standalone cluster tidy, and they bought that tidiness with a pod replacement.
+
+### Consequences
+
+- `replicas: 1 → N` and `replication.enabled: false → true` stop rolling pods.
+  The count of sanctioned pod-template roll triggers is zero, and this time it is
+  asserted rather than asserted *about*.
+- **One upgrade roll.** The RW pod template changes, so adopting this operator
+  version rolls each cluster's RW pods once. That is the price of never rolling
+  them on a scale-up again. The read-only template is byte-identical — the new
+  env var is appended where it already sat on an RO pod — so RO pods do not roll.
+- A standalone cluster carries a ~1Gi accesslog PVC (already true), an empty
+  mount, and two loaded modules.
+- `NeedsAccesslogVolume()` survives for the ephemeral Jobs (backup, restore,
+  mkdir), where it answers a different question — does this database have a
+  journal — and where rolling nothing is not at stake.
+
+### Coverage
+
+`statefulset_replica_churn_test.go` asserts the RW pod template is invariant
+under both fields, across `1 <-> 2` as well as above it. That boundary was
+previously **exempted in a comment**, on the grounds that `NeedsAccesslogVolume()`
+"legitimately" changes the mounts there — the defect was written down as an
+exemption and then stopped being looked at. Both tests were taken red first
+against the old code, naming the offending mount and env var.
+
+At the e2e tier, `scaleup_test.go` already performed this exact transition
+(`replicas 1→2` + `replication.enabled` flip on a live cluster) and asserted
+convergence afterwards — which stays green through a roll, since a replaced
+pod-0 re-bootstraps with replication already on. It now snapshots pod-0's UID
+and the StatefulSet revision across the transition.
+
 ## Amendment, 2026-10-08: a field the user flips to change the pod is not a trigger
 
 The second amendment's rule reads "no spec field that can change during a cluster's

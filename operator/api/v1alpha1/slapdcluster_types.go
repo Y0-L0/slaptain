@@ -557,8 +557,18 @@ func (s *SlapdCluster) NetworkMode() string {
 // Per-database replication settings (deltaSync, RID base, checkpoint, purge)
 // are on SlapdDatabase. See ADR-003 and ADR-004.
 type SlapdReplicationConfig struct {
-	// enabled controls whether replication infrastructure is active.
-	// When true, the init container sets up syncprov and accesslog overlays.
+	// enabled controls whether replication infrastructure is active. When true,
+	// the operator writes the syncrepl stanzas, the accesslog and syncprov
+	// overlays and the replication identity into each pod's cn=config, per
+	// database (ADR-003, ADR-004). Combined with replicas > 1 it makes the
+	// cluster an N-way multi-master; it is also the prerequisite for
+	// readReplicas and for externalPeers.
+	//
+	// Changing it does NOT restart any pod. Every RW pod carries the accesslog
+	// mount and loads the accesslog/syncprov modules whether or not replication
+	// is on, precisely so this field can be flipped on a live cluster — gating
+	// those on it put them in the pod template, where turning replication on
+	// replaced pod-0 (ADR-013 amendment 2026-10-07).
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
 	// mode selects the cluster's replication role. See ADR-010.

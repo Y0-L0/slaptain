@@ -176,6 +176,22 @@ var _ = Describe("scale-up", Label("scaleup"), Ordered, func() {
 	})
 
 	It("scales to 2-way multi-master and converges", func(ctx SpecContext) {
+		// Snapshot pod-0's identity BEFORE the transition. Everything else this
+		// spec asserts stays green when pod-0 is replaced — a fresh pod-0
+		// re-bootstraps with replication already on and converges perfectly —
+		// so without this the e2e watched the roll happen and called it a pass.
+		// It is the 1 <-> 2 boundary that scale_topology_test.go structurally
+		// skips ("need at least two pre-existing pods"), and it is the boundary
+		// where the two remaining pod-template gates used to fire.
+		By("snapshotting pod-0's identity and the StatefulSet revision")
+		pod0Before, err := k8sClient.CoreV1().Pods(namespace).Get(ctx, scaleCluster+"-0", metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		uidBefore := string(pod0Before.UID)
+		stsBefore, err := k8sClient.AppsV1().StatefulSets(namespace).Get(ctx, scaleCluster, metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		revisionBefore := stsBefore.Status.UpdateRevision
+		Expect(revisionBefore).NotTo(BeEmpty())
+
 		By("flipping replicas to 2 and replication.enabled to true (the demo Act-6 transition)")
 		Eventually(ctx, func() error {
 			sc := &ldapv1alpha1.SlapdCluster{}
@@ -199,6 +215,21 @@ var _ = Describe("scale-up", Label("scaleup"), Ordered, func() {
 			}
 			return sc.Status.Phase
 		}).WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(Equal(ldapv1alpha1.PhaseRunning))
+
+		// ADR-013: the count of sanctioned pod-template roll triggers is zero,
+		// and "I turned on replication" is not an invitation to rebuild the pod
+		// that holds the data. Observed live before the fix: pod-0 came back a
+		// minute younger than its siblings with restartCount 0, and the cluster
+		// read Running -> Degraded -> Running after the scale-up.
+		By("pod-0 was NOT rolled by the transition")
+		stsAfter, err := k8sClient.AppsV1().StatefulSets(namespace).Get(ctx, scaleCluster, metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(stsAfter.Status.UpdateRevision).To(Equal(revisionBefore),
+			"the StatefulSet revision changed: something gated on replicas or replication.enabled reached the pod template")
+		pod0After, err := k8sClient.CoreV1().Pods(namespace).Get(ctx, scaleCluster+"-0", metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(pod0After.UID)).To(Equal(uidBefore),
+			"pod-0 was replaced; going standalone -> HA must only ADD a pod")
 
 		By("verifying the custom schema reached the NEW pod (SlapdCluster watch on the schema controller)")
 		Eventually(ctx, func() []string {

@@ -2107,3 +2107,88 @@ capability built for something else made one of its rejected options cheap. The
 reconsider trigger it wrote down is what made that visible — so write the
 trigger, and check the deferrals when a new mechanism lands, not only when the
 symptom hurts.
+
+---
+
+## 2026-10-07: going standalone → HA replaced pod-0, and the cluster reported `Running` first
+
+**Symptom:** `replicas: 1 → 3` on a live demo cluster. `kubectl get sc -w`:
+
+```
+slapd   Degraded   1   1
+slapd   Degraded   1   2
+slapd   Degraded   2   3
+slapd   Running    3   3     ← all three Ready
+slapd   Degraded   2   3     ← same second
+slapd   Running    3   3
+```
+
+A cluster that reaches `Running` and then falls back to `Degraded` for no stated
+reason. On the demo cluster the second `Degraded` lasted noticeably longer, which
+is what made it worth chasing.
+
+**Why the obvious evidence says nothing.** `restartCount: 0` on all three pods,
+`lastState.terminated` empty. The first hypothesis — slapd crashed or was
+OOM-killed during the convergence write-burst that follows a new pod going Ready
+— predicts a non-zero restart counter, and it was wrong.
+
+**The signature is the pod ages**, and it is the opposite of the one in the
+2026-09-28 entry below. There, a full fleet roll showed *descending* ages
+(28/31/34/38 s for ordinals 0/1/2/3 — `RollingUpdate` goes highest-ordinal
+first). Here only ONE pod was stale, so:
+
+```
+slapd-0   1/1  Running  0  71m   ← YOUNGER than its siblings
+slapd-1   1/1  Running  0  72m
+slapd-2   1/1  Running  0  72m
+```
+
+Under `OrderedReady` pod-0 is created first and must be the oldest. An inverted
+age means pod-0 was replaced. Confirmed by two `ControllerRevision`s on the
+StatefulSet, the second created at the scale-up.
+
+**Root cause:** two pod-template fields gated on replication posture, both
+flipping on the same apply.
+
+| Gate | Pod-template effect |
+|---|---|
+| `sc.NeedsAccesslogVolume()` = `replication.enabled && (replicas > 1 \|\| externalPeers > 0)` | the `/accesslog` volumeMount on the init and slapd containers |
+| `sc.Spec.Replication.Enabled` | `LDAP_REPLICATION_ENABLED=true` on the init container |
+
+Going from a standalone cluster to an HA one raises `spec.replicas` **and** sets
+`replication.enabled` in one edit, so both flip at once. Pods 1 and 2 are created
+at the new revision; pod-0 is left at the old one and gets rolled.
+
+**Why `Running` comes before `Degraded`.** This is the part that makes the trace
+unreadable, and it is not a status bug. With `OrderedReady`, the StatefulSet
+brings each *new* pod to Ready before it proceeds, and only then updates the
+stale one. So there is a real interval in which `readyReplicas == spec.replicas`
+with a pod replacement still queued — the operator reports `Running` correctly,
+reflecting a StatefulSet that has not finished. Reading the phase as a
+monotonic progress bar is what misleads; it is a sample of `readyReplicas`
+(`slapdcluster_controller.go`, `ready < desired → Degraded`).
+
+**Fix:** carry both effects unconditionally on every RW pod. The mount now
+follows the accesslog *volume*, which has been unconditional since
+`volumeClaimTemplates` immutability forced it; the env costs two `moduleload`
+lines in the bootstrap `slapd.conf`. Modules can only be loaded at slapd
+startup, which is exactly why gating the env was wrong — it read the condition at
+the one moment the answer was still "no". `NeedsAccesslogVolume()` stays for the
+ephemeral backup/restore/mkdir Jobs, where it answers "does this database have a
+journal" and rolls nothing. ADR-013 amendment of 2026-10-07.
+
+**Why it was hard to spot:** the 1↔2 boundary was *written down as an exemption*.
+`statefulset_replica_churn_test.go` existed, was correct, and carried a comment
+saying it deliberately does not assert across 1↔2 because `NeedsAccesslogVolume()`
+"legitimately" changes the mounts there. `scale_topology_test.go` asserts the same
+invariant on a live cluster and skips below two replicas for an unrelated reason
+("need at least two pre-existing pods to tell a rewrite from a rebuild"). And
+`scaleup_test.go` performed this exact transition on every run — it just asserted
+convergence, which a replaced pod-0 satisfies perfectly, because it re-bootstraps
+with replication already on.
+
+**Lesson:** an exemption in a guard test is a defect with a comment on it. The
+2026-09-28 amendment declared the count of sanctioned pod-template roll triggers
+to be zero; it was two, and the test that would have said so had been told not
+to look. When a guard documents a boundary it does not cover, the boundary is
+the thing to go and check — not to take the comment's word that it is fine.

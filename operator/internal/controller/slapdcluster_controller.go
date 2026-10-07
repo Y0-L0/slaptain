@@ -980,29 +980,44 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	}
 
 	logLevel := strconv.Itoa(int(desiredLogLevel(sc)))
-	// Three orthogonal gates:
+	// NOTHING IN THIS TEMPLATE IS GATED ON REPLICATION STATE. Every RW pod
+	// mounts /accesslog and carries LDAP_REPLICATION_ENABLED=true, whether or
+	// not the cluster replicates today. The two gates that used to live here
+	// (NeedsAccesslogVolume() for the mount, spec.replication.enabled for the
+	// env) were the last pod-template roll triggers, and they fire on the one
+	// edit every user makes: a standalone cluster becoming an HA one raises
+	// spec.replicas AND sets replication.enabled in a single apply. The
+	// StatefulSet then creates the new pods at the new revision, finds pod-0
+	// stale, and replaces it — a delete/recreate the user never asked for,
+	// visible only as the cluster going Running -> Degraded -> Running after
+	// the scale-up, with restartCount still 0. ADR-013's amendment puts the
+	// count of sanctioned roll triggers at zero; these were two.
 	//
-	//   accesslogMountNeeded — mount /accesslog into init + main containers.
-	//     Only true when an accesslog DB might exist (peer-eligible with
-	//     consumers AND DeltaSync). Empty in plain-syncrepl-only providers.
-	//     The accesslog VOLUME (PVC or emptyDir) is provisioned unconditionally
-	//     on every RW pod regardless of this gate — see the volumes block
-	//     below for the immutability rationale.
+	// What carrying them unconditionally costs a standalone cluster:
 	//
-	//   replicationActive — the cluster participates in replication in some
-	//     way (provider, consumer, or both). Triggers
-	//     LDAP_REPLICATION_ENABLED=true on the init container, which loads
-	//     syncprov + accesslog modules so slapd recognizes their objectClasses
-	//     at runtime ldapadd time. Boot-time loading is only the fast path:
-	//     modules CAN be loaded into a running slapd via ldapmodify on
-	//     cn=module, and the SlapdDatabase controller does exactly that
-	//     (ensureModulesLoaded) for pods bootstrapped before replication was
-	//     enabled — see docs/reconcile-loop-fixes.md (2026-07-15). The boot
-	//     gate stays broad (any cluster with replication.enabled=true,
-	//     regardless of topology) so fresh pods don't depend on a reconcile
-	//     pass for their modules.
-	accesslogMountNeeded := sc.NeedsAccesslogVolume()
-	replicationActive := sc.Spec.Replication.Enabled
+	//   the mount — an /accesslog directory on a PVC the pod already has. The
+	//     accesslog VOLUME was made unconditional long before the mount was,
+	//     because volumeClaimTemplates is immutable and a later add would have
+	//     needed a manual STS recreate; see the volumes block below. The
+	//     init container mkdirs /accesslog/<db> per database, which is empty
+	//     directories and no LMDB until a SlapdDatabase actually declares an
+	//     accesslog DB.
+	//
+	//   the env — two extra `moduleload` lines (accesslog, syncprov) in the
+	//     bootstrap slapd.conf. Modules can only be loaded at slapd startup,
+	//     which is why loading them is worth doing before anyone asks: it is
+	//     what lets replication be switched on later without a restart. The
+	//     runtime fallback stays (ensureModulesLoaded, see
+	//     docs/reconcile-loop-fixes.md 2026-07-15) for pods bootstrapped by an
+	//     older operator.
+	//
+	// This mirrors what olcServerID already does a few lines down: stamped on
+	// every RW pod including a standalone one, because identity and capability
+	// are cheap to carry and expensive to acquire later (ADR-017).
+	//
+	// Guarded by statefulset_replica_churn_test.go, which asserts the template
+	// is invariant under BOTH fields — including across the 1 <-> 2 boundary
+	// that the accesslog gate used to make an exception of.
 
 	// Pod security context. PSA "restricted" profile is the floor: even when
 	// the user supplies their own SecurityContext, we layer RunAsNonRoot and
@@ -1081,8 +1096,11 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	// adding accesslog later (when the user flips replication.enabled or
 	// adds an externalPeer) would otherwise require a manual STS recreate
 	// with --cascade=orphan. The cost is a ~1Gi PVC sitting unused in
-	// standalone clusters. The MOUNT is still gated on accesslogMountNeeded
-	// so slapd doesn't see an empty /accesslog when there's no DB for it.
+	// standalone clusters. The MOUNT now follows the same rule — it was the
+	// last thing here still gated on replication state, and that gate turned
+	// every standalone-to-HA scale-up into a pod replacement. slapd seeing an
+	// empty /accesslog with no DB for it was the objection; it is a directory
+	// nothing opens.
 	if !readOnly {
 		volumeClaimTemplates = append(volumeClaimTemplates,
 			pvcTemplate("accesslog", accesslogPVC.Size, accesslogPVC.StorageClass, accesslogPVC.AccessMode),
@@ -1169,16 +1187,22 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	if readOnly {
 		initEnv = append(initEnv,
 			corev1.EnvVar{Name: "LDAP_READONLY_REPLICA", Value: envTrue},
-			corev1.EnvVar{Name: "LDAP_REPLICATION_ENABLED", Value: envTrue},
-		)
-	} else if replicationActive {
-		// Load syncprov + accesslog modules regardless of mode (peer or
-		// consumer-only) so promotion / runtime overlay-add succeeds without
-		// a pod restart. Modules can only be loaded at slapd startup.
-		initEnv = append(initEnv,
-			corev1.EnvVar{Name: "LDAP_REPLICATION_ENABLED", Value: envTrue},
 		)
 	}
+	// Load syncprov + accesslog modules on every pod, in every mode (RW or RO,
+	// peer or consumer-only, replicating or standalone), so promotion and
+	// runtime overlay-add succeed without a pod restart. Modules can only be
+	// loaded at slapd startup, which is exactly why this cannot be conditional:
+	// the condition would be read at the one moment the answer is still "no".
+	//
+	// Appended AFTER the read-only marker, which is where it already sat on an
+	// RO pod. Env order is part of the pod-template hash, so keeping it makes
+	// this change a no-op for the read-only StatefulSet — those pods do not
+	// roll on the operator upgrade that lands it. RW pods roll once, which is
+	// the price of never rolling them on a scale-up again.
+	initEnv = append(initEnv,
+		corev1.EnvVar{Name: "LDAP_REPLICATION_ENABLED", Value: envTrue},
+	)
 
 	// ServerID coordination (ADR-011 sid-1-per-default; ADR-017 bare form):
 	// emit this pod's own serverID as a bare integer on EVERY RW pod, including
@@ -1218,7 +1242,9 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		// that looks at it later.
 		{Name: databaseDirsVolume, MountPath: databaseDirsMountPath, ReadOnly: true},
 	}
-	if accesslogMountNeeded && !readOnly {
+	// Unconditional on every RW pod: see the gate rationale above. The volume
+	// is always provisioned, so there is nothing to be absent.
+	if !readOnly {
 		initMounts = append(initMounts, corev1.VolumeMount{
 			Name:      volumeAccesslog,
 			MountPath: ldapv1alpha1.AccesslogRoot,
@@ -1262,7 +1288,9 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		{Name: volumeData, MountPath: dataMountPath},
 		{Name: volumeRun, MountPath: runMountPath},
 	}
-	if accesslogMountNeeded && !readOnly {
+	// Unconditional on every RW pod: see the gate rationale above. The volume
+	// is always provisioned, so there is nothing to be absent.
+	if !readOnly {
 		mainMounts = append(mainMounts, corev1.VolumeMount{
 			Name:      volumeAccesslog,
 			MountPath: ldapv1alpha1.AccesslogRoot,

@@ -62,9 +62,11 @@ fi
 
 echo "Replication: $REPLICATION_ENABLED (readonly=${READONLY_REPLICA})"
 
-# Check writability. The accesslog dir may or may not be mounted depending on
-# whether this pod is peer-eligible (operator gates the volume on
-# NeedsAccesslogVolume()); only check if it actually exists.
+# Check writability. Every RW pod mounts the accesslog dir, replicating or not
+# (ADR-013 amendment 2026-10-07: gating it on replication state put the mount in
+# the pod template and made turning replication on replace pod-0). A read-only
+# replica never gets it — it produces no changes — so this stays conditional on
+# the directory existing rather than on anything the pod would have to be told.
 touch "$CONFIG_DIR/.writable" && rm "$CONFIG_DIR/.writable" || { echo "ERROR: $CONFIG_DIR is not writable"; exit 1; }
 touch "$DATA_DIR/.writable" && rm "$DATA_DIR/.writable" || { echo "ERROR: $DATA_DIR is not writable"; exit 1; }
 if [[ -d "$ACCESSLOG_DIR" ]]; then

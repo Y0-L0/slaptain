@@ -1952,3 +1952,40 @@ Background written up on branch `fix/pod-template-roll-on-replication-enable`:
 ADR-010 amendment of 2026-10-07 and the `spec.replication.enabled` field
 description. This item is parked here on purpose so it is not gated on that
 branch merging.
+
+---
+
+## A fresh SlapdDatabase reads `Error/NoPodsReachable` while its mkdir Job runs
+
+For the first few seconds after a `SlapdDatabase` is created, its phase is
+`Error` with reason `NoPodsReachable` and message *"Could not apply database to
+any pod"*. It turns `Running` on a later pass without anyone doing anything.
+Seen while walking `docs/demo/` (2026-10-10): `Error` at 0 s, `Running` at 15 s.
+
+The mechanism, from the code: on the first pass the database's directories do
+not exist yet, so `ensureDatabaseDirs` (`dirjob.go`) creates the mkdir Job and
+returns `errDatabaseDirsPending`. The per-pod apply returns that error, so
+the pod lands in `failedPods`, and with no pod in `appliedPods`
+`databasePhase` (`databasephase.go`) ranks the pass as precedence 1, "no pod
+could be reached at all".
+
+The pods *were* reached: the operator dialled and bound before it asked for the
+directories. The status points a human at the network when the right action is
+to wait. Waiting on directories is pending work, which `databasePhase` already
+has a rank for, below the error case.
+
+Why nothing caught it: the e2e suite and the demo both wait for `Running`, and
+a transient `Error` on the way there is invisible to a wait.
+
+### Shape of a fix (not written)
+
+- Carry "directories pending" out of the per-pod apply as a distinct outcome
+  instead of a generic failure, and let `databasePhase` rank it as pending
+  (`Pending` or `Degraded`, reason e.g. `DirectoriesPending`) rather than as
+  `NoPodsReachable`.
+- Red first: a `databasePhase` unit case where every pod is directory-pending,
+  observed to return `Error/NoPodsReachable` before the change.
+- e2e: a fresh database never reports `Error` on its way to `Running` (poll the
+  phase from creation, not just the end state).
+- Once fixed, the explanatory paragraph in `docs/demo/README.md` step 3 can
+  shrink to a line or go.

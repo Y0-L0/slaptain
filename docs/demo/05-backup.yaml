@@ -1,0 +1,15 @@
+# An on-demand backup of demo-db to S3. The endpoint is the versitygw fixture
+# in the slaptain-s3 namespace; leave it empty for AWS S3.
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdBackup
+metadata:
+  name: demo-backup-1
+  namespace: slaptain-demo
+spec:
+  databaseRef: demo-db
+  storage:
+    bucket: slaptain-backups
+    prefix: demo
+    endpoint: "http://versitygw.slaptain-s3.svc:7480"
+    region: us-east-1
+    credentialsSecretName: s3-credentials

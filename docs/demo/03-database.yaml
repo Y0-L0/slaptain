@@ -1,0 +1,68 @@
+# A directory tree: suffix, ACLs, indices, seed entries, replication settings.
+# Replication is declared here from the start, so the scale-up later touches
+# only the SlapdCluster.
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdDatabase
+metadata:
+  name: demo-db
+  namespace: slaptain-demo
+spec:
+  clusterRef: slapd
+  suffix: "dc=demo,dc=example"
+
+  acls:
+    - >-
+      to dn.subtree="ou=Mail,dc=demo,dc=example" attrs=userPassword
+      by self write
+      by dn.children="ou=ServiceAccounts,dc=demo,dc=example" read
+      by anonymous auth
+      by * none
+    - >-
+      to attrs=userPassword
+      by self write
+      by anonymous auth
+      by * none
+    - >-
+      to *
+      by * read
+
+  replication:
+    ridSegment: 1          # unique per database within a cluster
+    deltaSync: true
+    syncprovCheckpoint: "500 15"
+    accesslogPurge: "2+00:00 1+00:00"
+
+  indices:
+    - "objectClass eq"
+    - "uid eq,sub"
+    - "cn eq,sub"
+    - "entryCSN eq"
+    - "entryUUID eq"
+
+  seed:
+    entries:
+      - |
+        dn: dc=demo,dc=example
+        objectClass: top
+        objectClass: dcObject
+        objectClass: organization
+        o: demo
+        dc: demo
+      - |
+        dn: ou=People,dc=demo,dc=example
+        objectClass: organizationalUnit
+        ou: People
+      - |
+        dn: ou=Groups,dc=demo,dc=example
+        objectClass: organizationalUnit
+        ou: Groups
+      - |
+        dn: ou=Mail,dc=demo,dc=example
+        objectClass: organizationalUnit
+        ou: Mail
+      - |
+        dn: ou=ServiceAccounts,dc=demo,dc=example
+        objectClass: organizationalUnit
+        ou: ServiceAccounts
+
+  cleanupPolicy: Retain

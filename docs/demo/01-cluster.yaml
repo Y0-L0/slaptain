@@ -1,0 +1,17 @@
+# A single-node SlapdCluster: the servers only. Data lives in SlapdDatabase,
+# schema in SlapdSchema. Images are omitted: the operator defaults them to
+# its own release.
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdCluster
+metadata:
+  name: slapd
+  namespace: slaptain-demo
+spec:
+  ldap:
+    tls:
+      enabled: true
+      secretName: slapd-tls
+  persistence:
+    config:    { size: 1Gi }
+    data:      { size: 5Gi }
+    accesslog: { size: 1Gi }

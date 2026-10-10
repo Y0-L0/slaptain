@@ -371,6 +371,7 @@ Running a replicated OpenLDAP cluster on Kubernetes creates lifecycle problems t
 
 ## Documentation
 
+- [Demo Walkthrough](docs/demo/README.md) — copy-paste walk through deploy, scale-up, backup and restore on one cluster
 - [Team Onboarding](docs/ONBOARDING.md) — LDAP concepts, OpenLDAP specifics, operator model
 - [Multi-Site Deployments](docs/MULTI-SITE.md) — the mesh model, the cross-site invariants, a multi-site install, and how to check a mesh is healthy
 - [Bootstrap Internals](docs/BOOTSTRAP.md) — init container and operator bootstrap sequencing

@@ -1,0 +1,20 @@
+# 01-cluster.yaml scaled to three read-write replicas plus one read-only
+# replica. Three fields differ: replicas, readReplicas, replication.enabled.
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdCluster
+metadata:
+  name: slapd
+  namespace: slaptain-demo
+spec:
+  ldap:
+    tls:
+      enabled: true
+      secretName: slapd-tls
+  persistence:
+    config:    { size: 1Gi }
+    data:      { size: 5Gi }
+    accesslog: { size: 1Gi }
+  replicas: 3
+  readReplicas: 1
+  replication:
+    enabled: true

@@ -1,0 +1,11 @@
+# Roll demo-db back to demo-backup-1. A SlapdRestore is a one-shot request:
+# to restore again, create another one.
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdRestore
+metadata:
+  name: demo-rollback-1
+  namespace: slaptain-demo
+spec:
+  databaseRef: demo-db
+  source:
+    backupRef: demo-backup-1

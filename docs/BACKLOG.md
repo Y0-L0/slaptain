@@ -1889,3 +1889,66 @@ Note that `PartiallyVerified` (ADR-008 amendment, 2026-09-14) already solved the
 *adjacent* case — the peer answered but some database yielded no readable
 contextCSN — and deliberately did not touch the nothing-answered-anywhere case,
 which stays Unreachable. Whatever lands here should keep that split intact.
+
+---
+
+## `replication.enabled: true → false` half-tears-down a live cluster, silently
+
+Nothing rejects the edit — there is no admission webhook — and the operator then
+does half a teardown, because the two halves of the replication config are gated
+differently:
+
+| | on `enabled: false` |
+|---|---|
+| syncprov overlay, accesslog overlay | removed (`wantsSyncProv` includes `Replication.Enabled`) |
+| accesslog DB `cn=accesslog-<db>` | **dropped — the change journal is destroyed** |
+| `olcSyncRepl` stanzas | left in place (`slapddatabase_controller.go` step 10 is `if enabled { … }`, no else) |
+| `olcMultiProvider` | left `TRUE` (only ever written on the enabled path) |
+
+Every pod is left consuming from peers that no longer serve syncrepl — slapd's
+*"got search entry without Sync State control"*. Replication stops by breaking
+rather than by being switched off, and the journals do not survive it.
+
+Found 2026-10-07 while answering a plain question: why would anyone ever set
+`replication.enabled: false` — to stop replication for maintenance? The honest
+answer is "at creation, to mean standalone". The field is a creation-time
+declaration and a one-way on-ramp; `false → true` is designed, live, covered by
+`scaleup_test.go`, and (since the ADR-013 amendment of the same date) rolls no
+pod. `true → false` is not its inverse, and nothing says so at the point of use.
+
+Note the *designed* demotion already works and has none of this problem:
+`mode: consumer-only` keeps `enabled: true`, so `reconcileReplication` still runs
+and **converges** the stanza set (in-cluster providers emptied,
+`olcMultiProvider: FALSE`, data DB `olcReadOnly: TRUE`) instead of abandoning it.
+
+### Open — needs a proper look
+
+1. **Surface it.** A condition — `ReplicationConfigStale`, or a reason on an
+   existing one — when `enabled` is false and pods still carry `olcSyncRepl`.
+   The operator reads every pod's `cn=config` every pass, so the evidence is
+   already in hand; this is reporting, not new machinery. Cheapest real
+   mitigation.
+2. **Decide whether a disable path should exist at all.** Deliberately not
+   written on speculation. It would have to perform exactly the destructive
+   short-set `Replace` on `olcSyncRepl` that ADR-031 decision 6 exists to
+   prevent, against node-local `cn=config` the operator cannot prove it is the
+   only writer of (ADR-026 R2). ADR-005 is the standing lesson on what teardown
+   of replicated state costs when it is added quietly — it was wrong for a year
+   and nobody noticed. If this is built, it is an ADR, not a patch.
+3. **Consider whether the overlay teardown should be gated the same way as the
+   stanza write.** The split is the actual defect: one half honours "a withhold
+   must leave the pod's config alone" and the other half does not. Making the
+   overlay/accesslog teardown as conservative as step 10 would turn a destructive
+   half-state into a benign no-op, and is a much smaller change than (2). Worth
+   costing before (2) is even considered.
+
+Prior art to read first: ADR-031 decision 6 (short set = deletion), ADR-026 R2
+(do not destroy shared `cn=config` state), ADR-019 amendment 2026-09-14 (the
+withdrawn R8 migration that stranded an `olcAccessLogDB` and made a pod
+permanently unbootable — the closest thing to this hazard that has actually
+bitten).
+
+Background written up on branch `fix/pod-template-roll-on-replication-enable`:
+ADR-010 amendment of 2026-10-07 and the `spec.replication.enabled` field
+description. This item is parked here on purpose so it is not gated on that
+branch merging.

@@ -39,6 +39,9 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 ```
 .
 ├── Makefile                        # Root build targets (see Makefile Targets below)
+├── .github/workflows/              # CI: test / lint / codeql / security on every push; publish-main (sha-<hash> images
+│                                   # on main) and publish (v* tag → images, charts, slctl binaries, CRD bundle, release)
+├── hack/verify-generated.sh        # The generated-files drift check behind `make verify-generated`
 ├── lab.yaml.sample                 # Lab config schema for tests/e2e.sh (real lab.yaml is gitignored)
 ├── CLAUDE.md
 ├── docs/
@@ -176,7 +179,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 - **Build tooling:** Plain Containerfile + podman (apko dropped — only beneficial in the Wolfi ecosystem).
 - **slapd runtime** (`images/slapd/`): OpenLDAP **2.7.1** (`2.7.1-0+slaptain1`, built from the vendored packaging fork in `images/openldap-deb/` — ADR-021) on `gcr.io/distroless/base-debian13` — glibc, libssl, ca-certs, no shell. Legacy Debian 2.6 build stays available as `slapd:<tag>-ol26` (`Containerfile.ol26`) for hot-migration interop (ADR-011). **LMDB 1.0 format break:** 2.6-written volumes cannot be opened by 2.7 — see `docs/OPENLDAP-VERSIONS.md` for the migration runbook.
 - **slapd-init** (`images/slapd-init/`): `debian:trixie-slim` + the same locally-built 2.7.1 packages (slapcat/slapadd/slaptest must match the slapd version) — ephemeral bootstrap; shell + python3. `-ol26` variant pairs with the 2.6 slapd image — always pin both or neither.
-- **operator** (`images/operator/`): `gcr.io/distroless/static-debian13:nonroot`, statically-linked Go binary, UID 65532. Builder stage uses `golang:1.25`.
+- **operator** (`images/operator/`): `gcr.io/distroless/static-debian13:nonroot`, statically-linked Go binary, UID 65532. Builder stage uses `golang:1.26`.
 - **User (slapd):** `openldap` (UID/GID 1024). Debian's slapd package creates this user; we `groupmod`/`usermod` to 1024.
 - **Ports:** 1024 (ldap), 1025 (ldaps) — non-privileged. Service maps 389→1024 and 636→1025.
 - **Probe client:** the runtime image carries exactly one LDAP client, `/usr/bin/ldapwhoami`, for the readiness/startup exec probes (ADR-030). Same vendored package build as slapd, so it can never drift from the server. Both image variants carry it — a `-ol26` pod without it would never go Ready. Debugging still belongs to `slapd-toolkit`.
@@ -384,6 +387,8 @@ runs without readpw configuration but skips those test cases.
 | `make build-operator` | Build operator image (build context = repo root) |
 | `make push` | Build + push all six images (both slapd pairs, toolkit, operator) at `IMAGE_TAG` |
 | `make show-tag` | Print the git tag and the image/chart versions derived from it (`v0.2.1` → image `0.2.1`, chart `0.2.1`) |
+| `make helm-lint` | Lint all four published charts and render each in the shapes users install (operator with Multus/metrics/NetworkPolicy on, slapd with the persistent fixture values, the mesh from its three-site example). CI's chart gate and the release's pre-push check |
+| `make verify-generated` | Regenerate CRDs/RBAC/deepcopy and fail if any checked-in copy (incl. `charts/operator/crds/`) drifts — `hack/verify-generated.sh`. CI's generated-files gate |
 | `make build-openldap-deb` | Build the local-only OpenLDAP 2.7.1 .deb carrier image (feeds both 2.7 image builds; never pushed) |
 | `make build-ol26` / `make import-ol26` | Build / CRI-import the legacy 2.6 slapd+init pair (`:<tag>-ol26`, ADR-021) |
 | `make operator-generate` | Run `make generate` in `operator/` (regenerates deepcopy) |

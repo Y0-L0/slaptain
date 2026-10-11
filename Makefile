@@ -28,10 +28,10 @@ IS_VERSION_TAG := $(shell echo '$(GIT_TAG)' | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]
 #             sibling project (littlered), where it is forced: its CI's
 #             docker/metadata-action `type=sha` publishes exactly that, so a
 #             Makefile default asking for :<hash> could never address a
-#             CI-built image. slaptain publishes by hand and has no such
-#             constraint — it adopts the spelling so the two projects read the
-#             same, and so the defaults already fit if slaptain gains the same
-#             workflows. It also makes a registry listing self-describing:
+#             CI-built image. slaptain's own workflows (.github/workflows/
+#             publish*.yml) publish through `make push`, i.e. through THIS
+#             rule, so the spelling costs nothing here and makes the two
+#             projects read the same. It also makes a registry listing self-describing:
 #             `0.2.0` is a release, `sha-09ecf10` is a build of a commit.
 IMAGE_TAG := $(if $(IS_VERSION_TAG),$(GIT_TAG:v%=%),sha-$(GIT_TAG))
 
@@ -159,7 +159,7 @@ define import-if-needed
 	fi
 endef
 
-.PHONY: all build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-toolkit build-operator build-slctl install-slctl push gencert helm-deploy cluster-helm-install cluster-helm-uninstall mesh-helm-install mesh-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag
+.PHONY: all build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-toolkit build-operator build-slctl install-slctl push gencert helm-deploy cluster-helm-install cluster-helm-uninstall mesh-helm-install mesh-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag helm-lint verify-generated
 
 ## all: the six pushable images plus slctl. build-ol26 is included so a
 ## release build carries the legacy OpenLDAP 2.6 pair too (ADR-021).
@@ -484,6 +484,37 @@ e2e-migration-test:
 
 e2e-migration-teardown:
 	./tests/e2e-migration.sh teardown $(CONTEXT)
+
+## helm-lint: lint every published chart and render each in the shapes its
+## users actually install. A template error is invisible to every Go gate and
+## otherwise surfaces at `helm install` time on the user's cluster. The mesh
+## chart has no renderable default on purpose (mesh.sites is required — a
+## quietly rendered one-site mesh would hand every site the same serverID
+## slot), so it renders from its shipped three-site example. CI's chart gate
+## (.github/workflows/lint.yml) and the release's pre-push check both run this.
+helm-lint:
+	$(HELM) lint ./charts/operator
+	$(HELM) lint ./charts/slapd
+	$(HELM) lint ./charts/slapd-mesh -f charts/slapd-mesh/examples/three-site.yaml
+	$(HELM) lint ./charts/slapd-toolkit
+	$(HELM) template slaptain ./charts/operator > /dev/null
+	$(HELM) template slaptain ./charts/operator \
+		--set siteName=site-a \
+		--set multus.network=infra/replication-net \
+		--set metrics.enabled=true \
+		--set metrics.serviceMonitor.enabled=true \
+		--set networkPolicy.enabled=true > /dev/null
+	$(HELM) template slapd ./charts/slapd > /dev/null
+	$(HELM) template slapd ./charts/slapd -f tests/values.slapd-persistent.yaml > /dev/null
+	$(HELM) template ldap ./charts/slapd-mesh -f charts/slapd-mesh/examples/three-site.yaml > /dev/null
+	$(HELM) template toolkit ./charts/slapd-toolkit > /dev/null
+
+## verify-generated: regenerate the CRDs, the RBAC role and the deepcopy, and
+## fail if any checked-in copy (operator/config, charts/operator/crds,
+## zz_generated.deepcopy.go) changes. Same class of check as `go mod tidy`:
+## nothing used to notice a stale tree. See hack/verify-generated.sh.
+verify-generated:
+	@./hack/verify-generated.sh
 
 show-tag: ## Print the git tag and the image/chart tag derived from it
 	@echo "git:    $(GIT_TAG)"

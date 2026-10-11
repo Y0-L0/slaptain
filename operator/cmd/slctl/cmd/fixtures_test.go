@@ -7,6 +7,7 @@ const (
 	testClusterName = "slapd"
 	testPod0        = "slapd-0"
 	testPod1        = "slapd-1"
+	testPod2        = "slapd-2"
 	testROPod0      = "slapd-readonly-0"
 	testDBName      = "default"
 	testMeshName    = "lab"

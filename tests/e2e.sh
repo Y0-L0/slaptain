@@ -1151,14 +1151,78 @@ run_tests() {
     log "Ginkgo seed: $seed  — replay this exact spec order with E2E_SEED=$seed"
 
     log "Running e2e tests..."
+    # The post-suite gates run whatever the suite's outcome. A red suite is
+    # exactly the run where a pod may be left in the ITS#9398 storm, and under
+    # set -e a failing `go test` used to end the script before either gate was
+    # reached. errexit is off only for these three steps; each runs in a
+    # subshell that turns it back on, so a gate's own `die` (and any command it
+    # does not guard) ends that gate alone. The run fails if any of them did.
+    local suite_rc gate_rc rc=0
+    set +e
     (
+        set -e
         cd "$PROJECT_ROOT/tests/e2e"
         env "${test_env[@]}" go test -v ./... \
             -timeout 65m \
             "${ginkgo_flags[@]}"
     )
+    suite_rc=$?
+    ( set -e; check_data_present_every_site )
+    gate_rc=$?; [[ $gate_rc -ne 0 ]] && rc=$gate_rc
+    ( set -e; check_no_refresh_storm_every_site )
+    gate_rc=$?; [[ $gate_rc -ne 0 ]] && rc=$gate_rc
+    set -e
 
-    check_data_present_every_site
+    if [[ $suite_rc -ne 0 ]]; then
+        warn "the e2e suite failed (exit $suite_rc); the post-suite gates ran anyway — see above"
+        return "$suite_rc"
+    fi
+    return "$rc"
+}
+
+# check_no_refresh_storm_every_site fails the run if any site has a pod caught
+# in the ITS#9398 refresh storm (docs/ITS-9398-STORM-SIGNATURE.md): an
+# accesslog database whose minCSN names a sid its contextCSN does not track.
+# That pod refuses every consumer of the log with "sync cookie is stale",
+# forever, while every other health signal — CSN convergence included — reads
+# green. A full three-site run went 104/0 on 2026-10-11 with one pod in this
+# state the whole time.
+#
+# The predicate lives in ONE place, slctl inspect's accesslog-mincsn check,
+# built from this checkout so the gate judges with the code under test. Like
+# the DataPresent gate it lives here because only this script reaches every
+# site's Kubernetes API.
+#
+# One sample per site, no retry: a firing sample is conclusive. A clean one
+# only means clean now — the condition has been seen to clear by itself.
+check_no_refresh_storm_every_site() {
+    local slctl ctx out status detail failed=()
+    slctl=$(mktemp -d /tmp/e2e-slctl.XXXXXX)/slctl
+    (cd "$PROJECT_ROOT/operator" && go build -o "$slctl" ./cmd/slctl) \
+        || die "building slctl for the refresh-storm gate failed"
+
+    log "Checking every site for the ITS#9398 refresh storm (slctl inspect: accesslog-mincsn)..."
+    for ctx in "${CONTEXTS[@]}"; do
+        # inspect exits non-zero when ANY check fails; this gate judges one.
+        # --json is an array, one element per SlapdCluster.
+        out=$("$slctl" --context "$ctx" inspect -n "$NAMESPACE_TESTING" slapd --json 2>/dev/null || true)
+        status=$(yq -p json -r '.[].checks[] | select(.name == "accesslog-mincsn") | .status' <<<"$out" 2>/dev/null || true)
+        detail=$(yq -p json -r '.[].checks[] | select(.name == "accesslog-mincsn") | .detail' <<<"$out" 2>/dev/null || true)
+        case "$status" in
+            pass) log "[$ctx] accesslog-mincsn: $detail" ;;
+            warn) warn "[$ctx] accesslog-mincsn: $detail" ;;
+            fail) failed+=("[$ctx] $detail") ;;
+            *)    failed+=("[$ctx] no accesslog-mincsn verdict from slctl inspect") ;;
+        esac
+    done
+    rm -rf "$(dirname "$slctl")"
+
+    if (( ${#failed[@]} > 0 )); then
+        printf '  %s\n' "${failed[@]}" >&2
+        die "ITS#9398 refresh storm on ${#failed[@]} site(s) — the mesh is not healthy, whatever the suite reported. \
+Leave it standing for evidence; rebuilding the pod (ADR-012 case 2) clears it."
+    fi
+    log "No refresh storm on any site."
 }
 
 # check_data_present_every_site asserts that EVERY site's every SlapdDatabase

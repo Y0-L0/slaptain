@@ -347,7 +347,7 @@ func collectLDAPArtifacts(
 		}
 		csnResult, err := conn.Search(ldap.NewSearchRequest(
 			nc, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 5, false,
-			"(objectClass=*)", []string{"contextCSN"}, nil,
+			"(objectClass=*)", []string{attrContextCSN}, nil,
 		))
 		if err != nil {
 			csnDump = append(csnDump, fmt.Sprintf("# %s: %v\n", nc, err))

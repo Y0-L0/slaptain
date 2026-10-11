@@ -96,6 +96,9 @@ const (
 	checkFail = "fail"
 )
 
+// attrContextCSN is the operational attribute every CSN check reads.
+const attrContextCSN = "contextCSN"
+
 // ── Internal pod state (shared by display + checks) ──────────────────────────
 
 type podState struct {
@@ -117,8 +120,11 @@ type podState struct {
 	// suffixEntries is each data suffix's base entry as this pod shows it —
 	// ordinary visibility, glue verdict (ManageDSAIT), entryUUID (ADR-025).
 	suffixEntries []suffixObservation
-	configError   string
-	err           string
+	// logCSN is each accesslog database's minCSN/contextCSN, read as the
+	// config admin — the ITS#9398 storm detector's evidence.
+	logCSN      []logCSNReading
+	configError string
+	err         string
 }
 
 func (ps podState) toJSON() podJSON {
@@ -489,10 +495,10 @@ func gatherPodState(
 		var csns []string
 		csnResult, err := conn.Search(ldap.NewSearchRequest(
 			nc, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 5, false,
-			"(objectClass=*)", []string{"contextCSN"}, nil,
+			"(objectClass=*)", []string{attrContextCSN}, nil,
 		))
 		if err == nil && len(csnResult.Entries) > 0 {
-			csns = csnResult.Entries[0].GetEqualFoldAttributeValues("contextCSN")
+			csns = csnResult.Entries[0].GetEqualFoldAttributeValues(attrContextCSN)
 		}
 		ps.contextCSN[nc] = csns
 
@@ -513,6 +519,31 @@ func gatherPodState(
 			if err := configConn.Bind("cn=admin,cn=config", configPW); err != nil {
 				ps.configError = fmt.Sprintf("cn=config bind failed: %v", err)
 			} else {
+				// minCSN/contextCSN of every accesslog database (ITS#9398).
+				// The log DBs grant read to the replication identity alone
+				// and have the config admin as rootDN (ADR-020), so this is
+				// the bind that can see them.
+				for _, nc := range ps.namingContexts {
+					if !isAnyAccesslogSuffix(nc) {
+						continue
+					}
+					r := logCSNReading{Pod: ps.name, Log: nc}
+					res, err := configConn.Search(ldap.NewSearchRequest(
+						nc, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 5, false,
+						"(objectClass=*)", []string{"minCSN", attrContextCSN}, nil,
+					))
+					switch {
+					case err != nil:
+						r.Err = err.Error()
+					case len(res.Entries) == 0:
+						r.Err = "no entry"
+					default:
+						r.MinCSN = res.Entries[0].GetEqualFoldAttributeValues("minCSN")
+						r.ContextCSN = res.Entries[0].GetEqualFoldAttributeValues(attrContextCSN)
+					}
+					ps.logCSN = append(ps.logCSN, r)
+				}
+
 				// Search for all olcMdbConfig entries to find syncRepl/multiProvider
 				dbResult, err := configConn.Search(ldap.NewSearchRequest(
 					"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases, 0, 0, false,
@@ -562,6 +593,7 @@ func gatherPodState(
 		}
 	}
 
+	ps.logCSN = readLogCSNs(ps.name, ps.namingContexts, ps.logCSN, ps.configError)
 	return ps
 }
 
@@ -608,6 +640,17 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 		csnReadings = append(csnReadings, csnPodReading{Pod: ps.name, BySuffix: ps.contextCSN})
 	}
 	checks = append(checks, checkCSNConvergence(csnReadings))
+
+	// ── ITS#9398: accesslog minCSN sids tracked in contextCSN ──
+	// RW pods only: read-only replicas carry no accesslog.
+	var logReadings []logCSNReading
+	for _, ps := range rwPods {
+		if ps.err != "" {
+			continue // unreachable pods are pod-readiness's problem
+		}
+		logReadings = append(logReadings, ps.logCSN...)
+	}
+	checks = append(checks, checkAccesslogMinCSN(logReadings))
 
 	// ── syncRepl stanza count ──
 	expectedRW := int(sc.Spec.Replicas-1) + expectedExternalStanzas(sc)

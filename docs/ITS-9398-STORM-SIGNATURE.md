@@ -237,15 +237,25 @@ clear between reads (see above), so absence of the signature means "not right
 now", not "never happened". Pair it with the CPU signal: a site whose pod
 ordinals 0 and 1 are busy has a broken provider in it.
 
-Not yet implemented. Two places it belongs:
+Implemented 2026-10-11 as the `slctl inspect` check **`accesslog-mincsn`**: it
+fails naming the pod, the log and the missing sids, warns when a log could not
+be read, and passes only when every log was read clean. `tests/e2e.sh` runs it
+on every site after the suite (`check_no_refresh_storm_every_site`), so a run
+that leaves a pod storming ends red. Its first live reading:
 
-1. an `slctl inspect` check — the natural home, since the storm is invisible to
-   all 18 existing ones (they compare *data* DB contextCSNs across pods, which
-   stayed identical here, and correctly reported convergence);
-2. `dataloss_recovery_test.go`, replacing the current stale-cookie **log-line
-   count** with this assertion. That spec's gating claim is separately stale —
-   it reads as if the storm were `-ol26`-only, which the ITS#9398 investigation
-   disproved.
+```
+[FAIL] accesslog-mincsn  slapd-0 cn=accesslog-example-db2: minCSN sid 003,013 not in contextCSN;
+                         slapd-0 cn=accesslog-example-db: minCSN sid 012 not in contextCSN — ITS#9398: …
+```
+
+on a pod that had answered about 4,000 operations a second for half an hour,
+while `csn-convergence` on the same run read OK and a full three-site e2e had
+just gone 104/0.
+
+Still open: `dataloss_recovery_test.go` counts stale-cookie **log lines**
+instead of asserting this predicate. That spec's gating claim is separately
+stale — it reads as if the storm were `-ol26`-only, which the ITS#9398
+investigation disproved.
 
 ---
 

@@ -199,6 +199,16 @@ engineered reproduction produced only isolated, self-healing staleness (see
 ADR-021 and the section below). It is a 2.7-regression tripwire; its threshold
 separates measured isolated staleness (3) from the measured storm (thousands).
 
+**ITS#9398 refresh-storm gate (post-suite).** After a green suite, `e2e.sh`
+builds `slctl` from the checkout and runs its `accesslog-mincsn` check on every
+site: on each RW pod's accesslog databases, every `minCSN` sid must appear in
+`contextCSN`. A missing one means that pod refuses every consumer of the log
+with `sync cookie is stale`, forever, while CSN convergence reads green
+(docs/ITS-9398-STORM-SIGNATURE.md). One sample per site: a firing sample is
+conclusive and ends the run red; a clean one only means clean now. Unlike the
+log-line count above, this one has been observed red: on 2026-10-11 a full
+three-site run went 104/0 with one pod storming the whole time.
+
 ### Env vars
 
 | Env var | Default | Description |

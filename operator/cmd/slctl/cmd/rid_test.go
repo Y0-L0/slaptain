@@ -368,7 +368,7 @@ func TestDecodeRID(t *testing.T) {
 			wantKind:      ridcoord.KindLocal,
 			wantOrdinal:   new(int32(2)),
 			wantDatabases: []string{testDBName},
-			wantPod:       "slapd-2",
+			wantPod:       testPod2,
 			wantNoNotes:   true,
 		},
 		{

@@ -1,0 +1,122 @@
+# kube-prometheus-stack values for the OBSERVING site only.
+#
+# One Prometheus holds all three sites: each site's kube-state-metrics is a
+# static scrape target carrying an explicit `site` label, so the mesh is one
+# `site` dimension on one datasource — no federation, no cross-cluster
+# datasource plumbing, no second Grafana.
+#
+#   helm install monitoring prometheus-community/kube-prometheus-stack \
+#     -n monitoring --create-namespace -f monitoring/kube-prometheus-stack-values.yaml
+#
+# Grafana: kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80
+# The lab's node network is not reachable from a workstation, so port-forward
+# is the access path rather than a NodePort.
+
+# We run kube-state-metrics ourselves, once per site, from
+# monitoring/kube-state-metrics-values.yaml. The bundled one would export core
+# kinds from the observing site only and claim the same series names.
+kube-state-metrics:
+  enabled: false
+kubeStateMetrics:
+  enabled: false
+
+# Off, deliberately: this stack exists to show slaptain's own state. Node and
+# control-plane metrics are a different conversation and a lot of series.
+nodeExporter:
+  enabled: false
+prometheus-node-exporter:
+  enabled: false
+kubeApiServer:
+  enabled: false
+kubelet:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeEtcd:
+  enabled: false
+coreDns:
+  enabled: false
+
+# Rules are shipped (monitoring/prometheus-rules.yaml) and visible as
+# pending/firing in the Prometheus UI. Routing them somewhere is a decision
+# about someone's on-call, not about slaptain.
+alertmanager:
+  enabled: false
+defaultRules:
+  create: false
+
+prometheus:
+  prometheusSpec:
+    scrapeInterval: 15s
+    retention: 7d
+    # Pick up PrometheusRules in this namespace regardless of release labels.
+    ruleSelectorNilUsesHelmValues: false
+    serviceMonitorSelectorNilUsesHelmValues: false
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+
+    additionalScrapeConfigs:
+      # One job per site. The address is a node of that site and the port is
+      # kube-state-metrics' NodePort; `site` is attached here because it is a
+      # fact about the scrape target, not about the CR — the CRs are
+      # byte-identical at every site by ADR-028, so nothing in them says which
+      # site they came from.
+      #
+      # THE ADDRESSES BELOW ARE PLACEHOLDERS (RFC 5737) AND MUST BE REPLACED.
+      # They are each site's node address on its CROSS-SITE interface. There is
+      # no discovery path for them: on a dual-homed node the NIC a workstation
+      # reaches is a different one and is not registered with Kubernetes — the
+      # same reason E2E_NODE_ACCESS_IP exists. Keep your real values in a
+      # gitignored copy and point the Makefile at it:
+      #
+      #   cp monitoring/kube-prometheus-stack-values.yaml \
+      #      monitoring/kube-prometheus-stack-values.local.yaml
+      #   make monitoring-stack-install CONTEXT=<site> \
+      #      MONITORING_STACK_VALUES=monitoring/kube-prometheus-stack-values.local.yaml
+      - job_name: slaptain-site-1
+        scrape_interval: 15s
+        static_configs:
+          - targets: ["192.0.2.11:30090"]
+            labels:
+              site: site-1
+        metric_relabel_configs: &drop_crs_labels
+          # kube-state-metrics stamps every custom-resource series with the
+          # GVK it came from. True, and uniform across every series here.
+          - action: labeldrop
+            regex: customresource_(group|kind|version)
+      - job_name: slaptain-site-2
+        scrape_interval: 15s
+        static_configs:
+          - targets: ["198.51.100.11:30090"]
+            labels:
+              site: site-2
+        metric_relabel_configs: *drop_crs_labels
+      - job_name: slaptain-site-3
+        scrape_interval: 15s
+        static_configs:
+          - targets: ["203.0.113.11:30090"]
+            labels:
+              site: site-3
+        metric_relabel_configs: *drop_crs_labels
+
+grafana:
+  enabled: true
+  defaultDashboardsEnabled: false
+  adminPassword: slaptain
+  service:
+    type: ClusterIP
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: monitoring

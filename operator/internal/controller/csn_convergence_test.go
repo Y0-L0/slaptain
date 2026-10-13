@@ -241,19 +241,30 @@ func TestEvaluateLocalConvergenceNewestBySuffix(t *testing.T) {
 
 func TestEvaluatePeerConvergence(t *testing.T) {
 	// Local baseline: db1 is newer than db2 by minutes — the gap that must
-	// never be mistaken for replication lag.
-	localNewest := map[string]time.Time{
+	// never be mistaken for replication lag. This is the DEFAULT for cases that
+	// do not set their own: both databases known, both non-zero.
+	//
+	// A case sets `localNewest` itself only to vary the LOCAL side — which the
+	// zero-baseline cases below must, because the defect they pin lives in what
+	// happens when our own reading for a database is missing.
+	defaultLocalNewest := map[string]time.Time{
 		sfxA: mustCSNTime(t, csnsA),
 		sfxB: mustCSNTime(t, csnsB),
 	}
 
 	tests := []struct {
-		name        string
+		name string
+		// localNewest overrides the shared baseline; nil means use it.
+		localNewest map[string]time.Time
 		readings    []csnReading
 		wantState   ldapv1alpha1.ExternalPeerReplicationState
 		wantLag     string
 		wantErrHas  []string
 		wantNoError bool
+		wantNoLag   bool
+		// because states the RULE, so a failure explains itself rather than
+		// reporting that two strings differ (pods_responsive_test.go's idiom).
+		because string
 	}{
 		{
 			// A peer that is current on BOTH databases. The cross-database age
@@ -339,29 +350,144 @@ func TestEvaluatePeerConvergence(t *testing.T) {
 				{Pod: testPodIP1, Suffix: sfxB, CSNs: csnsB},
 			},
 			wantState: ldapv1alpha1.ReplicationLagging,
+			because: "a remote-side zero with a known local value is a measured " +
+				"deficit, not missing evidence — the one direction that stays Lagging",
+		},
+		{
+			// THE ZERO-LOCAL-BASELINE DEFECT (measured 2026-10-06). `localNewest`
+			// is built from readings that parsed, so a database whose every LOCAL
+			// read failed has NO ENTRY at all. Subtracting the peer's fresh CSN
+			// from that zero time yields a hugely negative lag, the remote-ahead
+			// clamp turns it into zero, the database counts as verified (the
+			// remote did answer) — and the peer reads Synced for a database we
+			// never managed to read on our own side. Confirmed by execution
+			// against this tree: verdict state="Synced" lag="" lastError="".
+			//
+			// ADR-008's rule is the same one in both directions: unreadable
+			// evidence never counts toward the good verdict. A missing local
+			// baseline is missing evidence, so the database is UNVERIFIED and
+			// must be named — not silently scored as current.
+			name:        "a database with no local baseline is not Synced",
+			localNewest: map[string]time.Time{sfxA: mustCSNTime(t, csnsA)},
+			readings: []csnReading{
+				{Pod: "198.51.100.1", Suffix: sfxA, CSNs: csnsA},
+				{Pod: "198.51.100.1", Suffix: sfxB, CSNs: csnsB},
+			},
+			wantState:  ldapv1alpha1.ReplicationPartiallyVerified,
+			wantErrHas: []string{sfxB},
+			wantNoLag:  true,
+			because: "without our own contextCSN for that database there is no " +
+				"comparison basis, so neither Synced nor a lag figure can be earned",
+		},
+		{
+			// Same rule, the other input shape: an entry that EXISTS and is the
+			// zero time. Nothing in the current pipeline produces this — the map
+			// is only ever written from a parsed CSN — but the rule is about the
+			// VALUE, not about the map's shape, so a later refactor that
+			// pre-seeds a key per database must not reopen the hole. IsZero()
+			// covers both; a `_, ok :=` lookup would cover only the one above.
+			name: "a zero local baseline is not Synced even when the key exists",
+			localNewest: map[string]time.Time{
+				sfxA: mustCSNTime(t, csnsA),
+				sfxB: {},
+			},
+			readings: []csnReading{
+				{Pod: "198.51.100.1", Suffix: sfxA, CSNs: csnsA},
+				{Pod: "198.51.100.1", Suffix: sfxB, CSNs: csnsB},
+			},
+			wantState:  ldapv1alpha1.ReplicationPartiallyVerified,
+			wantErrHas: []string{sfxB},
+			wantNoLag:  true,
+			because: "absent and zero are the same absence of a baseline; the " +
+				"check belongs on the value, not on the key",
+		},
+		{
+			// Neither side has a baseline: no local reading for db2 AND the peer
+			// answered for it with nothing. Today this falls through both zero
+			// branches and lands on Synced — the worst of the three, because it
+			// is the shape a never-read database takes on both sides at once.
+			// It is also not Lagging: a deficit needs a known local value to be
+			// measured against, which is exactly what is missing.
+			name:        "a database empty on both sides is unverified, not Synced",
+			localNewest: map[string]time.Time{sfxA: mustCSNTime(t, csnsA)},
+			readings: []csnReading{
+				{Pod: "198.51.100.1", Suffix: sfxA, CSNs: csnsA},
+				{Pod: "198.51.100.1", Suffix: sfxB, CSNs: nil},
+			},
+			wantState:  ldapv1alpha1.ReplicationPartiallyVerified,
+			wantErrHas: []string{sfxB},
+			wantNoLag:  true,
+			because: "two unknowns do not make an agreement; withholding the " +
+				"verdict is safe, claiming health we cannot see is not",
+		},
+		{
+			// THE ASYMMETRY GUARD. The rule above is one-sided ON PURPOSE, and
+			// "zero on either side means unverified" is the natural wrong
+			// generalisation of it:
+			//
+			//   zero LOCAL baseline, remote readable → unverified (the new rule)
+			//   zero REMOTE value,   local known     → Lagging   (unchanged)
+			//
+			// The second is not missing evidence. We read our side, we read
+			// theirs, and theirs is empty while ours has data: that is a peer
+			// that has not received the database, which is the single most
+			// actionable cross-site fault there is. Downgrading it to
+			// PartiallyVerified loses it.
+			//
+			// This restates "an empty remote database is Lagging" above with the
+			// asymmetry named, so an implementation that collapses the two
+			// directions fails with a message that says what it broke.
+			name:        "a readable local baseline against an empty peer stays Lagging",
+			localNewest: defaultLocalNewest,
+			readings: []csnReading{
+				{Pod: "198.51.100.1", Suffix: sfxA, CSNs: nil},
+				{Pod: "198.51.100.1", Suffix: sfxB, CSNs: csnsB},
+			},
+			wantState: ldapv1alpha1.ReplicationLagging,
+			because: "the zero-baseline rule is about OUR side only; a zero on " +
+				"the PEER's side with a known local value must remain Lagging",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			localNewest := tt.localNewest
+			if localNewest == nil {
+				localNewest = defaultLocalNewest
+			}
 			got := evaluatePeerConvergence(localNewest, tt.readings, csnSyncThreshold)
 			if got.State != tt.wantState {
-				t.Errorf("State = %q, want %q (lag %q, err %q)",
-					got.State, tt.wantState, got.LagSeconds, got.LastError)
+				t.Errorf("State = %q, want %q (lag %q, err %q)%s",
+					got.State, tt.wantState, got.LagSeconds, got.LastError,
+					becauseTail(tt.because))
 			}
 			if tt.wantLag != "" && got.LagSeconds != tt.wantLag {
 				t.Errorf("LagSeconds = %q, want %q", got.LagSeconds, tt.wantLag)
+			}
+			if tt.wantNoLag && got.LagSeconds != "" {
+				t.Errorf("LagSeconds = %q, want no lag figure at all (state %q)%s",
+					got.LagSeconds, got.State, becauseTail(tt.because))
 			}
 			if tt.wantNoError && got.LastError != "" {
 				t.Errorf("LastError = %q, want empty", got.LastError)
 			}
 			for _, want := range tt.wantErrHas {
 				if !strings.Contains(got.LastError, want) {
-					t.Errorf("LastError = %q, want it to mention %q", got.LastError, want)
+					t.Errorf("LastError = %q, want it to mention %q%s",
+						got.LastError, want, becauseTail(tt.because))
 				}
 			}
 		})
 	}
+}
+
+// becauseTail renders a case's rule statement as a tail on a failure message,
+// so the output says WHY the expectation is what it is.
+func becauseTail(because string) string {
+	if because == "" {
+		return ""
+	}
+	return "\n  rule: " + because
 }
 
 func mustCSNTime(t *testing.T, csns []string) time.Time {

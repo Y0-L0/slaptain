@@ -377,6 +377,12 @@ cluster-helm-uninstall:
 ## them here as well would break that coupling and is how a site ends up running
 ## a slapd that does not match the operator managing it.
 ##
+## The one exception is the exporter sidecar (cluster.monitoring.enabled): it is
+## its own version line, and the operator defaults it to a compiled-in exporter
+## RELEASE, not to its own tag. To run a locally built, unreleased exporter, pin
+## it: HELM_ARGS="--set cluster.images.exporter.tag=<exporter image tag>" (the
+## tag `make show-tag` prints).
+##
 ## Measured 2026-09-28 walking docs/MULTI-SITE.md by hand at three sites: with
 ## nothing pinned anywhere, operator sha-f3782be produced slapd sha-f3782be at
 ## every site, and slctl inspect read 18/18.

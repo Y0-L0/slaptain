@@ -36,9 +36,10 @@ spec:
          here overrides that for the field it names. */ -}}
   {{- $si := .Values.images.slapd | default dict -}}
   {{- $ii := .Values.images.init | default dict -}}
-  {{- if or $si.repository $si.tag $si.pullPolicy $ii.repository $ii.tag $ii.pullPolicy }}
+  {{- $ei := .Values.images.exporter | default dict -}}
+  {{- if or $si.repository $si.tag $si.pullPolicy $ii.repository $ii.tag $ii.pullPolicy $ei.repository $ei.tag $ei.pullPolicy }}
   images:
-    {{- range $k, $img := (dict "slapd" $si "init" $ii) }}
+    {{- range $k, $img := (dict "slapd" $si "init" $ii "exporter" $ei) }}
     {{- if or $img.repository $img.tag $img.pullPolicy }}
     {{ $k }}:
       {{- with $img.repository }}
@@ -162,5 +163,10 @@ spec:
 
   {{- with .Values.imagePullSecrets }}
   imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  {{- with .Values.monitoring }}
+  monitoring:
     {{- toYaml . | nindent 4 }}
   {{- end }}

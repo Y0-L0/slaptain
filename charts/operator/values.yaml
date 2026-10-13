@@ -100,6 +100,35 @@ multus:
   # Example: "infra/replication-net"
   network: ""
 
+# Surface 3 (ADR-033): a PodMonitor for the slapd exporter sidecar (port
+# `metrics`, 9330) on every slapd pod — selected by app.kubernetes.io/name: slapd.
+# It lives in this per-site chart rather than in charts/slapd-mesh because the
+# mesh chart renders byte-identically at every site (ADR-028) and a PodMonitor
+# would fail it outright at a site without the Prometheus Operator CRDs.
+# Requires those CRDs at this site.
+#
+# Every target gets job="slapd-exporter" (fixed; the alert rules select on it),
+# the Prometheus Operator's namespace/pod/container, and two slaptain labels
+# read off the pod's app.kubernetes.io/instance:
+#   cluster  the SlapdCluster name, with a trailing "-readonly" stripped
+#   role     readonly when the instance ends in "-readonly", else readwrite
+# Ambiguity, documented rather than solved: a SlapdCluster whose own NAME ends
+# in "-readonly" (e.g. "edge-readonly") has its read-write pods reported as
+# cluster="edge", role="readonly". Don't name a cluster that way.
+#
+# The exporter endpoint is plain HTTP with no authentication. networkPolicy
+# below covers the operator's port only, not this one.
+slapdPodMonitor:
+  enabled: false
+  interval: "30s"
+  scrapeTimeout: "10s"
+  # Extra labels on the PodMonitor (e.g. to match a podMonitorSelector).
+  labels: {}
+  # Which namespaces to look for slapd pods in. Default: every namespace.
+  # Narrow it with {matchNames: [ns1, ns2]}.
+  namespaceSelector:
+    any: true
+
 networkPolicy:
   # Create a NetworkPolicy restricting the operator's metrics port to
   # namespaces labelled `metrics: enabled`. Requires metrics.enabled=true.

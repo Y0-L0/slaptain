@@ -130,7 +130,7 @@ func resolveImageRef(img ldapv1alpha1.SlapdImageConfig, defaultRepo, defaultTag 
 }
 
 // defaultDataPlaneRepo derives the default repository for a data-plane image
-// (component "slapd" or "slapd-init") from the operator's own image reference,
+// (component "slapd", "slapd-init" or "slapd-exporter") from the operator's own image reference,
 // so unpinned operand images live in the same registry/path as the operator.
 // It swaps the trailing path segment of the operator repository (e.g.
 // ".../slaptain/operator") for the component name (".../slaptain/slapd"). Falls
@@ -1344,6 +1344,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		},
 		VolumeClaimTemplates: volumeClaimTemplates,
 	}
+	r.appendExporterSidecar(sc, &spec.Template.Spec)
 
 	return spec
 }

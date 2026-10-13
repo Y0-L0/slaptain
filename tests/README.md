@@ -220,6 +220,37 @@ separates measured isolated staleness (3) from the measured storm (thousands).
 reads them from the `slapd-test-passwords` Secret (`readpw-*` keys), which is provided by
 `tests/resources/example/readpw-secret.yaml`. Tests skip gracefully when keys are absent.
 
+**Monitor specs** (`tunables_test.go`, `E2E_LABEL_FILTER=monitor`; ungated) check
+that every pod, RW and RO, has a `cn=Monitor` readable by the node-local
+replication identities and closed to everyone else. They also check that
+nothing writes to the monitor database at rest (90 s observation window;
+run it alone with `monitor-at-rest`) and that every operator-managed mdb
+database exposes `olmMDB*` statistics. **The `olmMDB*` spec is red by design on
+a cluster that was upgraded rather than recreated, until its pods restart.**
+back-mdb attaches a database's statistics only if the monitor database existed
+when that database was opened, and on an upgraded cluster every database
+predates its monitor database (ADR-033 amendment 2026-10-08).
+
+**The exporter sidecar is on in the fixture.** `tests/e2e.sh` renders
+`cluster.monitoring.enabled: true` into the mesh values (`E2E_MONITORING=0` renders
+`false` — to show the sidecar spec red, or to watch the opt-in roll), so every run deploys
+the ADR-033 Surface 3 sidecar and every spec runs against a monitored pod shape.
+`spec.images.exporter` is pinned to the exporter image built for the run, because
+the operator's compiled-in default names a released exporter version that a
+development build may not have published yet. `monitor_sidecar_test.go` (`E2E_LABEL_FILTER=monitor-sidecar`,
+also selected by `monitor`; ungated) asserts on every RW and RO pod: an
+`exporter` container Running with zero restarts, the pod Ready, and
+`GET :9330/metrics` through the API server's pod proxy answering 200 with the
+curated families of ADR-033 decision 4: `openldap_up 1`,
+`openldap_exporter_{dials,binds}_total{result="ok"}`, one representative of every
+curated group (operations by `op`, connections, threads, waiters by `direction`,
+sent traffic, the start time), no upstream-shaped family and no `dn` label, and
+`openldap_mdb_*` for every SlapdDatabase suffix (plus each replicated database's
+`cn=accesslog-<db>` on RW pods). The expected suffixes come from the CRs, not
+from the pod. The whole judgement of a scrape is one pure function,
+`exporterContractProblems`. Against a cluster with
+monitoring off the spec is red at the missing container.
+
 ---
 
 ## Backup and restore tests

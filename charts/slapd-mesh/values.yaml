@@ -159,6 +159,13 @@ cluster:
   #    repository: ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-init
   #    tag: latest
   #    pullPolicy: IfNotPresent
+  #  exporter:      # the monitoring sidecar; its own version line. Empty = the
+  #                 # slapd-exporter release the operator was built against,
+  #                 # beside the operator's registry; an operator upgrade
+  #                 # leaves it alone unless that release moved.
+  #    repository: ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-exporter
+  #    tag: 0.0.1
+  #    pullPolicy: IfNotPresent
 
   ldap:
     # -- TLS. Cross-site syncrepl runs over ldaps, so this stays on for a mesh.
@@ -258,6 +265,13 @@ cluster:
   # -- Image pull secrets for private registries.
   imagePullSecrets: []
   #  - name: ghcr-pull-secret
+
+  # -- spec.monitoring (ADR-033 Surface 3): the slapd exporter sidecar, serving
+  # openldap_* metrics on :9330/metrics. Opt-in; flipping it rolls the pods once.
+  # Passed through only when set — unset leaves the decision to the operator.
+  monitoring: {}
+  #  enabled: true
+  #  resources: {}    # the exporter sidecar's own; no default, unset declares nothing
 
 # -- Keep the SlapdDatabase and SlapdSchema objects when the release is removed
 # (`helm.sh/resource-policy: keep`). On by default: a database is the

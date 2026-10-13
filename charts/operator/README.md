@@ -67,7 +67,12 @@ kubectl apply --server-side -f charts/operator/crds/
 | `metrics.serviceMonitor.scrapeTimeout` | `10s` | Scrape timeout. |
 | `metrics.serviceMonitor.labels` | `{}` | Extra labels on the `ServiceMonitor` (e.g. to match a Prometheus Operator `serviceMonitorSelector`). |
 | `multus.network` | `""` | Attach the operator pod to a Multus replication network (`namespace/name` or `name`). Required for `ExternalPeer` discovery mode. |
-| `networkPolicy.enabled` | `false` | Create a `NetworkPolicy` restricting metrics port access to labeled namespaces. Requires `metrics.enabled=true`. |
+| `slapdPodMonitor.enabled` | `false` | Create a Prometheus Operator `PodMonitor` for the slapd exporter sidecar (port `metrics`) on every pod labelled `app.kubernetes.io/name: slapd`. Requires the Prometheus Operator CRDs. It ships in this per-site chart, not in `slapd`/`slapd-mesh`, because the mesh chart renders identically at every site and a site without the CRDs would fail it. Targets get `job="slapd-exporter"`, `cluster` (the pod's `app.kubernetes.io/instance` with a trailing `-readonly` stripped) and `role` (`readonly` or `readwrite`). A SlapdCluster whose own name ends in `-readonly` is misreported as the read-only fleet of the name without it — don't name one that way. |
+| `slapdPodMonitor.interval` | `30s` | Scrape interval. |
+| `slapdPodMonitor.scrapeTimeout` | `10s` | Scrape timeout. |
+| `slapdPodMonitor.labels` | `{}` | Extra labels on the `PodMonitor` (e.g. to match a `podMonitorSelector`). |
+| `slapdPodMonitor.namespaceSelector` | `{any: true}` | Which namespaces to look for slapd pods in. Narrow with `{matchNames: [...]}`. |
+| `networkPolicy.enabled` | `false` | Create a `NetworkPolicy` restricting the operator's metrics port to namespaces labelled `metrics: enabled`. Requires `metrics.enabled=true`. Label the namespace your Prometheus runs in (`kubectl label namespace monitoring metrics=enabled`), or the policy shuts it out too. It does not cover the slapd exporter's port. |
 
 See `values.yaml` for the authoritative defaults and inline comments.
 

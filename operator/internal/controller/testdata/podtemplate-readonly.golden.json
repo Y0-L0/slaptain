@@ -1,0 +1,231 @@
+{
+  "metadata": {
+    "labels": {
+      "app.kubernetes.io/instance": "slapd-readonly",
+      "app.kubernetes.io/name": "slapd"
+    },
+    "annotations": {
+      "k8s.v1.cni.cncf.io/networks": "infra/replication-net"
+    }
+  },
+  "spec": {
+    "volumes": [
+      {
+        "name": "run",
+        "emptyDir": {}
+      },
+      {
+        "name": "tmp",
+        "emptyDir": {}
+      },
+      {
+        "name": "database-dirs",
+        "configMap": {
+          "name": "slapd-database-dirs",
+          "optional": true
+        }
+      },
+      {
+        "name": "tls",
+        "secret": {
+          "secretName": "slapd-tls"
+        }
+      }
+    ],
+    "initContainers": [
+      {
+        "name": "init",
+        "image": "registry.example/slaptain/slapd-init:1.2.3",
+        "env": [
+          {
+            "name": "LDAP_ROOT_PW",
+            "valueFrom": {
+              "secretKeyRef": {
+                "name": "slapd-config-password",
+                "key": "root-password"
+              }
+            }
+          },
+          {
+            "name": "LDAP_TLS_ENABLED",
+            "value": "true"
+          },
+          {
+            "name": "CONFIG_DIR",
+            "value": "/config"
+          },
+          {
+            "name": "DATA_DIR",
+            "value": "/data"
+          },
+          {
+            "name": "ACCESSLOG_DIR",
+            "value": "/accesslog"
+          },
+          {
+            "name": "DATABASE_DIRS_PATH",
+            "value": "/etc/slaptain/database-dirs"
+          },
+          {
+            "name": "LDAP_TLS_CACERT_PATH",
+            "value": "/etc/openldap/tls/ca.crt"
+          },
+          {
+            "name": "LDAP_TLS_CERT_PATH",
+            "value": "/etc/openldap/tls/tls.crt"
+          },
+          {
+            "name": "LDAP_TLS_KEY_PATH",
+            "value": "/etc/openldap/tls/tls.key"
+          },
+          {
+            "name": "LDAP_READONLY_REPLICA",
+            "value": "true"
+          },
+          {
+            "name": "LDAP_REPLICATION_ENABLED",
+            "value": "true"
+          }
+        ],
+        "resources": {},
+        "volumeMounts": [
+          {
+            "name": "config",
+            "mountPath": "/config"
+          },
+          {
+            "name": "data",
+            "mountPath": "/data"
+          },
+          {
+            "name": "tmp",
+            "mountPath": "/tmp"
+          },
+          {
+            "name": "database-dirs",
+            "readOnly": true,
+            "mountPath": "/etc/slaptain/database-dirs"
+          },
+          {
+            "name": "tls",
+            "readOnly": true,
+            "mountPath": "/etc/openldap/tls"
+          }
+        ],
+        "securityContext": {
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "readOnlyRootFilesystem": true,
+          "allowPrivilegeEscalation": false
+        }
+      }
+    ],
+    "containers": [
+      {
+        "name": "slapd",
+        "image": "registry.example/slaptain/slapd:1.2.3",
+        "args": [
+          "-h",
+          "ldap://:1024/ ldaps://:1025/ ldapi://%2frun%2fopenldap%2fslapd.ldapi",
+          "-d",
+          "256",
+          "-F",
+          "/config/slapd.d"
+        ],
+        "ports": [
+          {
+            "name": "ldap",
+            "containerPort": 1024,
+            "protocol": "TCP"
+          },
+          {
+            "name": "ldaps",
+            "containerPort": 1025,
+            "protocol": "TCP"
+          }
+        ],
+        "resources": {
+          "limits": {
+            "memory": "1Gi"
+          },
+          "requests": {
+            "cpu": "250m",
+            "memory": "512Mi"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "config",
+            "mountPath": "/config"
+          },
+          {
+            "name": "data",
+            "mountPath": "/data"
+          },
+          {
+            "name": "run",
+            "mountPath": "/run/openldap"
+          },
+          {
+            "name": "tls",
+            "readOnly": true,
+            "mountPath": "/etc/openldap/tls"
+          }
+        ],
+        "readinessProbe": {
+          "exec": {
+            "command": [
+              "/usr/bin/ldapwhoami",
+              "-x",
+              "-H",
+              "ldap://localhost:1024"
+            ]
+          },
+          "timeoutSeconds": 5,
+          "periodSeconds": 10,
+          "successThreshold": 1,
+          "failureThreshold": 6
+        },
+        "startupProbe": {
+          "exec": {
+            "command": [
+              "/usr/bin/ldapwhoami",
+              "-x",
+              "-H",
+              "ldap://localhost:1024"
+            ]
+          },
+          "timeoutSeconds": 5,
+          "periodSeconds": 5,
+          "failureThreshold": 60
+        },
+        "securityContext": {
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "readOnlyRootFilesystem": true,
+          "allowPrivilegeEscalation": false
+        }
+      }
+    ],
+    "securityContext": {
+      "runAsUser": 1024,
+      "runAsGroup": 1024,
+      "runAsNonRoot": true,
+      "fsGroup": 1024,
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      }
+    },
+    "imagePullSecrets": [
+      {
+        "name": "regcred"
+      }
+    ]
+  }
+}

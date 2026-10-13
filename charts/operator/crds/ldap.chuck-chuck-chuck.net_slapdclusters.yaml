@@ -92,9 +92,11 @@ spec:
               imagePullSecrets:
                 description: |-
                   imagePullSecrets references Secrets in the same namespace that the kubelet
-                  uses to pull the slapd and slapd-init images. Each Secret must be of
-                  type kubernetes.io/dockerconfigjson. Equivalent to setting imagePullSecrets
-                  on the StatefulSet pod template directly.
+                  uses to pull the slapd and slapd-init images — and, with spec.monitoring
+                  enabled, the exporter sidecar's image (slapd-exporter, beside the operator's image by default), so
+                  list a Secret for that registry too when it is private. Each Secret must
+                  be of type kubernetes.io/dockerconfigjson. Equivalent to setting
+                  imagePullSecrets on the StatefulSet pod template directly.
 
                   Alternative if you standardize pull secrets at the namespace level: skip
                   this field and patch the default ServiceAccount in the workload namespace
@@ -122,6 +124,52 @@ spec:
                   operator defaults both slapd and slapd-init to its own registry/path at its
                   own tag (see SlapdImages). Set to override the repository, tag, or pull policy.
                 properties:
+                  exporter:
+                    description: |-
+                      exporter is the image the slapd exporter sidecar runs (spec.monitoring,
+                      ADR-033 Surface 3). The exporter is its own image, slapd-exporter, with
+                      its own version line (git tags exporter/vX.Y.Z, image tag X.Y.Z). When
+                      the repository is empty it is derived from the operator's like slapd and
+                      slapd-init (trailing path segment swapped for slapd-exporter); when the
+                      tag is empty it is the exporter release compiled into the operator — NOT
+                      the operator's own tag. An operator upgrade therefore leaves the sidecar,
+                      and the pods, unchanged unless that compiled-in release moved. A tag
+                      alone keeps the derived repository; repository and tag together are used
+                      exactly. pullPolicy: once this object is present at all, the CRD default
+                      stores IfNotPresent, and that is what the sidecar gets unless set
+                      otherwise; only with the object absent is the pull policy left to the
+                      API server's tag-based default (Always for :latest, IfNotPresent
+                      otherwise).
+
+                      The operator passes the sidecar no command and no arguments: the image's
+                      entrypoint and the exporter's flag defaults (ldapi socket in
+                      /run/openldap, SASL EXTERNAL, :9330/metrics) are the whole contract, so
+                      any slapd-exporter release can be pinned here. Pin it to run a different
+                      exporter version; it is not pinned in lockstep with slapd and init. A
+                      future operator that changes the sidecar's pod-side shape (mounts, port,
+                      securityContext) still rolls a pinned cluster. Ignored while monitoring
+                      is off.
+                    properties:
+                      pullPolicy:
+                        default: IfNotPresent
+                        description: pullPolicy is the image pull policy.
+                        type: string
+                      repository:
+                        description: |-
+                          repository is the image repository (e.g. "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd").
+                          When empty, the operator derives it from its own image reference
+                          (OPERATOR_IMAGE) by swapping the trailing path segment for "slapd"/"slapd-init",
+                          so unpinned operand images live in the same registry/path as the operator.
+                          Falls back to the canonical upstream location when OPERATOR_IMAGE is unset.
+                        type: string
+                      tag:
+                        description: |-
+                          tag is the image tag. When empty, the operator substitutes its own image
+                          tag at reconcile time — so "I want slapd/init at the version that shipped
+                          with this operator" is the implicit default. Set this explicitly only when
+                          you need to pin slapd/init to a different version than the operator.
+                        type: string
+                    type: object
                   init:
                     description: init is the slapd-init bootstrap container image.
                     properties:
@@ -335,6 +383,93 @@ spec:
                   Unset — the default, and what every existing deployment has — changes
                   nothing at all: the mesh code never runs and the spec is used verbatim.
                 type: string
+              monitoring:
+                description: |-
+                  monitoring configures Surface 3 of ADR-033: the slapd exporter sidecar,
+                  which reads cn=Monitor over the pod's ldapi socket and serves it as
+                  Prometheus metrics. Unset adds nothing to the pod.
+                properties:
+                  enabled:
+                    description: |-
+                      enabled adds the exporter sidecar to every slapd pod, read-write and
+                      read-only alike. It runs the slapd-exporter image (spec.images.exporter;
+                      by default the exporter release compiled into the operator) with no
+                      command or arguments, so the exporter's defaults apply: it binds SASL
+                      EXTERNAL over ldapi:///run/openldap/slapd.ldapi — no password, no
+                      Secret — and serves /metrics on port 9330 (named "metrics").
+
+                      Opt-in: unset means false. Off or unset adds NOTHING to the pod template,
+                      so upgrading the operator onto an existing cluster rolls no pod. Flipping
+                      it changes the pod template and therefore rolls the pods once, when the
+                      user flips it and only then (ADR-013 amendment 2026-10-08: a field whose
+                      purpose is to change the pod is not a roll trigger).
+                    type: boolean
+                  resources:
+                    description: |-
+                      resources sets the exporter sidecar's compute requests and limits. No
+                      default: the exporter is small and collects only on scrape. The field
+                      exists for namespaces whose ResourceQuota or LimitRange rejects, or
+                      silently defaults, a container that declares nothing — there the sidecar
+                      would otherwise block or skew the whole pod. Separate from spec.resources,
+                      which belongs to the slapd container.
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This field depends on the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
+                type: object
               persistence:
                 description: persistence configures persistent storage for config
                   and data volumes.

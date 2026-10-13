@@ -57,6 +57,14 @@ images:
     repository: ""
     tag: ""
     pullPolicy: ""
+  # The exporter sidecar (monitoring.enabled), its own image and version line.
+  # Empty means the slapd-exporter release the operator was built against, in
+  # the operator's registry; an operator upgrade leaves it alone unless that
+  # release moved. Pin it to run another exporter version.
+  exporter:
+    repository: ""
+    tag: ""
+    pullPolicy: ""
 
 # -- Number of read-write replicas. Set replication.enabled=true for >1.
 # replicas: 1                       # unset → the operator default (1)
@@ -154,6 +162,13 @@ resources: {}
 # -- List of image pull secrets for private registries.
 imagePullSecrets: []
 # - name: ghcr-pull-secret
+
+# -- spec.monitoring (ADR-033 Surface 3): the slapd exporter sidecar, serving
+# openldap_* metrics on :9330/metrics. Opt-in; flipping it rolls the pods once.
+# Passed through only when set — unset leaves the decision to the operator.
+monitoring: {}
+#  enabled: true
+#  resources: {}    # the exporter sidecar's own; no default, unset declares nothing
 
 # -- Cross-site fan-out for spec.replication.externalPeers: how many remote pods
 # each local pod opens a syncrepl connection to, per peer. Unset → 1. A per-peer

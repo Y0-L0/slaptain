@@ -442,7 +442,7 @@ harmless" before bothering.
 | Status / condition | Meaning |
 |---|---|
 | `status.replicationMode` | Observed mode; lags `spec` briefly during a transition. |
-| `status.externalPeerStatuses[]` | Per-peer `replicationState` (`Synced`/`Lagging`/`PartiallyVerified`/`Unreachable`), `lagSeconds`, `discoveredAddresses`. `PartiallyVerified` = the peer answered and everything read is current, but at least one database yielded no readable `contextCSN` (`lastError` names it) — treat it as "not verified", not as Synced. |
+| `status.externalPeerStatuses[]` | Per-peer `replicationState` (`Synced`/`Lagging`/`PartiallyVerified`/`Unreachable`), `lagSeconds`, `discoveredAddresses`. `PartiallyVerified` = at least one database yielded no readable `contextCSN` on one side of the comparison (`lastError` names the databases) — treat it as "not verified", not as Synced. The unreadable side can be the local one: no local baseline, no comparison, so check this cluster's own `ReplicationConverged` before blaming the source. |
 | condition `ReplicationConverged` | Local CSN convergence across pods, judged **per database** and ANDed; `Unknown` when a pod×database pair could not be read. |
 | condition `ReplicationModePeerWiringRequired` | `True` after promotion — message lists the `[SOURCE-SIDE]` wiring owed. |
 | condition `ReplicationModeDemoteWiringRequired` | `True` in consumer-only with external peers — the demote-side handoff. |

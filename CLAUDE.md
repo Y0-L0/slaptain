@@ -275,8 +275,14 @@ vector belongs to one database on one pod and is only comparable to the same dat
 vector elsewhere; `ReplicationConverged` is the AND over databases (`CSNsMatch` /
 `CSNsDiverged` naming the database / `CSNQueriesIncomplete` when a pod×database pair could
 not be read — unreadable evidence never counts toward True). `PartiallyVerified` is the
-peer-side counterpart: the peer answered and everything read is current, but at least one
-database yielded no readable contextCSN (`lastError` names it).
+cross-site counterpart: everything comparable is current, but at least one database yielded
+no readable contextCSN on one side of the comparison (`lastError` names the databases).
+**Either side** — a missing LOCAL baseline is the same absence as a peer that would not
+answer, and it used to read `Synced` because a zero baseline made every remote CSN look
+ahead and the remote-ahead clamp zeroed the lag (ADR-008 amendment 2026-10-06). The one
+asymmetry is deliberate: a peer answering with no CSN while we hold a baseline is a measured
+deficit and stays `Lagging`. The peer check is no longer skipped when local reads fail, so a
+site can no longer publish `connected: false` for a peer it never contacted.
 
 **Reconcile order (SlapdCluster controller):**
 1. Fetch `SlapdCluster` — NotFound → return nil (deleted)

@@ -317,6 +317,110 @@ weeks: if a status field is worth shipping, it is worth one e2e.
 
 ---
 
+## 2026-10-06: a database we could not read on OUR side reported the PEER `Synced` — and when every database failed, the peer was never asked at all
+
+Same family as the 2026-09-14 entry above, and the mirror image of it: that one
+computed a peer's verdict from whichever database answered *there*, this one
+from a database that answered nowhere *here*. Two halves, one cause — missing
+evidence converted into a positive claim about health.
+
+**Symptom, half one (the pure verdict).** A peer reads
+`replicationState: Synced` with an empty `lastError` for a database whose every
+*local* contextCSN read failed. Reproduced by execution against the pre-fix tree
+with the local baseline for one of two databases removed: `state="Synced"
+lag="" lastError=""`. Live on any cluster where one database's local reads fail
+while another's succeed — a per-database bind rejection, a database the
+operator's identity cannot read yet, an accesslog that outgrew its limits.
+
+**Symptom, half two (the caller).** When *every* local read fails, the site
+publishes `connected: false` for every external peer, with an empty
+`replicationState` and no `lastChecked` — a verdict on peers it never dialled.
+Measured on the three-site lab on 2026-10-06 during a 2.5-minute inbound
+blackout of one site (`monitoring/demo/blackout.yaml`): the cut site reported
+both healthy peers down, while the two healthy peers correctly reported the cut
+site `Unreachable`. The alert that fires off this is the one that names the
+wrong site, which is why `SlaptainPeerUnverified` had to exist at all.
+
+**Root cause.** `localNewest` is built in `evaluateLocalConvergence` from
+readings that *parsed* — a failed read is skipped, so the database has no entry
+in the map at all. In `evaluatePeerConvergence` that absence then walked
+straight through every guard:
+
+1. `localNewest[suffix]` on a missing key is the zero `time.Time`;
+2. `lag := localNewest[suffix].Sub(remote)` is therefore hugely negative;
+3. the remote-ahead/clock-skew clamp (`if lag < 0 { lag = 0 }`) turns that into
+   **zero lag** — the clamp is right for what it was written for, a peer that
+   received a write first, and it cannot tell that case from this one;
+4. `verified[suffix]` is true, because the *remote* did answer, so the database
+   is not counted as unverified either;
+5. verdict: `Synced`, `lastError` empty.
+
+Half two is the same absence one level up: `if len(dbInfos) > 0 && len(localNewest) > 0`
+skipped the peer check entirely, and `Connected` was then derived from an unset
+`ReplicationState` — `"" != Unreachable` is false, so `connected: false`. The
+gate was presumably written as "do not compare against nothing", which is the
+right instinct and the wrong place: the comparison is per database, so the
+verdict belongs to the pure function that knows which databases it could not
+read.
+
+**Fix.** One rule, applied in `evaluatePeerConvergence`: a suffix whose
+**local** baseline is zero or absent has no comparison basis. It is unverified —
+named in `lastError`, contributing to `PartiallyVerified` — and never
+contributes to `Synced` or to a lag figure. The check is on the *value*
+(`IsZero()`), not on the key, because absent and zero are the same absence and a
+later refactor that pre-seeds a key per database must not reopen the hole. It is
+placed **before** the `remote.IsZero()` branch: checked after it, a database
+empty on both sides would land in that branch, fall through as "nothing to
+compare", and still be counted verified. Caller side, the `len(localNewest) > 0`
+condition is deleted, so the peer is actually contacted and the blame lands on
+the side that earned it. The zero-*database* case still skips — there is no
+suffix to ask about, so a dial would yield `Unreachable` for a peer nobody asked
+anything — but it now writes a `lastError` saying so, rather than leaving a bare
+`connected: false`.
+
+**The asymmetry is load-bearing.** The rule is one-sided on purpose:
+
+- zero **local** baseline, remote readable → unverified (new);
+- zero **remote** value, local baseline known → **`Lagging`** (unchanged).
+
+The second is not missing evidence. We read both sides and theirs is empty while
+ours has data: that is a peer that has not received the database, the single
+most actionable cross-site fault there is, and `PartiallyVerified` would lose
+it. "Zero on either side is unverified" is the natural wrong generalisation, and
+a mutation run of exactly that turned both `Lagging` cases red.
+
+**Why it was hard to spot.** Every ingredient was individually correct. The map
+is built from successful reads *because* a failed read has no timestamp to
+record; the clamp exists for a real case and is right for it; `verified` means
+"the remote answered" and did so accurately. The defect is only visible where
+the three meet, and it presents as the quietest possible output: `Synced`, no
+lag, no error — a health claim with nothing in it to contradict. The caller-side
+half was worse, because it was *loud* and pointed the wrong way: a site under a
+network fault blaming two healthy peers reads as a three-way outage, and the
+natural next step is to go and look at the peers.
+
+**Coverage.** Four rows in `csn_convergence_test.go`, red first against this
+tree (`State = "Synced", want "PartiallyVerified"` three times): the absent-key
+case, the explicit-zero-value case, the empty-on-both-sides case, and the
+asymmetry guard that restates the remote-zero row with the rule named, so an
+implementation that collapses the two directions fails with a message saying
+what it broke. The caller-side half has **no unit test and no injection seam** —
+`checkPeerCSNConvergence` calls package-level `queryContextCSN` directly — and
+building one was ruled out of scope. Its acceptance test is a re-run of
+`monitoring/demo/blackout.yaml` against a deployed build, where the cut site
+must report its peers with a filled-in verdict instead of a bare
+`connected: false`.
+
+**Lesson:** a clamp is an assumption about which of two readings is wrong. This
+one assumed "the remote is ahead" and was given "we have no reading at all"; it
+answered the question it was asked and the answer was health. Before clamping a
+difference, check that both operands are evidence. And the caller-side half
+repeats the 2026-09-14 lesson with the sign flipped — a verdict skipped is still
+a verdict published, because something downstream derives a boolean from the
+field you left unset.
+
+---
+
 ## 2026-09-14: following ADR-025 D1 switched OFF ADR-025 D5 — `DataPresent` never engaged on a never-seeded database
 
 **Symptom (measured, not argued).** On a healthy three-site mesh, read-only

@@ -840,25 +840,34 @@ type ExternalPeerReplicationState string
 
 const (
 	// ReplicationSynced means every database's newest contextCSN on the peer is
-	// within the sync threshold — and every database was actually read.
+	// within the sync threshold — and every database was actually read on BOTH
+	// sides of the comparison, here as well as there.
 	ReplicationSynced ExternalPeerReplicationState = "Synced"
 	// ReplicationLagging means at least one database's newest contextCSN on the
 	// peer is behind the local newest for that same database.
 	ReplicationLagging ExternalPeerReplicationState = "Lagging"
 	// ReplicationPartiallyVerified means the peer answered and every database
-	// that could be read is within the sync threshold, but at least one database
-	// yielded no readable evidence at all (lastError names it).
+	// that could be compared is within the sync threshold, but at least one
+	// database yielded no readable evidence on one side of the comparison or the
+	// other (lastError names it).
+	//
+	// EITHER side. The missing evidence is usually the peer's, and that is what
+	// the state was introduced for: CSN queries are per-database LDAP operations
+	// with per-database bind identities (ADR-008), so one database can fail while
+	// another on the same host succeeds — measured on 2026-09-13, where db1 bound
+	// and answered while db2's bind returned err=49 against the same pod. But a
+	// missing LOCAL baseline is the same absence, and reading the state as
+	// "the peer is at fault" sends a debugger to the wrong end of the link: when
+	// THIS site cannot read its own contextCSN for a database, it has no
+	// comparison basis either, and claiming health it cannot see is the defect
+	// (ADR-008 amendment 2026-10-06). Check lastError, then check this site's
+	// own ReplicationConverged and PodsResponsive before suspecting the peer.
 	//
 	// It exists because "we know nothing" and "we know some of it" are different
-	// states, and the second one is what the operator actually observes: CSN
-	// queries are per-database LDAP operations with per-database bind identities
-	// (ADR-008), so one database can fail while another on the same host
-	// succeeds — measured on 2026-09-13, where db1 bound and answered while db2's
-	// bind returned err=49 against the same pod. Folding that into Unreachable
-	// would state something false about the peer (it WAS reached) and seed a
-	// wrong decision in anything acting on the field; folding it into Synced is
-	// the defect this state was introduced to fix, a verdict computed from
-	// whichever database happened to answer.
+	// states. Folding it into Unreachable would state something false about the
+	// peer (it WAS reached) and seed a wrong decision in anything acting on the
+	// field; folding it into Synced is a verdict computed from whichever database
+	// happened to answer.
 	//
 	// Named for what is known rather than what is not: "Unknown" would discard
 	// the verified half, which is the informative half.
@@ -904,11 +913,18 @@ type ExternalPeerStatus struct {
 	// +optional
 	DiscoveredProviders []DiscoveredProvider `json:"discoveredProviders,omitempty"`
 	// replicationState reports the CSN convergence state of this peer, judged
-	// per database (a contextCSN vector is only comparable within one suffix).
-	// Synced: every database was read and each is within threshold of ours.
-	// Lagging: a database that WAS read is behind ours by more than the threshold.
-	// PartiallyVerified: the peer answered and everything read is current, but at
-	// least one database yielded no readable contextCSN (lastError names it).
+	// per database (a contextCSN vector is only comparable within one suffix),
+	// and from evidence read on BOTH sides of each comparison.
+	// Synced: every database was read here and there, and each is within
+	// threshold of ours.
+	// Lagging: a database that WAS read on both sides is behind ours by more
+	// than the threshold.
+	// PartiallyVerified: the peer answered and everything comparable is current,
+	// but at least one database yielded no readable contextCSN — on the peer, or
+	// on THIS site, which has no comparison basis without its own baseline
+	// (lastError names the databases, not the side). Before suspecting the peer,
+	// read this cluster's own ReplicationConverged and PodsResponsive
+	// conditions.
 	// Unreachable: no database on the peer could be read at all.
 	// +optional
 	ReplicationState ExternalPeerReplicationState `json:"replicationState,omitempty"`

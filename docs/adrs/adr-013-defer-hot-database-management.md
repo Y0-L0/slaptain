@@ -408,3 +408,29 @@ produced, because all three are *absences* rather than failures:
 3. Unrelated but found by the same second database: `slctl inspect` judged
    syncrepl on the FIRST data database only, including `rid-uniqueness`, whose
    entire purpose is a collision *between* databases.
+
+## Amendment, 2026-10-08: a field the user flips to change the pod is not a trigger
+
+The second amendment's rule reads "no spec field that can change during a cluster's
+life may reach the pod template". Taken literally it already outlaws `spec.logLevel`,
+whose own field comment says changing it rolls the pods, and it would outlaw
+`spec.monitoring.enabled` (ADR-033's exporter sidecar). That is not what the rule is
+for. Every trigger this ADR retired was a roll **nobody asked for**: a pod template
+that changed because a database was added, because the replica count moved, or because
+an operator upgrade derived something new.
+
+**The rule, stated with its scope:** no spec field that changes *as a side effect* — of
+another resource's lifecycle, of scaling, of state the operator derives, or of an
+operator upgrade — may reach the pod template. A field whose purpose is to change the
+pod — an image, `resources`, `logLevel`, `monitoring.enabled` — rolls when the user
+changes it, and only then.
+
+What makes such a field compliant, and what its tests must pin:
+
+- **Unset or off is byte-identical to the template without the feature.** Upgrading the
+  operator onto an existing cluster rolls nothing; the roll happens when the user opts in.
+- **It defaults to the state that adds nothing to the pod.** An opt-out field would make
+  the upgrade itself the trigger.
+
+`spec.monitoring.enabled` is the first field added under this statement; `logLevel` was
+compliant before it was written down.

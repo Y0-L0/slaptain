@@ -22,13 +22,16 @@
 # ingress stops this site SERVING its peers while it keeps RECEIVING from them.
 # The other sites' operators also bind this site to read contextCSN, so they
 # report it Unreachable. Peer status is consumer-side and one-directional
-# (ADR-008 amendment), which is why the dashboard gives A -> B and B -> A their
-# own rows.
+# (ADR-008 amendment). The two directions of one link therefore live in two
+# Grafanas: A -> B on A's dashboard, B -> A on B's (monitoring is site-local,
+# ADR-033 amendment 2026-10-09).
 #
 # NOT YET VERIFIED in this form. The ipBlock version was, and it did something
 # else than it claimed. Run it once and check that the cut site still reports
 # its own peers Synced — if it reports them down with no replicationState, the
-# local side is being blocked again and the policy is still too broad.
+# local side is being blocked again and the policy is still too broad. Whether
+# this site's own Prometheus still reaches the slapd exporter sidecars (port
+# 9330, inbound to the same pods) is part of what is unverified.
 #
 # The readiness and startup probes are exec probes on loopback (ADR-030), so no
 # probe traverses the network and none is affected.

@@ -549,22 +549,38 @@ helm-lint:
 verify-generated:
 	@./hack/verify-generated.sh
 
-## ── Monitoring (ADR-033 Surface 1) ──────────────────────────────────────────
-## Off-the-shelf components only: kube-state-metrics exports SlapdCluster and
-## SlapdDatabase state from CR status, kube-prometheus-stack scrapes every site
-## from one place. No slaptain code is involved, so these work against any
-## operator release whose status carries the fields. See docs/MONITORING.md.
+## ── Monitoring (ADR-033) ────────────────────────────────────────────────────
+## Site-local (ADR-033 amendment 2026-10-09): EVERY site runs the same stack
+## and scrapes only itself, over ClusterIP — kube-state-metrics (Surface 1),
+## the operator (Surface 2) and the slapd exporter sidecars (Surface 3). No
+## values file here carries a per-site fact. Per site, in this order:
+##   1. monitoring-stack-install   Prometheus Operator CRDs + Prometheus +
+##                                 Grafana, then the rules and the dashboard
+##   2. monitoring-ksm-install     its ServiceMonitor needs the CRDs from 1
+##   3. the operator, with its ServiceMonitor and slapd PodMonitor on. For an
+##      operator that is ALREADY INSTALLED, keep its values and add the three:
+##        helm upgrade slaptain ./charts/operator -n slaptain-system --reuse-values \
+##          --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true \
+##          --set slapdPodMonitor.enabled=true
+##      NOT operator-helm-install: that target sets image.repository/tag from
+##      THIS checkout, so on an existing install it swaps the operator image —
+##      which re-images every slapd and init left unpinned and rolls those
+##      pods, or sticks in ImagePullBackOff if that tag was never pushed. (The
+##      exporter sidecar is not among them: it has its own version line.) It is for
+##      installs running this checkout's own images:
+##        make operator-helm-install CONTEXT=<ctx> SITE_NAME=<site> \
+##          HELM_ARGS="--set metrics.enabled=true --set metrics.serviceMonitor.enabled=true --set slapdPodMonitor.enabled=true"
+##   4. the fixture / the SlapdCluster
+## monitoring-install does 1 and 2. See docs/MONITORING.md.
 MONITORING_NS ?= monitoring
 MONITORING_KSM_RELEASE ?= ksm
 MONITORING_STACK_RELEASE ?= monitoring
-## Node address and NodePort each site's kube-state-metrics is scraped on.
-## Must be the node's CROSS-SITE interface — on dual-homed nodes the one a
-## workstation reaches is a different NIC and is not registered with k8s, the
-## same trap E2E_NODE_ACCESS_IP exists for.
-MONITORING_KSM_NODEPORT ?= 30090
-## Values file for the observing site. The committed one carries RFC 5737
-## placeholders for the per-site scrape targets; keep your lab's real addresses
-## in a gitignored *.local.yaml copy and point this at it.
+## Chart versions, pinned: the values files are written against these. Helm
+## never upgrades a chart's crds/ — on a kube-prometheus-stack MAJOR bump,
+## apply the new Prometheus Operator CRDs yourself first (the chart's upgrade
+## notes name the exact command).
+MONITORING_STACK_VERSION ?= 92.2.0
+MONITORING_KSM_VERSION ?= 8.6.0
 MONITORING_STACK_VALUES ?= monitoring/kube-prometheus-stack-values.yaml
 ## Optional: pin the Gateway addresses so a URL survives a recreate. Unset
 ## means LB-IPAM assigns whatever is free.
@@ -575,11 +591,27 @@ monitoring-repo: ## Add/update the prometheus-community Helm repo
 	helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 	helm repo update prometheus-community
 
-## monitoring-ksm-install: kube-state-metrics at ONE site. Apply at EVERY site,
-## with the same values file — it carries no per-site fact:
-##   for ctx in site1 site2 site3; do make monitoring-ksm-install CONTEXT=$$ctx; done
+## monitoring-install: steps 1 and 2 above at ONE site. Loop it over the sites:
+##   for ctx in site1 site2 site3; do make monitoring-install CONTEXT=$$ctx; done
+monitoring-install:
+	$(MAKE) monitoring-stack-install CONTEXT=$(CONTEXT)
+	$(MAKE) monitoring-ksm-install CONTEXT=$(CONTEXT)
+
+## monitoring-stack-install: Prometheus + Grafana at ONE site, then the alert
+## rules and the dashboard. Install it first: it brings the Prometheus
+## Operator CRDs every later ServiceMonitor/PodMonitor needs.
+monitoring-stack-install:
+	$(HELM) upgrade --install $(MONITORING_STACK_RELEASE) prometheus-community/kube-prometheus-stack \
+		--version $(MONITORING_STACK_VERSION) \
+		--namespace $(MONITORING_NS) --create-namespace \
+		-f $(MONITORING_STACK_VALUES) --wait --timeout 10m
+	$(MAKE) monitoring-rules-apply monitoring-dashboard-apply CONTEXT=$(CONTEXT)
+
+## monitoring-ksm-install: kube-state-metrics at ONE site, with its
+## ServiceMonitor — so after monitoring-stack-install.
 monitoring-ksm-install:
 	$(HELM) upgrade --install $(MONITORING_KSM_RELEASE) prometheus-community/kube-state-metrics \
+		--version $(MONITORING_KSM_VERSION) \
 		--namespace $(MONITORING_NS) --create-namespace \
 		-f monitoring/kube-state-metrics-values.yaml --wait
 	@# The chart puts no checksum annotation on the custom-resource-state
@@ -590,15 +622,6 @@ monitoring-ksm-install:
 
 monitoring-ksm-uninstall:
 	$(HELM) uninstall $(MONITORING_KSM_RELEASE) --namespace $(MONITORING_NS)
-
-## monitoring-stack-install: Prometheus + Grafana at the ONE observing site.
-## Edit the per-site scrape targets in the values file first — they are node
-## addresses and cannot be derived from here.
-monitoring-stack-install:
-	$(HELM) upgrade --install $(MONITORING_STACK_RELEASE) prometheus-community/kube-prometheus-stack \
-		--namespace $(MONITORING_NS) --create-namespace \
-		-f $(MONITORING_STACK_VALUES) --wait --timeout 10m
-	$(MAKE) monitoring-rules-apply monitoring-dashboard-apply CONTEXT=$(CONTEXT)
 
 ## monitoring-gateway-apply: expose Grafana and Prometheus over Gateway API,
 ## one Gateway each (see the header of monitoring/gateway.yaml for why not one
@@ -639,7 +662,8 @@ monitoring-demo-blackout:
 	@test -n "$(SITE_POD_CIDR)" || { echo "SITE_POD_CIDR is required (that site's pod CIDR)"; exit 1; }
 	@sed 's|__SITE_POD_CIDR__|$(SITE_POD_CIDR)|' monitoring/demo/blackout.yaml | $(KUBECTL) apply -f -
 	@echo "blackout applied. Within ~60-120s the OTHER sites report this one Unreachable;"
-	@echo "this site reports PodsNotAnswering + CSNQueriesIncomplete, and (bug) its peers down."
+	@echo "this site reports PodsNotAnswering + CSNQueriesIncomplete, and its own"
+	@echo "slapd-exporter targets go down (the scrape is inbound to the slapd pods too)."
 
 ## monitoring-demo-restore: remove either fault injection. Name-based, so it
 ## does not need the parameter the cut was applied with.
@@ -650,15 +674,28 @@ monitoring-demo-restore:
 monitoring-stack-uninstall:
 	$(HELM) uninstall $(MONITORING_STACK_RELEASE) --namespace $(MONITORING_NS)
 
+## monitoring-rules-test: run the promtool unit tests over the alert rules.
+## They catch the one failure a live induction cannot tell apart from a healthy
+## system — an expression that silently matches nothing. promtool rejects a
+## PrometheusRule CR, so spec.groups is extracted first.
+## Needs promtool: `pacman -S prometheus` (Arch), or any distro's prometheus package.
+monitoring-rules-test:
+	@command -v promtool >/dev/null || { echo "promtool not found — install it (Arch: pacman -S prometheus)"; exit 1; }
+	@tmp=$$(mktemp -d) && yq '.spec' monitoring/prometheus-rules.yaml > $$tmp/rules.yaml && \
+		cp monitoring/prometheus-rules-test.yaml $$tmp/ && \
+		(cd $$tmp && promtool test rules prometheus-rules-test.yaml); \
+		rc=$$?; rm -rf $$tmp; exit $$rc
+
 monitoring-rules-apply: ## Apply the alert rules (needs the Prometheus Operator CRDs)
 	$(KUBECTL) apply -f monitoring/prometheus-rules.yaml
 
-## monitoring-dashboard-apply: (re)load the Grafana dashboard from the repo.
+## monitoring-dashboard-apply: (re)load the Grafana dashboards from the repo —
+## every monitoring/dashboards/*.json, one ConfigMap key per file.
 ## The JSON is the source of truth; a dashboard edited in the UI must be
-## exported back over this file or the next run of this target discards it.
+## exported back over its file or the next run of this target discards it.
 monitoring-dashboard-apply:
 	$(KUBECTL) create configmap slaptain-dashboards --namespace $(MONITORING_NS) \
-		--from-file=slaptain-mesh.json=monitoring/dashboards/slaptain-mesh.json \
+		--from-file=monitoring/dashboards/ \
 		--dry-run=client -o yaml | \
 		$(KUBECTL) label --local -f - grafana_dashboard=1 -o yaml --dry-run=client | \
 		$(KUBECTL) apply -f -

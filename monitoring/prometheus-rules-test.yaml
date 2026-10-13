@@ -1,0 +1,940 @@
+# promtool rule unit tests for the alert rules (ADR-033).
+#
+# These do NOT replace inducing the condition on a live mesh. They catch the
+# one failure a live induction cannot distinguish from a healthy system: an
+# expression that silently matches nothing. Each test feeds the rule the exact
+# series shape a SITE-LOCAL scrape produces (ADR-033 amendment 2026-10-09) and
+# asserts the alert both DOES and DOES NOT fire.
+#
+# There is no `site` label anywhere: the Prometheus evaluating these IS the
+# site. The three scrape shapes, as a ServiceMonitor/PodMonitor scrape renders
+# them:
+#
+#   Surface 1 — kube-state-metrics, ServiceMonitor with honorLabels: true.
+#     job/service = the Service name, endpoint = its port name, instance =
+#     <pod-ip>:<port>, container = kube-state-metrics, plus ksm's own
+#     customresource_{group,kind,version}. The series carries its OWN namespace
+#     (honorLabels keeps it instead of renaming it exported_namespace). The
+#     ServiceMonitor drops the target's `pod` label, and these series have
+#     none of their own, so they carry NO pod.
+#   Surface 2 — the operator, ServiceMonitor with honorLabels: true. Same
+#     target labels; container = manager. The target's `pod` is dropped the
+#     same way: per-pod series (suffix probes) keep their own `pod` (the slapd
+#     pod), the rest carry none.
+#   Surface 3 — the slapd exporter sidecar, the PodMonitor in charts/operator.
+#     job is relabelled to the fixed `slapd-exporter` (the default
+#     <namespace>/<podmonitor> would change with the release name), endpoint =
+#     the port name `metrics`, container = exporter, namespace/pod = the slapd
+#     pod's, plus `cluster` and `role` relabelled from the pod's
+#     app.kubernetes.io/instance.
+#
+# `job`, `instance`, `service`, `container` and `endpoint` differ between every pair of surfaces, which is what empties a
+# join written without `on (...)`.
+rule_files:
+  - rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ── slaptain.observation ────────────────────────────────────────────────
+  - interval: 1m
+    name: cluster anchor stale on a replicating cluster, silent on a standalone
+    input_series:
+      # A replicating cluster: anchor frozen at t=0, and it took a CSN
+      # measurement, so the gate matches.
+      - series: 'slaptain_cluster_observation_timestamp_seconds{namespace="ns",cluster="slapd",mesh="m",job="slaptain-metrics",service="slaptain-metrics",endpoint="metrics",container="manager",instance="192.0.2.17:8080"}'
+        values: '0+0x30'
+      - series: 'slaptain_csn_pairs_expected{namespace="ns",cluster="slapd",mesh="m",database="db",job="slaptain-metrics",service="slaptain-metrics",endpoint="metrics",container="manager",instance="192.0.2.17:8080"}'
+        values: '3+0x30'
+      # A healthy NON-replicated standalone at the same site: same frozen
+      # anchor, no CSN measurement. ADR-002's amendment says it never requeues,
+      # so its anchor ages without bound and this must stay silent.
+      - series: 'slaptain_cluster_observation_timestamp_seconds{namespace="ns",cluster="solo",mesh="",job="slaptain-metrics",service="slaptain-metrics",endpoint="metrics",container="manager",instance="192.0.2.17:8080"}'
+        values: '0+0x30'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: SlaptainClusterObservationStale
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: SlaptainClusterObservationStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: ns
+              cluster: slapd
+              mesh: m
+              job: slaptain-metrics
+              service: slaptain-metrics
+              endpoint: metrics
+              container: manager
+              instance: "192.0.2.17:8080"
+            exp_annotations:
+              summary: "slapd has not completed an observation pass for 8m 0s"
+              description: "The cluster controller's pass is not reaching its single recording point. Every other Surface 2 series for this cluster — CSN evidence counts, spread, discovered providers — is a frozen reading from before that, and reads healthy whatever has since happened. Look for the pass returning early: spec.suspend, an unresolvable meshRef, or a restore in progress (status.phase=Restoring). Surface 1's own conditions are frozen with it."
+
+  - interval: 1m
+    name: database anchor — a SLOW pass is not a stalled one
+    input_series:
+      # A healthy but SLOW database: the 5-minute resync floor plus a 5-minute
+      # pass, so it is observed every 10 minutes. Age sawtooths 0 -> 600.
+      #
+      # An anchor observed every C seconds is above a threshold T for C-T of
+      # each cycle, so with fuse F and evaluation interval E it fires only when
+      # C > T + F + E. At the 900s threshold that is C > 1080s, and this
+      # database is silent. At the `> 300` the obsmetrics comment prescribes it
+      # is C > 480s, and this database fires — on a site that is slow, not
+      # stalled. That asymmetry IS the test; the mutation below executes it.
+      - series: 'slaptain_database_observation_timestamp_seconds{namespace="ns",cluster="slapd",mesh="m",database="slow",job="slaptain-metrics",service="slaptain-metrics",endpoint="metrics",container="manager",instance="192.0.2.17:8080"}'
+        values: '0x9 600x9 1200x9 1800x9'
+      # A suspended one: frozen at 0 throughout.
+      - series: 'slaptain_database_observation_timestamp_seconds{namespace="ns",cluster="slapd",mesh="m",database="db",job="slaptain-metrics",service="slaptain-metrics",endpoint="metrics",container="manager",instance="192.0.2.17:8080"}'
+        values: '0+0x40'
+    alert_rule_test:
+      # Below the threshold for both: nothing.
+      - eval_time: 7m
+        alertname: SlaptainDatabaseObservationStale
+        exp_alerts: []
+      # The suspended database, and ONLY it. The slow one is at age 540s here
+      # — well above a 300s line, and still correctly absent from this list.
+      - eval_time: 19m
+        alertname: SlaptainDatabaseObservationStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: ns
+              cluster: slapd
+              mesh: m
+              database: db
+              job: slaptain-metrics
+              service: slaptain-metrics
+              endpoint: metrics
+              container: manager
+              instance: "192.0.2.17:8080"
+            exp_annotations:
+              summary: "db has not completed an observation pass for 19m 0s"
+              description: "The SlapdDatabase controller's pass is not reaching its recording point, so this database's per-pod suffix probes are a frozen reading. spec.suspend on the database or on its SlapdCluster is the designed way to produce this; a database stuck Terminating under ADR-005 is the accidental one."
+
+  # ── slaptain.evidence ───────────────────────────────────────────────────
+  - interval: 1m
+    name: CSN evidence — none, partial, and complete
+    input_series:
+      # Every pair attempted, none readable: the 2026-10-06 incident shape.
+      - series: 'slaptain_csn_pairs_read{namespace="ns",cluster="slapd",mesh="m",database="dark",job="slaptain-metrics",service="slaptain-metrics",endpoint="metrics",container="manager",instance="192.0.2.17:8080"}'
+        values: '0+0x30'
+      - series: 'slaptain_csn_pairs_expected{namespace="ns",cluster="slapd",mesh="m",database="dark",job="slaptain-metrics",service="slaptain-metrics",endpoint="metrics",container="manager",instance="192.0.2.17:8080"}'
+        values: '3+0x30'
+      # Two of three readable.
+      - series: 'slaptain_csn_pairs_read{namespace="ns",cluster="slapd",mesh="m",database="partial",job="slaptain-metrics",service="slaptain-metrics",endpoint="metrics",container="manager",instance="192.0.2.17:8080"}'
+        values: '2+0x30'
+      - series: 'slaptain_csn_pairs_expected{namespace="ns",cluster="slapd",mesh="m",database="partial",job="slaptain-metrics",service="slaptain-metrics",endpoint="metrics",container="manager",instance="192.0.2.17:8080"}'
+        values: '3+0x30'
+      # Healthy: must fire neither.
+      - series: 'slaptain_csn_pairs_read{namespace="ns",cluster="slapd",mesh="m",database="ok",job="slaptain-metrics",service="slaptain-metrics",endpoint="metrics",container="manager",instance="192.0.2.17:8080"}'
+        values: '3+0x30'
+      - series: 'slaptain_csn_pairs_expected{namespace="ns",cluster="slapd",mesh="m",database="ok",job="slaptain-metrics",service="slaptain-metrics",endpoint="metrics",container="manager",instance="192.0.2.17:8080"}'
+        values: '3+0x30'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: SlaptainCSNEvidenceNone
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: ns
+              cluster: slapd
+              mesh: m
+              database: dark
+              job: slaptain-metrics
+              service: slaptain-metrics
+              endpoint: metrics
+              container: manager
+              instance: "192.0.2.17:8080"
+            exp_annotations:
+              summary: "no readable contextCSN for dark on any pod"
+              description: "Convergence for this database is unproven at this site, not broken — unreadable evidence never counts toward healthy (ADR-008). The fault is most likely local: the pods answer nothing, or the replication identity cannot bind. Check PodsResponsive for this cluster before suspecting a peer."
+      - eval_time: 5m
+        alertname: SlaptainCSNEvidencePartial
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: SlaptainCSNEvidencePartial
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: ns
+              cluster: slapd
+              mesh: m
+              database: partial
+              job: slaptain-metrics
+              service: slaptain-metrics
+              endpoint: metrics
+              container: manager
+              instance: "192.0.2.17:8080"
+            exp_annotations:
+              summary: "contextCSN readable on only 2 of the pods holding partial"
+              description: "Convergence for this database is being judged on partial evidence. The pods that did not answer are not named here — slaptain_suffix_probe_ok for the same database is absent for exactly those pods, and `slctl inspect` names them outright."
+
+  - interval: 1m
+    name: CSN spread — a measured 0 is healthy, a long freeze is not
+    input_series:
+      - series: 'slaptain_csn_spread_seconds{namespace="ns",cluster="slapd",mesh="m",database="frozen",job="slaptain-metrics",service="slaptain-metrics",endpoint="metrics",container="manager",instance="192.0.2.17:8080"}'
+        values: '900+0x30'
+      - series: 'slaptain_csn_spread_seconds{namespace="ns",cluster="slapd",mesh="m",database="agree",job="slaptain-metrics",service="slaptain-metrics",endpoint="metrics",container="manager",instance="192.0.2.17:8080"}'
+        values: '0+0x30'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: SlaptainCSNSpreadHigh
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: SlaptainCSNSpreadHigh
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: ns
+              cluster: slapd
+              mesh: m
+              database: frozen
+              job: slaptain-metrics
+              service: slaptain-metrics
+              endpoint: metrics
+              container: manager
+              instance: "192.0.2.17:8080"
+            exp_annotations:
+              summary: "frozen contextCSNs are 15m 0s apart across pods"
+              description: "One pod of this cluster is not receiving the others' writes, and has not been for long enough that propagation delay cannot explain it. Surface 1's ReplicationConverged says the same thing as a boolean; this is how far apart they actually are."
+
+  - interval: 1m
+    name: a link that resolved to nothing
+    input_series:
+      - series: 'slaptain_peer_providers_discovered{namespace="ns",cluster="slapd",mesh="m",peer="site-3",job="slaptain-metrics",service="slaptain-metrics",endpoint="metrics",container="manager",instance="192.0.2.17:8080"}'
+        values: '0+0x30'
+      - series: 'slaptain_peer_providers_discovered{namespace="ns",cluster="slapd",mesh="m",peer="site-2",job="slaptain-metrics",service="slaptain-metrics",endpoint="metrics",container="manager",instance="192.0.2.17:8080"}'
+        values: '3+0x30'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: SlaptainPeerProvidersGone
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: ns
+              cluster: slapd
+              mesh: m
+              peer: site-3
+              job: slaptain-metrics
+              service: slaptain-metrics
+              endpoint: metrics
+              container: manager
+              instance: "192.0.2.17:8080"
+            exp_annotations:
+              summary: "peer site-3 has no discoverable providers"
+              description: "The remote cluster's API answered and reported no running slapd pods. Cross-site replication from site-3 into this site has no provider to consume from. Check whether that site is scaled to zero, mid-restore, or in a namespace being torn down."
+
+  - interval: 1m
+    name: a glue suffix fires on presence alone, with no fuse
+    input_series:
+      # A per-pod series: its own `pod` (the slapd pod) survives honorLabels.
+      - series: 'slaptain_suffix_glue{namespace="ns",cluster="slapd",mesh="m",database="db",pod="slapd-1",role="readwrite",job="slaptain-metrics",service="slaptain-metrics",endpoint="metrics",container="manager",instance="192.0.2.17:8080"}'
+        values: '1+0x30'
+    alert_rule_test:
+      # The first evaluation after the sample exists. No `for`, so firing is
+      # immediate — which is the property ADR-025 asks for and the one a `for`
+      # would quietly destroy.
+      - eval_time: 1m
+        alertname: SlaptainGlueSuffixOnPod
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: ns
+              cluster: slapd
+              mesh: m
+              database: db
+              pod: slapd-1
+              role: readwrite
+              job: slaptain-metrics
+              service: slaptain-metrics
+              endpoint: metrics
+              container: manager
+              instance: "192.0.2.17:8080"
+            exp_annotations:
+              summary: "slapd-1 (readwrite) carries a GLUE suffix entry for db"
+              description: "A multi-site seed race demoted this pod's suffix entry to a permanent hidden glue entry (ADR-025). It is invisible to ordinary searches, frozen at the winner's entryCSN so every CSN health reading comes back clean, and every backup taken from this pod cannot be restored. There is no auto-heal; follow the ADR-025 runbook."
+
+  - interval: 1m
+    name: suffix missing per pod — the cross-surface join, with every target label differing
+    input_series:
+      # Surface 2, from the operator's target: HAS mesh, carries the slapd pod.
+      - series: 'slaptain_suffix_probe_ok{namespace="ns",cluster="slapd",mesh="m",database="db",pod="slapd-1",role="readwrite",job="slaptain-metrics",service="slaptain-metrics",endpoint="metrics",container="manager",instance="192.0.2.17:8080"}'
+        values: '0+0x40'
+      - series: 'slaptain_suffix_probe_ok{namespace="ns",cluster="slapd",mesh="m",database="db",pod="slapd-0",role="readwrite",job="slaptain-metrics",service="slaptain-metrics",endpoint="metrics",container="manager",instance="192.0.2.17:8080"}'
+        values: '1+0x40'
+      - series: 'slaptain_suffix_probe_ok{namespace="ns",cluster="slapd",mesh="m",database="db",pod="slapd-readonly-0",role="readonly",job="slaptain-metrics",service="slaptain-metrics",endpoint="metrics",container="manager",instance="192.0.2.17:8080"}'
+        values: '0+0x40'
+      # Surface 1, from kube-state-metrics: different job, instance, service,
+      # endpoint and container, NO pod, and NO mesh at all, because
+      # SlapdDatabase has no meshRef field. A rule that joined on mesh, on
+      # pod, or on all labels would match nothing.
+      - series: 'slaptain_database_condition{namespace="ns",cluster="slapd",database="db",condition="DataPresent",reason="DataMissingOnPods",customresource_group="ldap.chuck-chuck-chuck.net",customresource_kind="SlapdDatabase",customresource_version="v1alpha1",job="ksm-kube-state-metrics",service="ksm-kube-state-metrics",endpoint="http",container="kube-state-metrics",instance="192.0.2.29:8080"}'
+        values: '0+0x40'
+      - series: 'slaptain_database_condition{namespace="ns",cluster="slapd",database="db",condition="DataPresent",reason="DataMissingOnReadOnlyPods",customresource_group="ldap.chuck-chuck-chuck.net",customresource_kind="SlapdDatabase",customresource_version="v1alpha1",job="ksm-kube-state-metrics",service="ksm-kube-state-metrics",endpoint="http",container="kube-state-metrics",instance="192.0.2.29:8080"}'
+        values: '0+0x40'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: SlaptainSuffixMissingOnReadWritePod
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: ns
+              cluster: slapd
+              mesh: m
+              database: db
+              pod: slapd-1
+              role: readwrite
+              job: slaptain-metrics
+              service: slaptain-metrics
+              endpoint: metrics
+              container: manager
+              instance: "192.0.2.17:8080"
+            exp_annotations:
+              summary: "slapd-1 has no suffix entry for db"
+              description: "A read-write pod is missing the database's suffix entry while the database is known to hold data elsewhere. Writes accepted by this pod go into a tree that is not the others'. Same fuse as Surface 1's SlaptainDataMissingOnPods so the two land together: that one tells you a pod is empty, this one tells you which."
+      # The read-only pod is NOT in the alert above, and its own rule has not
+      # burned its 20-minute fuse yet at 8m — the split the `role` label exists
+      # for, made executable.
+      - eval_time: 8m
+        alertname: SlaptainSuffixMissingOnReadOnlyPod
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: SlaptainSuffixMissingOnReadOnlyPod
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: ns
+              cluster: slapd
+              mesh: m
+              database: db
+              pod: slapd-readonly-0
+              role: readonly
+              job: slaptain-metrics
+              service: slaptain-metrics
+              endpoint: metrics
+              container: manager
+              instance: "192.0.2.17:8080"
+            exp_annotations:
+              summary: "read-only pod slapd-readonly-0 has no suffix entry for db"
+              description: "A read-only consumer has not completed its initial sync, or has lost it. Clients reading through the <cluster>-readonly Service may hit this pod and see an empty tree. The read-write fleet is unaffected."
+
+  - interval: 1m
+    name: a never-seeded database reports probe 0 on every pod and must stay silent
+    input_series:
+      # Every pod renders 0 — the database was created and never seeded.
+      - series: 'slaptain_suffix_probe_ok{namespace="ns",cluster="slapd",mesh="m",database="fresh",pod="slapd-0",role="readwrite",job="slaptain-metrics",service="slaptain-metrics",endpoint="metrics",container="manager",instance="192.0.2.17:8080"}'
+        values: '0+0x40'
+      - series: 'slaptain_suffix_probe_ok{namespace="ns",cluster="slapd",mesh="m",database="fresh",pod="slapd-1",role="readwrite",job="slaptain-metrics",service="slaptain-metrics",endpoint="metrics",container="manager",instance="192.0.2.17:8080"}'
+        values: '0+0x40'
+      # ...and Surface 1 carries NO DataPresent series for it, because the
+      # condition is Unknown and kube-state-metrics omits an Unknown condition
+      # entirely (never 0 — ADR-033 decision 5). The dataObserved latch is the
+      # state a raw per-pod gauge does not have, and the gate borrows it.
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: SlaptainSuffixMissingOnReadWritePod
+        exp_alerts: []
+
+  # ── slaptain.cross-site: the peer-join width (brief ruling 6) ───────────
+  #
+  # Two or more clusters at ONE site can declare a peer of the same name — a
+  # second mesh, or a second cluster in another namespace of the same mesh.
+  # Without `site`, `on (peer)` (and `on (site, peer)`, which now reads the
+  # same) joins every cluster's verdict with every other cluster's check. The
+  # join key is the peer's full identity at this site: (namespace, cluster,
+  # mesh, peer). Each silent cluster below differs from the firing one in
+  # exactly one of namespace or cluster, so a key missing either one fails.
+  - interval: 1m
+    name: peer link down — only the cluster whose OWN check is fresh fires
+    input_series:
+      # ns/slapd: dialled site-3 a moment ago and failed. Its link is down.
+      - series: 'slaptain_cluster_peer_connected{namespace="ns",cluster="slapd",mesh="m",peer="site-3",replication_state="Unreachable",customresource_group="ldap.chuck-chuck-chuck.net",customresource_kind="SlapdCluster",customresource_version="v1alpha1",job="ksm-kube-state-metrics",service="ksm-kube-state-metrics",endpoint="http",container="kube-state-metrics",instance="192.0.2.29:8080"}'
+        values: '0+0x30'
+      - series: 'slaptain_cluster_peer_last_checked_seconds{namespace="ns",cluster="slapd",mesh="m",peer="site-3",customresource_group="ldap.chuck-chuck-chuck.net",customresource_kind="SlapdCluster",customresource_version="v1alpha1",job="ksm-kube-state-metrics",service="ksm-kube-state-metrics",endpoint="http",container="kube-state-metrics",instance="192.0.2.29:8080"}'
+        values: '0+60x30'
+      # ns/slapd-b — same namespace, other cluster, same peer name: its own
+      # check is ten minutes old, so its connected=0 is not a fresh dial.
+      # That is SlaptainPeerStatusStale's case, not this one's.
+      - series: 'slaptain_cluster_peer_connected{namespace="ns",cluster="slapd-b",mesh="m",peer="site-3",replication_state="Unreachable",customresource_group="ldap.chuck-chuck-chuck.net",customresource_kind="SlapdCluster",customresource_version="v1alpha1",job="ksm-kube-state-metrics",service="ksm-kube-state-metrics",endpoint="http",container="kube-state-metrics",instance="192.0.2.29:8080"}'
+        values: '0+0x30'
+      - series: 'slaptain_cluster_peer_last_checked_seconds{namespace="ns",cluster="slapd-b",mesh="m",peer="site-3",customresource_group="ldap.chuck-chuck-chuck.net",customresource_kind="SlapdCluster",customresource_version="v1alpha1",job="ksm-kube-state-metrics",service="ksm-kube-state-metrics",endpoint="http",container="kube-state-metrics",instance="192.0.2.29:8080"}'
+        values: '-600+0x30'
+      # ns2/slapd — same cluster NAME, other namespace, same peer name, same
+      # stale check.
+      - series: 'slaptain_cluster_peer_connected{namespace="ns2",cluster="slapd",mesh="m",peer="site-3",replication_state="Unreachable",customresource_group="ldap.chuck-chuck-chuck.net",customresource_kind="SlapdCluster",customresource_version="v1alpha1",job="ksm-kube-state-metrics",service="ksm-kube-state-metrics",endpoint="http",container="kube-state-metrics",instance="192.0.2.29:8080"}'
+        values: '0+0x30'
+      - series: 'slaptain_cluster_peer_last_checked_seconds{namespace="ns2",cluster="slapd",mesh="m",peer="site-3",customresource_group="ldap.chuck-chuck-chuck.net",customresource_kind="SlapdCluster",customresource_version="v1alpha1",job="ksm-kube-state-metrics",service="ksm-kube-state-metrics",endpoint="http",container="kube-state-metrics",instance="192.0.2.29:8080"}'
+        values: '-600+0x30'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: SlaptainPeerLinkDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: ns
+              cluster: slapd
+              mesh: m
+              peer: site-3
+              replication_state: Unreachable
+              customresource_group: ldap.chuck-chuck-chuck.net
+              customresource_kind: SlapdCluster
+              customresource_version: v1alpha1
+              job: ksm-kube-state-metrics
+              service: ksm-kube-state-metrics
+              endpoint: http
+              container: kube-state-metrics
+              instance: "192.0.2.29:8080"
+            exp_annotations:
+              summary: "no connection to peer site-3"
+              description: "The operator at this site dialled peer site-3 and failed. Cross-site replication for every database on that link has stopped."
+
+  - interval: 1m
+    name: peer unverified — another cluster's check of the same peer name does not count
+    input_series:
+      # ns/slapd: connected=0 and NO lastChecked — the peer was never contacted.
+      - series: 'slaptain_cluster_peer_connected{namespace="ns",cluster="slapd",mesh="m",peer="site-3",replication_state="Unreachable",customresource_group="ldap.chuck-chuck-chuck.net",customresource_kind="SlapdCluster",customresource_version="v1alpha1",job="ksm-kube-state-metrics",service="ksm-kube-state-metrics",endpoint="http",container="kube-state-metrics",instance="192.0.2.29:8080"}'
+        values: '0+0x30'
+      # ns/slapd-b and ns2/slapd: healthy links to a peer of the same name,
+      # each with its own fresh check. Under `on (peer)` either check would
+      # vouch for ns/slapd's and the alert would never fire.
+      - series: 'slaptain_cluster_peer_connected{namespace="ns",cluster="slapd-b",mesh="m",peer="site-3",replication_state="Synced",customresource_group="ldap.chuck-chuck-chuck.net",customresource_kind="SlapdCluster",customresource_version="v1alpha1",job="ksm-kube-state-metrics",service="ksm-kube-state-metrics",endpoint="http",container="kube-state-metrics",instance="192.0.2.29:8080"}'
+        values: '1+0x30'
+      - series: 'slaptain_cluster_peer_last_checked_seconds{namespace="ns",cluster="slapd-b",mesh="m",peer="site-3",customresource_group="ldap.chuck-chuck-chuck.net",customresource_kind="SlapdCluster",customresource_version="v1alpha1",job="ksm-kube-state-metrics",service="ksm-kube-state-metrics",endpoint="http",container="kube-state-metrics",instance="192.0.2.29:8080"}'
+        values: '0+60x30'
+      - series: 'slaptain_cluster_peer_connected{namespace="ns2",cluster="slapd",mesh="m",peer="site-3",replication_state="Synced",customresource_group="ldap.chuck-chuck-chuck.net",customresource_kind="SlapdCluster",customresource_version="v1alpha1",job="ksm-kube-state-metrics",service="ksm-kube-state-metrics",endpoint="http",container="kube-state-metrics",instance="192.0.2.29:8080"}'
+        values: '1+0x30'
+      - series: 'slaptain_cluster_peer_last_checked_seconds{namespace="ns2",cluster="slapd",mesh="m",peer="site-3",customresource_group="ldap.chuck-chuck-chuck.net",customresource_kind="SlapdCluster",customresource_version="v1alpha1",job="ksm-kube-state-metrics",service="ksm-kube-state-metrics",endpoint="http",container="kube-state-metrics",instance="192.0.2.29:8080"}'
+        values: '0+60x30'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: SlaptainPeerUnverified
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: ns
+              cluster: slapd
+              mesh: m
+              peer: site-3
+              replication_state: Unreachable
+              customresource_group: ldap.chuck-chuck-chuck.net
+              customresource_kind: SlapdCluster
+              customresource_version: v1alpha1
+              job: ksm-kube-state-metrics
+              service: ksm-kube-state-metrics
+              endpoint: http
+              container: kube-state-metrics
+              instance: "192.0.2.29:8080"
+            exp_annotations:
+              summary: "peer site-3 reported down but never contacted"
+              description: "This site published connected=false for site-3 without recording a check, so treat this peer verdict as unfounded and look at this site. Since the 2026-10-06 fix the operator only skips the check when the cluster has no SlapdDatabase — so start by checking whether its databases exist at all; the peer status field carries a lastError saying so. A local read failure no longer suppresses the check: that reads as PartiallyVerified and fires SlaptainPeerNotSynced."
+      # And the healthy clusters raise no LinkDown either.
+      - eval_time: 6m
+        alertname: SlaptainPeerLinkDown
+        exp_alerts: []
+
+  # ── slaptain.slapd (Surface 3, brief ruling 7) ──────────────────────────
+  #
+  # Proposed rules, names and thresholds, for the implementer to implement TO.
+  # Every series below is shaped as the opt-in PodMonitor in charts/operator
+  # scrapes it: job="slapd-exporter" (fixed by the PodMonitor's relabeling),
+  # container="exporter", endpoint="metrics", namespace/pod = the slapd pod's,
+  # cluster/role relabelled from app.kubernetes.io/instance, plus the metric's
+  # own suffix/result.
+  #
+  # Absent is never 0 (ADR-033 decision 5): a reading the exporter could not
+  # take is missing from the scrape, and nothing here may treat a missing
+  # series as a zero — not a missing pages_free, not a missing readers_max.
+  #
+  #   SlaptainSlapdExporterDown       up{job="slapd-exporter"} == 0      for 5m   warning
+  #   SlaptainSlapdMonitorUnreadable  openldap_up == 0                   for 5m   warning
+  #   SlaptainSlapdDialFailing        increase(openldap_exporter_dials_total{result="fail"}[10m]) > 0
+  #                                                                      for 20m  warning
+  #   SlaptainSlapdBindFailing        increase(openldap_exporter_binds_total{result="fail"}[10m]) > 0
+  #                                                                      for 20m  warning
+  #   SlaptainMDBMapFilling           data suffix fill > 0.80            for 30m  warning
+  #   SlaptainMDBMapNearlyFull        data suffix fill > 0.90            for 10m  critical
+  #   SlaptainAccesslogMapFilling     cn=accesslog-* fill > 0.70         for 30m  warning
+  #   SlaptainAccesslogMapNearlyFull  cn=accesslog-* fill > 0.85         for 10m  critical
+  #   SlaptainMDBReaderSlotsHigh      readers_used / readers_max > 0.80  for 15m  warning
+  #
+  # where fill = (openldap_mdb_pages_used - openldap_mdb_pages_free)
+  #              / openldap_mdb_pages_max
+  #
+  # FILL IS NET OF THE FREE LIST, deliberately not pages_used / pages_max.
+  # back-mdb reports olmMDBPagesUsed as me_last_pgno+1 (back-mdb/monitor.c) —
+  # the HIGH-WATER mark, which LMDB never lowers — and olmMDBPagesFree as the
+  # pages on the free list, which the next writes reuse before extending the
+  # file. pages_used / pages_max therefore never comes down: a database that
+  # was once 95% full and then purged reads 95% forever. That is every
+  # accesslog after its first purge cycle, so the naive ratio would fire
+  # permanently on every healthy journal. The test below pins it.
+  #
+  # Rationale per threshold:
+  #
+  # * ExporterDown, 5m: the sidecar has no legitimate reason to refuse a
+  #   scrape; 5m rides out a container restart and its first CrashLoop
+  #   backoffs (10s, 20s, 40s, 80s) plus two scrape intervals. Warning: this is
+  #   Surface 3 going blind on one pod, not slapd failing.
+  # * MonitorUnreadable, 5m: ADR-030's startupProbe budget is 300s — a slow
+  #   LMDB open legitimately leaves slapd unreadable that long while the
+  #   sidecar is already up. openldap_up is the exporter's own reading of its
+  #   attempt, present on every scrape it answers (0 is a reading, ADR-033
+  #   decision 4); a target that does not answer has no openldap_up at all, so
+  #   the rule cannot double ExporterDown and needs no up == 1 gate. A missing
+  #   openldap_up is never read as 0. Warning: SlaptainPodSilent (Surface 1) is the service-
+  #   impact alert for a read-write pod; this is the only one that also sees a
+  #   read-only pod freeze.
+  # * Dial/BindFailing, [10m] window, for 20m: these catch INTERMITTENT
+  #   failure, which MonitorUnreadable cannot — it needs every scrape to fail
+  #   for 5m. A failure burst confined to one pod restart (≤ 300s, the startup
+  #   budget) keeps a 10m increase above 0 for at most 5m + 10m = 15m, so a
+  #   20m fuse is clear of any single restart by 5m. Failing at least once in
+  #   every 10m window for 20m is not a restart. A counter at 0, or a fail
+  #   counter that was never created, is silent.
+  # * MDB data, 0.80 / 0.90: a data database grows with the directory (weeks),
+  #   and its only remedy is the backup-delete-restore recreate (olcDbMaxSize
+  #   cannot be modified live — ADR-024; docs/TUNING.md). 20% of the 32Gi
+  #   default map is ~6.4Gi of runway to plan that outage in; 10% is the line
+  #   where it stops being plannable. Long fuses: map fill has no legitimate
+  #   transient beyond one large write transaction.
+  # * Accesslog, 0.70 / 0.85: a journal fills on write RATE (docs/TUNING.md)
+  #   and its 8Gi map is fixed. Under the default purge "7+00:00 1+00:00" its
+  #   steady-state peak holds 8 days of writes, so one day of writes is 1/8 of
+  #   the peak. At fill f, a stopped purge leaves (1-f)/f × 8 days of runway:
+  #   0.70 → 3.4 days, 0.85 → 1.4 days. Lower than the data thresholds because
+  #   it moves faster, and because the accesslog overlay sits in the DATA
+  #   database's write path — a full journal stops data writes too.
+  # * ReaderSlots, 0.80: olmMDBReadersUsed is me_numreaders, a high-water mark
+  #   of slots ever claimed; its steady state is slapd's thread count (16 by
+  #   default) against 126 slots, ~13%. 80% (101 slots) is unreachable by a
+  #   healthy pod at default threads — it means slots are being leaked (readers
+  #   from processes that died without releasing them) — and leaves 25 slots
+  #   before MDB_READERS_FULL fails every read.
+  - interval: 1m
+    name: exporter target down fires for the exporter only, not for any other down target
+    input_series:
+      - series: 'up{job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '0+0x30'
+      - series: 'up{job="slapd-exporter",namespace="slaptain-testing",pod="slapd-1",container="exporter",endpoint="metrics",instance="192.0.2.42:9330",cluster="slapd",role="readwrite"}'
+        values: '1+0x30'
+      - series: 'openldap_up{job="slapd-exporter",namespace="slaptain-testing",pod="slapd-1",container="exporter",endpoint="metrics",instance="192.0.2.42:9330",cluster="slapd",role="readwrite"}'
+        values: '1+0x30'
+      # A different target at the same site, also down. Not slaptain's exporter.
+      - series: 'up{job="ksm-kube-state-metrics",service="ksm-kube-state-metrics",namespace="monitoring",container="kube-state-metrics",endpoint="http",instance="192.0.2.29:8080"}'
+        values: '0+0x30'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: SlaptainSlapdExporterDown
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: SlaptainSlapdExporterDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: slapd-exporter
+              namespace: slaptain-testing
+              pod: slapd-0
+              container: exporter
+              endpoint: metrics
+              instance: "192.0.2.41:9330"
+              cluster: slapd
+              role: readwrite
+            exp_annotations:
+              summary: "slapd-0: the slapd exporter sidecar is not answering scrapes"
+              description: "Prometheus cannot scrape the exporter container, so this pod's Surface 3 readings are absent and every rule over them is silent. slapd itself may be fine: this is the sidecar, not the server."
+      # A down target has no cn=Monitor reading either — that is the down
+      # alert's, never this one's.
+      - eval_time: 6m
+        alertname: SlaptainSlapdMonitorUnreadable
+        exp_alerts: []
+
+  - interval: 1m
+    name: cn=Monitor unreadable fires on openldap_up 0, never for a down exporter or a short dip
+    input_series:
+      # slapd-0: the sidecar answers, but every scrape reports openldap_up 0 —
+      # the dial, the bind or the search failed (a frozen slapd, ADR-030).
+      - series: 'up{job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '1+0x30'
+      - series: 'openldap_up{job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '0+0x30'
+      # slapd-2: read 0 twice, then the exporter itself went down. Its
+      # openldap_up goes stale — absent, not 0 — and the down target is
+      # SlaptainSlapdExporterDown's case, never this rule's.
+      - series: 'up{job="slapd-exporter",namespace="slaptain-testing",pod="slapd-2",container="exporter",endpoint="metrics",instance="192.0.2.44:9330",cluster="slapd",role="readwrite"}'
+        values: '1x2 0x28'
+      - series: 'openldap_up{job="slapd-exporter",namespace="slaptain-testing",pod="slapd-2",container="exporter",endpoint="metrics",instance="192.0.2.44:9330",cluster="slapd",role="readwrite"}'
+        values: '0x2 stale'
+      # slapd-3: a two-minute dip to 0 (a slapd restart), then readable again.
+      - series: 'up{job="slapd-exporter",namespace="slaptain-testing",pod="slapd-3",container="exporter",endpoint="metrics",instance="192.0.2.45:9330",cluster="slapd",role="readwrite"}'
+        values: '1+0x30'
+      - series: 'openldap_up{job="slapd-exporter",namespace="slaptain-testing",pod="slapd-3",container="exporter",endpoint="metrics",instance="192.0.2.45:9330",cluster="slapd",role="readwrite"}'
+        values: '1x3 0x1 1x26'
+      # slapd-1: healthy.
+      - series: 'up{job="slapd-exporter",namespace="slaptain-testing",pod="slapd-1",container="exporter",endpoint="metrics",instance="192.0.2.42:9330",cluster="slapd",role="readwrite"}'
+        values: '1+0x30'
+      - series: 'openldap_up{job="slapd-exporter",namespace="slaptain-testing",pod="slapd-1",container="exporter",endpoint="metrics",instance="192.0.2.42:9330",cluster="slapd",role="readwrite"}'
+        values: '1+0x30'
+      # slapd-readonly-0: target DOWN from the start; no openldap_up ever.
+      - series: 'up{job="slapd-exporter",namespace="slaptain-testing",pod="slapd-readonly-0",container="exporter",endpoint="metrics",instance="192.0.2.43:9330",cluster="slapd",role="readonly"}'
+        values: '0+0x30'
+      # A different healthy target that has no cn=Monitor and never will.
+      - series: 'up{job="ksm-kube-state-metrics",service="ksm-kube-state-metrics",namespace="monitoring",container="kube-state-metrics",endpoint="http",instance="192.0.2.29:8080"}'
+        values: '1+0x30'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: SlaptainSlapdMonitorUnreadable
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: SlaptainSlapdMonitorUnreadable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: slapd-exporter
+              namespace: slaptain-testing
+              pod: slapd-0
+              container: exporter
+              endpoint: metrics
+              instance: "192.0.2.41:9330"
+              cluster: slapd
+              role: readwrite
+            exp_annotations:
+              summary: "slapd-0: the exporter answers but cannot read cn=Monitor"
+              description: "Every scrape for 5 minutes reported openldap_up 0: the exporter answered but could not read cn=Monitor. Either slapd is not answering the exporter — a frozen slapd accepts the connection and never replies (ADR-030) — or the monitor database is missing. The exporter's openldap_exporter_dials_total and openldap_exporter_binds_total fail counters say which step failed."
+      # 12m: slapd-2's exporter has been down for 9 minutes and slapd-readonly-0's
+      # for all 12. Both are SlaptainSlapdExporterDown — and neither is this
+      # rule, which still names slapd-0 alone (slapd-3's dip is long over).
+      - eval_time: 12m
+        alertname: SlaptainSlapdMonitorUnreadable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: slapd-exporter
+              namespace: slaptain-testing
+              pod: slapd-0
+              container: exporter
+              endpoint: metrics
+              instance: "192.0.2.41:9330"
+              cluster: slapd
+              role: readwrite
+            exp_annotations:
+              summary: "slapd-0: the exporter answers but cannot read cn=Monitor"
+              description: "Every scrape for 5 minutes reported openldap_up 0: the exporter answered but could not read cn=Monitor. Either slapd is not answering the exporter — a frozen slapd accepts the connection and never replies (ADR-030) — or the monitor database is missing. The exporter's openldap_exporter_dials_total and openldap_exporter_binds_total fail counters say which step failed."
+      - eval_time: 12m
+        alertname: SlaptainSlapdExporterDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: slapd-exporter
+              namespace: slaptain-testing
+              pod: slapd-2
+              container: exporter
+              endpoint: metrics
+              instance: "192.0.2.44:9330"
+              cluster: slapd
+              role: readwrite
+            exp_annotations:
+              summary: "slapd-2: the slapd exporter sidecar is not answering scrapes"
+              description: "Prometheus cannot scrape the exporter container, so this pod's Surface 3 readings are absent and every rule over them is silent. slapd itself may be fine: this is the sidecar, not the server."
+          - exp_labels:
+              severity: warning
+              job: slapd-exporter
+              namespace: slaptain-testing
+              pod: slapd-readonly-0
+              container: exporter
+              endpoint: metrics
+              instance: "192.0.2.43:9330"
+              cluster: slapd
+              role: readonly
+            exp_annotations:
+              summary: "slapd-readonly-0: the slapd exporter sidecar is not answering scrapes"
+              description: "Prometheus cannot scrape the exporter container, so this pod's Surface 3 readings are absent and every rule over them is silent. slapd itself may be fine: this is the sidecar, not the server."
+
+  - interval: 1m
+    name: dial failures — recurring fires, a restart-sized burst and a zero counter do not
+    input_series:
+      # slapd-0: a failed dial every scrape.
+      - series: 'openldap_exporter_dials_total{result="fail",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '0+1x45'
+      # slapd-1: five failures inside one minute (a pod restart), then none.
+      - series: 'openldap_exporter_dials_total{result="fail",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-1",container="exporter",endpoint="metrics",instance="192.0.2.42:9330",cluster="slapd",role="readwrite"}'
+        values: '0x4 5+0x40'
+      # slapd-2: the fail counter exists and reads 0. Healthy.
+      - series: 'openldap_exporter_dials_total{result="fail",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-2",container="exporter",endpoint="metrics",instance="192.0.2.44:9330",cluster="slapd",role="readwrite"}'
+        values: '0+0x45'
+      - series: 'openldap_exporter_dials_total{result="ok",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-2",container="exporter",endpoint="metrics",instance="192.0.2.44:9330",cluster="slapd",role="readwrite"}'
+        values: '0+1x45'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: SlaptainSlapdDialFailing
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: SlaptainSlapdDialFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              result: fail
+              job: slapd-exporter
+              namespace: slaptain-testing
+              pod: slapd-0
+              container: exporter
+              endpoint: metrics
+              instance: "192.0.2.41:9330"
+              cluster: slapd
+              role: readwrite
+            exp_annotations:
+              summary: "slapd-0: the exporter's connections to slapd keep failing"
+              description: "The exporter has failed to connect to slapd at least once in every 10-minute window for 20 minutes, longer than any single pod restart. Scrapes in between succeed, so SlaptainSlapdMonitorUnreadable can stay silent while this pod's Surface 3 readings have holes."
+      - eval_time: 40m
+        alertname: SlaptainSlapdDialFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              result: fail
+              job: slapd-exporter
+              namespace: slaptain-testing
+              pod: slapd-0
+              container: exporter
+              endpoint: metrics
+              instance: "192.0.2.41:9330"
+              cluster: slapd
+              role: readwrite
+            exp_annotations:
+              summary: "slapd-0: the exporter's connections to slapd keep failing"
+              description: "The exporter has failed to connect to slapd at least once in every 10-minute window for 20 minutes, longer than any single pod restart. Scrapes in between succeed, so SlaptainSlapdMonitorUnreadable can stay silent while this pod's Surface 3 readings have holes."
+
+  - interval: 1m
+    name: bind failures — a frozen slapd's shape fires, a zero counter does not
+    input_series:
+      # slapd-0: every dial succeeds, every bind times out — ADR-030's freeze.
+      - series: 'openldap_exporter_dials_total{result="ok",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '0+1x45'
+      - series: 'openldap_exporter_binds_total{result="fail",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '0+1x45'
+      # slapd-1: binds fine; its fail counter reads 0.
+      - series: 'openldap_exporter_binds_total{result="fail",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-1",container="exporter",endpoint="metrics",instance="192.0.2.42:9330",cluster="slapd",role="readwrite"}'
+        values: '0+0x45'
+      - series: 'openldap_exporter_binds_total{result="ok",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-1",container="exporter",endpoint="metrics",instance="192.0.2.42:9330",cluster="slapd",role="readwrite"}'
+        values: '0+1x45'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: SlaptainSlapdBindFailing
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: SlaptainSlapdBindFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              result: fail
+              job: slapd-exporter
+              namespace: slaptain-testing
+              pod: slapd-0
+              container: exporter
+              endpoint: metrics
+              instance: "192.0.2.41:9330"
+              cluster: slapd
+              role: readwrite
+            exp_annotations:
+              summary: "slapd-0: the exporter's binds to slapd keep failing"
+              description: "The exporter connects but its bind fails or times out, at least once in every 10-minute window for 20 minutes. A frozen slapd (ADR-030) reads as exactly this once the exporter's timeout expires."
+      # A bind-only fault is not a dial fault.
+      - eval_time: 25m
+        alertname: SlaptainSlapdDialFailing
+        exp_alerts: []
+
+  - interval: 1m
+    name: LMDB map warnings — each suffix class on its own threshold, fill net of the free list, absent is not 0
+    input_series:
+      # dc=example,dc=org: (910-50)/1000 = 0.86. Above the data warning
+      # (0.80), below the data critical (0.90). Also above the ACCESSLOG
+      # critical (0.85): fires it only if that rule forgets to select
+      # cn=accesslog-*.
+      - series: 'openldap_mdb_pages_max{suffix="dc=example,dc=org",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '1000+0x40'
+      - series: 'openldap_mdb_pages_used{suffix="dc=example,dc=org",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '910+0x40'
+      - series: 'openldap_mdb_pages_free{suffix="dc=example,dc=org",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '50+0x40'
+      # cn=accesslog-default: (870-50)/1000 = 0.82. Above the accesslog
+      # warning (0.70), below the accesslog critical (0.85). Also above the
+      # DATA warning (0.80): fires it only if that rule forgets to exclude
+      # cn=accesslog-*.
+      - series: 'openldap_mdb_pages_max{suffix="cn=accesslog-default",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '1000+0x40'
+      - series: 'openldap_mdb_pages_used{suffix="cn=accesslog-default",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '870+0x40'
+      - series: 'openldap_mdb_pages_free{suffix="cn=accesslog-default",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '50+0x40'
+      # dc=example,dc=net: high-water 950 of 1000, but 600 of those are on the
+      # free list — a database that grew and shrank. Real fill 0.35. Fires
+      # warning AND critical under the naive pages_used / pages_max (0.95).
+      - series: 'openldap_mdb_pages_max{suffix="dc=example,dc=net",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '1000+0x40'
+      - series: 'openldap_mdb_pages_used{suffix="dc=example,dc=net",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '950+0x40'
+      - series: 'openldap_mdb_pages_free{suffix="dc=example,dc=net",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '600+0x40'
+      # cn=slaptain-auth: pages_free is ABSENT (back-mdb's read transaction
+      # for the free list failed). Fill is unknown, not 0.96: nothing fires.
+      # Fires under any expression that defaults a missing series to 0.
+      - series: 'openldap_mdb_pages_max{suffix="cn=slaptain-auth",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '1000+0x40'
+      - series: 'openldap_mdb_pages_used{suffix="cn=slaptain-auth",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '960+0x40'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: SlaptainMDBMapFilling
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: SlaptainMDBMapFilling
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              suffix: dc=example,dc=org
+              job: slapd-exporter
+              namespace: slaptain-testing
+              pod: slapd-0
+              container: exporter
+              endpoint: metrics
+              instance: "192.0.2.41:9330"
+              cluster: slapd
+              role: readwrite
+            exp_annotations:
+              summary: "slapd-0: LMDB map for dc=example,dc=org is 86% full"
+              description: "Pages in use, net of the free list, against the map size (olcDbMaxSize). A database that fills its map stops accepting writes with MDB_MAP_FULL, and the map can only be enlarged by recreating the database (ADR-024; docs/TUNING.md). Plan that now."
+      - eval_time: 35m
+        alertname: SlaptainMDBMapNearlyFull
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: SlaptainAccesslogMapFilling
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: SlaptainAccesslogMapFilling
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              suffix: cn=accesslog-default
+              job: slapd-exporter
+              namespace: slaptain-testing
+              pod: slapd-0
+              container: exporter
+              endpoint: metrics
+              instance: "192.0.2.41:9330"
+              cluster: slapd
+              role: readwrite
+            exp_annotations:
+              summary: "slapd-0: accesslog journal cn=accesslog-default is 82% full"
+              description: "The journal fills on write rate, not data volume, and its map is a fixed 8Gi. The accesslog overlay sits in the data database's write path, so when the journal cannot take a write neither can the data. Check that the purge runs, or shorten spec.replication.accesslogPurge (docs/TUNING.md)."
+      - eval_time: 35m
+        alertname: SlaptainAccesslogMapNearlyFull
+        exp_alerts: []
+
+  - interval: 1m
+    name: LMDB map critical — each suffix class on its own threshold
+    input_series:
+      # dc=example,dc=org: (960-10)/1000 = 0.95 > 0.90.
+      - series: 'openldap_mdb_pages_max{suffix="dc=example,dc=org",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '1000+0x40'
+      - series: 'openldap_mdb_pages_used{suffix="dc=example,dc=org",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '960+0x40'
+      - series: 'openldap_mdb_pages_free{suffix="dc=example,dc=org",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '10+0x40'
+      # dc=example,dc=com: (880-10)/1000 = 0.87. Below the data critical,
+      # above the ACCESSLOG critical — fires that only if it forgets to
+      # select cn=accesslog-*.
+      - series: 'openldap_mdb_pages_max{suffix="dc=example,dc=com",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '1000+0x40'
+      - series: 'openldap_mdb_pages_used{suffix="dc=example,dc=com",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '880+0x40'
+      - series: 'openldap_mdb_pages_free{suffix="dc=example,dc=com",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '10+0x40'
+      # cn=accesslog-default: (930-10)/1000 = 0.92 > 0.85. Also > the DATA
+      # critical — fires that only if it forgets to exclude cn=accesslog-*.
+      - series: 'openldap_mdb_pages_max{suffix="cn=accesslog-default",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '1000+0x40'
+      - series: 'openldap_mdb_pages_used{suffix="cn=accesslog-default",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '930+0x40'
+      - series: 'openldap_mdb_pages_free{suffix="cn=accesslog-default",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '10+0x40'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: SlaptainMDBMapNearlyFull
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: SlaptainMDBMapNearlyFull
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              suffix: dc=example,dc=org
+              job: slapd-exporter
+              namespace: slaptain-testing
+              pod: slapd-0
+              container: exporter
+              endpoint: metrics
+              instance: "192.0.2.41:9330"
+              cluster: slapd
+              role: readwrite
+            exp_annotations:
+              summary: "slapd-0: LMDB map for dc=example,dc=org is 95% full"
+              description: "At 100% this database stops accepting writes with MDB_MAP_FULL. The map cannot be enlarged on a running database (slapd segfaults — ADR-024); the remedy is the backup-delete-restore recreate in docs/TUNING.md."
+      - eval_time: 8m
+        alertname: SlaptainAccesslogMapNearlyFull
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: SlaptainAccesslogMapNearlyFull
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              suffix: cn=accesslog-default
+              job: slapd-exporter
+              namespace: slaptain-testing
+              pod: slapd-0
+              container: exporter
+              endpoint: metrics
+              instance: "192.0.2.41:9330"
+              cluster: slapd
+              role: readwrite
+            exp_annotations:
+              summary: "slapd-0: accesslog journal cn=accesslog-default is 92% full"
+              description: "Under a day or two of writes from full at the default purge window. When the journal cannot take a write, the data database cannot either — the accesslog overlay is in its write path. Check that the purge runs, or shorten spec.replication.accesslogPurge (docs/TUNING.md)."
+
+  - interval: 1m
+    name: LMDB reader slots — a leak fires, the thread-count steady state and a missing max do not
+    input_series:
+      # dc=example,dc=org: 110 of 126 slots ever claimed.
+      - series: 'openldap_mdb_readers_max{suffix="dc=example,dc=org",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '126+0x30'
+      - series: 'openldap_mdb_readers_used{suffix="dc=example,dc=org",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '110+0x30'
+      # cn=accesslog-default: 17 of 126 — slapd's 16 threads plus one.
+      - series: 'openldap_mdb_readers_max{suffix="cn=accesslog-default",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '126+0x30'
+      - series: 'openldap_mdb_readers_used{suffix="cn=accesslog-default",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '17+0x30'
+      # dc=example,dc=net: readers_max ABSENT. Unknown, not a division by 0
+      # and not a default.
+      - series: 'openldap_mdb_readers_used{suffix="dc=example,dc=net",job="slapd-exporter",namespace="slaptain-testing",pod="slapd-0",container="exporter",endpoint="metrics",instance="192.0.2.41:9330",cluster="slapd",role="readwrite"}'
+        values: '120+0x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SlaptainMDBReaderSlotsHigh
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: SlaptainMDBReaderSlotsHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              suffix: dc=example,dc=org
+              job: slapd-exporter
+              namespace: slaptain-testing
+              pod: slapd-0
+              container: exporter
+              endpoint: metrics
+              instance: "192.0.2.41:9330"
+              cluster: slapd
+              role: readwrite
+            exp_annotations:
+              summary: "slapd-0: 87.3% of LMDB reader slots claimed for dc=example,dc=org"
+              description: "The count is a high-water mark, and slapd's thread count sets its steady state (16 threads against 126 slots by default). This many means slots are leaking, typically to readers that died without releasing them. When the table is full every read fails with MDB_READERS_FULL; a restart of the pod clears it."

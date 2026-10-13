@@ -81,6 +81,18 @@ metrics:
   # upgrade.
   enabled: false
   port: 8080
+  service:
+    # Type of the metrics Service. Monitoring is site-local (ADR-033 amendment
+    # 2026-10-09): the site's own Prometheus scrapes this over ClusterIP via
+    # the ServiceMonitor below, and that is the recommended setup. Know what
+    # any other type costs: the endpoint is plain HTTP with no authentication
+    # and no authorization (--metrics-secure=false), and a NodePort or
+    # LoadBalancer puts it on every node address (or an external one), outside
+    # what networkPolicy.enabled below can restrict.
+    type: ClusterIP
+    # Fixed node port, honoured only when type is NodePort. Empty lets
+    # Kubernetes allocate one.
+    nodePort: ""
   serviceMonitor:
     # Create a Prometheus Operator ServiceMonitor. Requires metrics.enabled=true
     # and the Prometheus Operator CRDs. It sets honorLabels: true — the

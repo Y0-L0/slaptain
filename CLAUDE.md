@@ -54,7 +54,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── MIGRATION-PLAN.md           # Phased plan for replacing a legacy OpenLDAP with slaptain
 │   ├── MIGRATION-LEGACY-SOURCE.md  # Source-side (legacy slapd) prep for hot migration
 │   ├── BACKUP.md                   # S3 backup/restore user guide (ADR-014)
-│   ├── MONITORING.md               # What slaptain exposes to Prometheus, and what it cannot tell you (ADR-033)
+│   ├── MONITORING.md               # What slaptain exposes to Prometheus (both surfaces), the measured join keys, and what it still cannot tell you (ADR-033)
 │   ├── VERSIONING.md               # Where the `v` goes: git tags only; images/charts/appVersion bare
 │   ├── TLS.md                      # Certificates: where they come from, and how clients come to trust them (ADR-029)
 │   ├── TUNING.md                   # Tuning & sizing guide: defaults, placement classes, lab→prod sizing (ADR-024)
@@ -121,7 +121,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   └── image-tag.sh                # the one tag derivation (main `v*` and `exporter/v*` streams), shared by Makefile and e2e.sh
 ├── monitoring/                     # Monitoring deployment inputs — off-the-shelf only (ADR-033 Surface 1)
 │   ├── kube-state-metrics-values.yaml      # CRS config; applied IDENTICALLY at every site
-│   ├── kube-prometheus-stack-values.yaml   # the ONE observing site; scrapes every site's ksm NodePort
+│   ├── kube-prometheus-stack-values.yaml   # applied at EVERY site; that site's Prometheus scrapes only that site (ADR-033 2026-10-09)
 │   ├── prometheus-rules.yaml               # alert rules; fuses differ per condition REASON
 │   ├── gateway.yaml                        # Gateway API front door — ONE Gateway PER APP (a merged
 │   │                                       # catch-all route splits requests across both backends)
@@ -440,7 +440,7 @@ runs without readpw configuration but skips those test cases.
 | `make e2e-run` | Run Ginkgo e2e tests in `tests/e2e/` (requires NodePort cluster pre-deployed) |
 | `make e2e-multisite CONTEXTS="c1 c2"` | All-in-one multi-site e2e cycle via the unified `tests/e2e.sh` |
 | `make e2e-external-replication` | Run cross-cluster external replication tests (E2E_EXTERNAL_REPL=1) |
-| `make monitoring-ksm-install` | kube-state-metrics at one site (same values file at every site). `monitoring-stack-install` adds Prometheus+Grafana at the ONE observing site; `monitoring-dashboard-apply`, `monitoring-rules-apply`, `monitoring-grafana`, `monitoring-prometheus` round it out. See `docs/MONITORING.md` |
+| `make monitoring-install` | Site-local monitoring (ADR-033 2026-10-09), run per `CONTEXT`: kube-prometheus-stack (pinned `MONITORING_STACK_VERSION`, + rules + dashboard), then kube-state-metrics (pinned `MONITORING_KSM_VERSION`, ClusterIP + ServiceMonitor). Then the operator with `metrics.enabled`, `metrics.serviceMonitor.enabled`, `slapdPodMonitor.enabled` — for an already-installed operator via `helm upgrade --reuse-values`, never `make operator-helm-install` (it swaps in this checkout's image and rolls every slapd pod). No site scrapes another; there is no `site` label. `monitoring-ksm-install`, `monitoring-stack-install`, `monitoring-rules-apply`, `monitoring-dashboard-apply` and `monitoring-rules-test` (promtool) remain as parts |
 
 ### Makefile Targets (operator/)
 

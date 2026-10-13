@@ -7,11 +7,15 @@ metadata:
     {{- include "operator.labels" . | nindent 4 }}
     control-plane: controller-manager
 spec:
+  type: {{ .Values.metrics.service.type }}
   ports:
     - name: metrics
       port: {{ .Values.metrics.port }}
       protocol: TCP
       targetPort: {{ .Values.metrics.port }}
+      {{- if and (eq .Values.metrics.service.type "NodePort") .Values.metrics.service.nodePort }}
+      nodePort: {{ .Values.metrics.service.nodePort }}
+      {{- end }}
   selector:
     {{- include "operator.selectorLabels" . | nindent 4 }}
     control-plane: controller-manager

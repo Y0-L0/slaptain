@@ -31,12 +31,14 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/controller"
+	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/obsmetrics"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -200,6 +202,24 @@ func main() {
 		setupLog.Info("resolved site identity", "siteName", siteName)
 	}
 
+	// Surface 2 (ADR-033 decision 3): the operator exports what only it knows.
+	// The stores bridge the two clocks — the reconcilers record on their own
+	// tick, the collector renders whatever is there when Prometheus asks — and
+	// they are constructed here and injected rather than being package-level
+	// globals, so a test gets its own and nothing is shared by accident.
+	//
+	// NOTE: this assumes ONE operator replica, which is what the chart ships
+	// (replicas: 1, --leader-elect, no HPA, no PDB). A standby would serve an
+	// empty surface, which is the correct shape by decision 5 — but the metrics
+	// Service selects every replica, so at replicas: 2 series would flap
+	// between scrapes. See charts/operator/values.yaml.
+	clusterObservations := &obsmetrics.Store[obsmetrics.ClusterObservation]{}
+	databaseObservations := &obsmetrics.Store[obsmetrics.DatabaseObservation]{}
+	metrics.Registry.MustRegister(&controller.ObservationCollector{
+		Clusters:  clusterObservations,
+		Databases: databaseObservations,
+	})
+
 	if err := (&controller.SlapdClusterReconciler{
 		Client:          mgr.GetClient(),
 		Scheme:          mgr.GetScheme(),
@@ -207,6 +227,7 @@ func main() {
 		OperatorImage:   os.Getenv("OPERATOR_IMAGE"),
 		ClusterDomain:   clusterDomain,
 		SiteName:        siteName,
+		Observations:    clusterObservations,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SlapdCluster")
 		os.Exit(1)
@@ -226,6 +247,7 @@ func main() {
 		SiteName:        siteName,
 		DefaultImageTag: os.Getenv("OPERATOR_IMAGE_TAG"),
 		OperatorImage:   os.Getenv("OPERATOR_IMAGE"),
+		Observations:    databaseObservations,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SlapdDatabase")
 		os.Exit(1)

@@ -25,6 +25,15 @@ image:
 imagePullSecrets: []
 # - name: ghcr-pull-secret
 
+# -- Operator replicas. Surface 2 (ADR-033 decision 3) assumes ONE: the
+# operator exports what it observed on its own reconcile tick, a standby
+# observes nothing, and the metrics Service below selects every replica — so at
+# replicas: 2 the slaptain_* series would flap between scrapes depending on
+# which pod answered. Serving absent metrics from a standby is the correct
+# shape by decision 5; the flapping is the problem, and fixing it means either
+# a leader-only Service selector or a `..._is_leader` gauge for rules to filter
+# on. Neither is worth paying for a topology nobody runs: leader election is on
+# (--leader-elect), there is no HPA and no PDB.
 replicas: 1
 
 resources:
@@ -49,12 +58,35 @@ leaderElection:
   enabled: true
 
 metrics:
-  # Enable the operator metrics endpoint (HTTP on the specified port).
-  # When enabled, a Service is created and --metrics-bind-address is set on the manager.
+  # Enable the operator metrics endpoint. This is what makes Surface 2 reachable
+  # (ADR-033 decision 3): the cross-pod and cross-site judgements only the
+  # operator can make — per-database CSN spread and pair counts, per-peer
+  # discovery counts, the ADR-025 suffix probe and glue verdict per pod. With
+  # this off there is no /metrics listener at all, because --metrics-bind-address
+  # is never passed and the manager's bind address stays "0".
+  #
+  # OPT-IN, deliberately, and know what you are opting into. The chart passes
+  # --metrics-secure=false, so the endpoint is PLAIN HTTP with NO authentication
+  # and NO authorization — no bearer-token check, no TLS — and the ClusterIP
+  # Service it creates is reachable from every pod in the cluster. On a shared
+  # cluster, enable networkPolicy.enabled below in the same change, so only the
+  # namespaces you label can reach the port. Defaulting this on would have
+  # opened that endpoint on every existing install at the next chart upgrade,
+  # silently and without delivering anything: serviceMonitor.enabled is off too,
+  # so nothing would have scraped it.
+  #
+  # Surface 1 is opt-in on the same terms — you deploy kube-state-metrics with
+  # monitoring/kube-state-metrics-values.yaml yourself — so monitoring slaptain
+  # is one deliberate act per surface, not a default that arrives with an
+  # upgrade.
   enabled: false
   port: 8080
   serviceMonitor:
-    # Create a Prometheus Operator ServiceMonitor. Requires metrics.enabled=true.
+    # Create a Prometheus Operator ServiceMonitor. Requires metrics.enabled=true
+    # and the Prometheus Operator CRDs. It sets honorLabels: true — the
+    # operator's series carry their own `namespace` and `pod`, and without it
+    # Prometheus would rename them exported_* and overwrite them with the
+    # operator pod's own, emptying every query written against them.
     enabled: false
     interval: "30s"
     scrapeTimeout: "10s"
@@ -69,6 +101,9 @@ multus:
   network: ""
 
 networkPolicy:
-  # Create a NetworkPolicy restricting metrics port access to labeled namespaces.
-  # Requires metrics.enabled=true.
+  # Create a NetworkPolicy restricting the operator's metrics port to
+  # namespaces labelled `metrics: enabled`. Requires metrics.enabled=true.
+  # Label the namespace your site's Prometheus runs in, or this policy shuts
+  # it out along with everything else:
+  #   kubectl label namespace monitoring metrics=enabled
   enabled: false

@@ -41,6 +41,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
+	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/obsmetrics"
 	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/ridcoord"
 	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/suffixprobe"
 )
@@ -70,6 +71,10 @@ type SlapdDatabaseReconciler struct {
 	// resolves it for its own co-located Job.
 	DefaultImageTag string
 	OperatorImage   string
+	// Observations holds the last database pass's Surface 2 readings for the
+	// Prometheus collector to render on scrape (ADR-033 decision 3). Injected,
+	// never a package-level global; nil is legal and records nothing.
+	Observations *obsmetrics.Store[obsmetrics.DatabaseObservation]
 }
 
 // imageRef resolves a data-plane image reference for this controller's Jobs.
@@ -90,6 +95,16 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	sd := &ldapv1alpha1.SlapdDatabase{}
 	if err := r.Get(ctx, req.NamespacedName, sd); err != nil {
 		if errors.IsNotFound(err) {
+			// The object has left the API server: its Surface 2 series stops
+			// rather than freezing at its last value (ADR-033 decision 5).
+			//
+			// NOT the only eviction point, and it cannot be. The deletion
+			// branch BELOW holds the object for as long as the finalizer is
+			// held, and ADR-005 keeps that finalizer and retries when
+			// deleteFromAllPods fails — so a `cleanupPolicy: Delete` database
+			// whose pods are unreachable sits in Terminating indefinitely and
+			// never reaches here at all. See the eviction there.
+			r.evictObservation(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -97,6 +112,18 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// 2. Handle deletion (finalizer).
 	if !sd.DeletionTimestamp.IsZero() {
+		// Evict on deletion INTENT, not on the object's disappearance. A
+		// deletionTimestamp is already enough to stop publishing, and waiting
+		// for NotFound would be waiting for something that may never come:
+		// ADR-005 keeps the finalizer and retries when a teardown fails, so a
+		// database whose pods are unreachable stays in Terminating — while
+		// every pass returns right here, so nothing re-records either. The
+		// observation would then keep reporting suffix_probe_ok 1 for a
+		// database a human deleted hours ago, for the life of the process.
+		//
+		// Harmless if the deletion is later abandoned or simply slow: the next
+		// completed pass records again.
+		r.evictObservation(req.NamespacedName)
 		return r.handleDeletion(ctx, sd)
 	}
 
@@ -334,7 +361,7 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	//     all-empty reading is a data-loss alert rather than a database still
 	//     waiting for its first replication. One-way — nothing clears it, and
 	//     nothing on the write path reads it (see seedNeeded).
-	dataPresent, observed := r.evaluateDataPresent(ctx, sc, sd, rootPW)
+	dataPresent, observed, probes := r.evaluateDataPresent(ctx, sc, sd, rootPW)
 	setCondition(&sd.Status.Conditions, dataPresent)
 	if observed {
 		sd.Status.DataObserved = true
@@ -344,6 +371,20 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	//      and therefore assertable — inline here it was dead in every test,
 	//      because the envtest fixtures have no pods at all.
 	phase, reason, msg := databasePhase(appliedPods, failedPods, pendingWork, ridRefusal)
+
+	// Surface 2 (ADR-033 decision 3): one recording per pass, here, where the
+	// per-pod probes are final. The mesh is the CLUSTER's fact (ADR-028) and
+	// reaches the observation through sc, because a SlapdDatabase has no
+	// meshRef of its own.
+	//
+	// Deliberately NOT recorded at the five early setStatus sites or the
+	// terminating path: those passes leave the previous observation standing
+	// with its timestamp AGEING, which is what makes a stalled database visible
+	// to one staleness rule over the anchor. Adding recordings there would
+	// replace that with five separate judgements about what a pass that did not
+	// finish may claim to have observed.
+	r.recordObservation(sd, sc.Spec.MeshRef, probes)
+
 	r.setStatus(ctx, sd, phase, appliedPods, failedPods, reason, msg)
 
 	// Unhealthy → the tight retry; healthy → a slow resync floor, so that state
@@ -2404,7 +2445,7 @@ func (r *SlapdDatabaseReconciler) evaluateDataPresent(
 	sc *ldapv1alpha1.SlapdCluster,
 	sd *ldapv1alpha1.SlapdDatabase,
 	rootPW string,
-) (cond metav1.Condition, observed bool) {
+) (cond metav1.Condition, observed bool, probes []podPresence) {
 	cond = metav1.Condition{
 		Type:               "DataPresent",
 		LastTransitionTime: metav1.Now(),
@@ -2451,7 +2492,11 @@ func (r *SlapdDatabaseReconciler) evaluateDataPresent(
 
 	cond.Status, cond.Reason, cond.Message = aggregateDataPresent(
 		sd.Spec.Suffix, results, databaseKnownPopulated(sd))
-	return cond, dataWasObserved(results)
+	// The per-pod results are returned as well as aggregated: Surface 2 exports
+	// the probe PER POD (ADR-033 decision 3), and the condition's aggregate
+	// cannot be taken apart again — "every assessed pod has it" says nothing
+	// about which pods were assessed.
+	return cond, dataWasObserved(results), results
 }
 
 // applySeedEntry parses a simplified LDIF entry and adds it via LDAP.

@@ -14,6 +14,20 @@ spec:
     - path: /metrics
       port: metrics
       scheme: http
+      # The operator exports its own `namespace` and `pod` labels (the
+      # SlapdCluster's namespace, the slapd pod a per-pod verdict is about).
+      # Without honorLabels Prometheus renames them exported_namespace /
+      # exported_pod and stamps the operator's own namespace and pod over
+      # them, which silently empties every rule, join and dashboard query
+      # written against them.
+      honorLabels: true
+      # ...and the converse: a series WITHOUT its own `pod` (cluster- and
+      # database-scope families, controller-runtime's) would otherwise get the
+      # operator pod's name attached, misleading in an alert and wrong in a
+      # join. Drop the target's pod so a series keeps its own or has none.
+      relabelings:
+        - action: labeldrop
+          regex: pod
       interval: {{ .Values.metrics.serviceMonitor.interval }}
       scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout }}
   selector:

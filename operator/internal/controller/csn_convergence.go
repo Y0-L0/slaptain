@@ -67,9 +67,149 @@ type localVerdict struct {
 	// NewestBySuffix carries the newest CSN timestamp observed per database
 	// suffix, the baseline cross-site comparison uses.
 	NewestBySuffix map[string]time.Time
+	// ReadoutBySuffix carries the MEASUREMENT behind the verdict, per database
+	// suffix: what was attempted, what was readable, and how far apart the
+	// readable pods are. One entry per database the pass attempted; a database
+	// absent from the map was never asked about (ADR-033 decision 5 — presence
+	// in the input is what means "attempted").
+	//
+	// The verdict above is a judgement and collapses to a condition status;
+	// this is the quantity that judgement reduces away. ADR-033 decision 3
+	// names it as Surface 2's: "per-database CSN convergence and the measured
+	// spread, labelled by database — the quantity ReplicationConverged reduces
+	// to a boolean".
+	ReadoutBySuffix map[string]dbCSNReadout
 	// Silent suppresses the condition write entirely (too little data to say
 	// anything at all).
 	Silent bool
+}
+
+// dbCSNReadout is one database's local contextCSN measurement from one pass.
+//
+// Three numbers, and the distinctions between them are the whole point:
+//
+//	PodsExpected — the pass asked this many pods about this database.
+//	PodsRead     — this many answered with a contextCSN that parsed.
+//	Spread       — newest minus oldest over those, or nil when there is no
+//	               spread to be had.
+//
+// `PodsRead < PodsExpected` is the alertable condition, which is why these are
+// two absolute counts rather than a ratio: a ratio divides by a count that can
+// be zero, and `PodsRead == 0` is itself a real and important reading — the
+// 2026-10-06 shape where a site could read none of its own databases, a fact
+// that lived only as English inside a condition message.
+//
+// Computed on EVERY pass, converged or not. A converged database's spread of 0
+// is the measurement Surface 2 most wants to carry, and the diverged branch's
+// message is not a place a measurement can live.
+type dbCSNReadout struct {
+	// PodsExpected is how many (pod, database) pairs this pass holds for the
+	// database — one per read-write pod it queried, FAILURES INCLUDED.
+	//
+	// Counted from the readings rather than from the replica count, so both
+	// numbers come from the same evidence and `PodsRead < PodsExpected` has
+	// exactly one meaning: a pod was asked and could not be read. Taking it
+	// from spec.replicas instead would make the comparison fire for two
+	// unrelated causes — an unreadable pod, and a pass that never asked — with
+	// nothing in the series to tell them apart.
+	PodsExpected int
+	// PodsRead is how many of those yielded a contextCSN that parsed. A pod
+	// that answered with no contextCSN at all did NOT yield a reading: there is
+	// no timestamp in an empty vector, so counting it would put a pod into the
+	// spread's denominator while contributing nothing to its value.
+	PodsRead int
+	// Spread is the newest minus the oldest contextCSN timestamp over the pods
+	// that answered, and is nil when PodsRead < 2 — fewer than two readings is
+	// not a spread, and a 0 there would be indistinguishable from the healthiest
+	// reading on the surface (ADR-033 decision 5's converse: 0 with two or more
+	// readings is a MEASUREMENT and must survive).
+	//
+	// A pointer rather than a duration plus a bool, so "known but unset" and
+	// "unknown but set" are unexpressible.
+	//
+	// Since 2026-10-06 obsmetrics.DatabaseCSN.Spread is a pointer too, and the
+	// render gates on IT ALONE. So this nil is not a second statement of the
+	// rule that happens to agree with the renderer's — it is the only
+	// statement, carried unchanged all the way to the scrape. What was two
+	// authorities agreeing by convention (a Duration here, a PairsRead >= 2
+	// gate there) rendered a measured 0 for a database nobody measured, which
+	// is the one failure ADR-033 decision 5 calls itself least able to detect.
+	//
+	// The consequence lands on the function below: `Spread != nil` exactly when
+	// PodsRead >= 2 is now an invariant NOTHING downstream re-checks, and
+	// TestEvaluateLocalConvergenceReadoutBySuffix asserts it on every case for
+	// that reason.
+	Spread *time.Duration
+}
+
+// databaseCSNReadouts computes the per-database readout above from one pass's
+// readings: one entry per suffix present in the input, each carrying how many
+// pods were asked, how many parsed, and the spread over those that did (nil
+// below two).
+//
+// Separate from the verdict on purpose. The verdict answers "should the
+// condition say False", and it short-circuits — the existing spread
+// computation lives inside the diverged branch and never runs on a healthy
+// database. A measurement has to run on every pass whatever the judgement
+// turns out to be.
+func databaseCSNReadouts(readings []csnReading) map[string]dbCSNReadout {
+	// bounds tracks the newest and oldest parseable CSN timestamp per suffix,
+	// over the readings that yielded one. Kept beside the counts rather than in
+	// them, because a spread is only derivable once the whole pass is walked.
+	type bounds struct {
+		newest time.Time
+		oldest time.Time
+	}
+
+	out := make(map[string]dbCSNReadout, len(readings))
+	seen := make(map[string]bounds, len(readings))
+
+	for _, r := range readings {
+		// Presence of the reading is what means "attempted", failures included:
+		// both counts come from the same evidence, so PodsRead < PodsExpected
+		// has exactly one meaning.
+		readout := out[r.Suffix]
+		readout.PodsExpected++
+		out[r.Suffix] = readout
+
+		if r.Err != "" {
+			continue
+		}
+		// Readable means PARSEABLE. newestCSN reports no error for an empty
+		// vector — it returns the zero time — and a pod that answered with no
+		// contextCSN has no timestamp to contribute, so counting it would put a
+		// pod into the spread's denominator while adding nothing to its value.
+		t, err := newestCSN(r.CSNs)
+		if err != nil || t.IsZero() {
+			continue
+		}
+
+		readout.PodsRead++
+		out[r.Suffix] = readout
+
+		b, had := seen[r.Suffix]
+		if !had {
+			b.newest, b.oldest = t, t
+		}
+		if t.After(b.newest) {
+			b.newest = t
+		}
+		if t.Before(b.oldest) {
+			b.oldest = t
+		}
+		seen[r.Suffix] = b
+	}
+
+	for suffix, readout := range out {
+		if readout.PodsRead < 2 {
+			continue
+		}
+		b := seen[suffix]
+		spread := b.newest.Sub(b.oldest)
+		readout.Spread = &spread
+		out[suffix] = readout
+	}
+	return out
 }
 
 // evaluateLocalConvergence judges whether the local RW pods agree on their
@@ -97,7 +237,10 @@ type localVerdict struct {
 // equality on an idle database says everything replicable has replicated, not
 // that the link works.
 func evaluateLocalConvergence(readings []csnReading, replicas int32) localVerdict {
-	v := localVerdict{NewestBySuffix: map[string]time.Time{}}
+	v := localVerdict{
+		NewestBySuffix:  map[string]time.Time{},
+		ReadoutBySuffix: databaseCSNReadouts(readings),
+	}
 	if len(readings) == 0 {
 		v.Silent = true
 		return v

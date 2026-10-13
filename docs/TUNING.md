@@ -117,6 +117,62 @@ slapd. Stronger schemes need their module in the runtime image, and slaptain's d
 not ship `pw-argon2` today — asking for `{ARGON2}` produces a slapd that rejects
 every password write.
 
+### `cn=monitor`: always present, nothing to set
+
+Every pod, read-write and read-only, carries slapd's monitor database. The operator
+converges it on every pass (ADR-033 amendment 2026-10-08). It adds
+`olcDatabase=monitor` with `olcRootDN: cn=admin,cn=config` and keeps its one ACL equal
+to a constant. The monitor backend is built into slapd in every slaptain image, so
+there is no module to load:
+
+```
+to * by dn.children="cn=slaptain-auth" read
+     by dn.children="cn=peercred,cn=external,cn=auth" read
+     by * none
+```
+
+There is no field and no switch. At rest none of this writes anything: the operator
+reads, compares and moves on. It writes again only when the ACL differs, after a hand
+edit or after an upgrade that changes the constant.
+
+Who can read `cn=Monitor`:
+
+- **any node-local replication identity**, `cn=repl-<db>,cn=slaptain-auth`, with that
+  database's `replication-password`. Any database's identity works, not only the
+  one for the database you are looking at;
+- **`cn=admin,cn=config`**, which is the monitor database's rootDN;
+- **a process inside the pod on the ldapi socket** (SASL EXTERNAL), whatever its UID
+  (measured for the ADR amendment);
+- **nobody else.** Anonymous and every data-tree identity get `No such object`. That
+  includes the legacy `cn=replication,<suffix>`, so `slctl ldapsearch --as
+  replication` cannot read it. Use `--as config`, plus `--database <db>` when the
+  namespace holds more than one database.
+
+```bash
+slctl ldapsearch -n <ns> --as config --database <db> --pod 0 -b cn=Monitor -s one '(objectClass=*)'
+ldapsearch -x -H ldap://<pod>:1024 -D cn=repl-<db>,cn=slaptain-auth -y <pwfile> \
+  -b 'cn=Connections,cn=Monitor' '(objectClass=*)' '+'
+```
+
+**Per-database statistics depend on order.** back-mdb attaches its `olmMDB*`
+attributes to `cn=Database <N>,cn=Databases,cn=Monitor` when it opens a database,
+and only if the monitor database exists at that moment. A cn=config ADD opens the
+database immediately. Monitoring is on by default in back-mdb, so no `olcMonitoring`
+setting is involved. Measured on 2.7.1:
+
+- an mdb database ADDed after the monitor database gets them at once, whether the
+  monitor database was there at start or was itself ADDed at runtime;
+- an mdb database that was open before the monitor database existed gets them only
+  after slapd restarts. Setting `olcMonitoring: TRUE` live does not help.
+
+So the operator makes sure the monitor database exists immediately before it ADDs a
+data or accesslog database, on read-write and read-only pods alike. The node-local
+auth database is added after the monitor database in the same pass. A pod created by
+this operator version has statistics for every database from the start. A pod whose
+databases predate the monitor database (an upgrade from an operator without it) gets
+them at its next restart. The global counters (`cn=Operations`, `cn=Connections`, …)
+answer immediately either way.
+
 ### Deliberately not tunable
 
 - **`olcIdleTimeout` and `olcWriteTimeout`.** slapd's default for both is *never
@@ -134,9 +190,6 @@ every password write.
   `olcConcurrency`, `olcSockbufMaxIncoming*`, `olcConnMaxPending`). Upstream's
   defaults are defensible and we have no measurement that asks for a different one.
   `spec.tuning` is the home when one arrives.
-- **`cn=monitor`.** Implemented and withdrawn the same day: modifying an existing
-  monitor database's `olcAccess` hangs slapd with the same signature as the
-  connection timeouts. Monitoring today is the operator's CSN polling.
 - **The replication identity's DN, its ACL and its limits.** One contract the
   operator owns end to end (ADR-024 R7). A user who cannot change the DN has no
   business capping its searches.

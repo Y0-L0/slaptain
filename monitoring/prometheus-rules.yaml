@@ -21,13 +21,19 @@ spec:
     - name: slaptain.cross-site
       rules:
         # Gated on the check having actually RUN. `connected` is derived from
-        # replicationState (slapdcluster_controller.go), and the operator skips
-        # the peer check entirely when it cannot read its OWN databases — which
-        # leaves connected=0 on a peer it never contacted, and drops
-        # lastChecked. Ungated, this alert names the wrong site: measured on a
-        # three-site lab, where cutting inbound LDAP to site-3 made site-3
-        # report site-1 and site-2 down. SlaptainPeerUnverified below is the
-        # one that tells the truth in that case.
+        # replicationState (slapdcluster_controller.go), so a peer whose check
+        # did not run reads connected=0 with no lastChecked — connected=0 is
+        # not by itself evidence of a dial that failed.
+        #
+        # The gate used to carry most of the weight: the operator skipped the
+        # peer check entirely when it could not read its OWN databases, which
+        # made a site under a local fault report every healthy peer down
+        # (measured on a three-site lab, where cutting inbound LDAP to site-3
+        # made site-3 report site-1 and site-2 down). That was fixed on
+        # 2026-10-06 — the check now always runs when the cluster has at least
+        # one database — so the gate is no longer load-bearing for that case.
+        # It stays because it is the correct precondition for the claim this
+        # alert makes, and because the zero-database case below still exists.
         - alert: SlaptainPeerLinkDown
           expr: >-
             slaptain_cluster_peer_connected == 0
@@ -48,6 +54,16 @@ spec:
         # THIS site, not at the peer. Absence is the signal, which is why it
         # needs `unless` — a staleness comparison against a missing series
         # yields nothing and would never fire.
+        #
+        # Narrowed by the 2026-10-06 fix. The operator no longer skips the peer
+        # check when its own contextCSN reads fail (an unreadable local
+        # baseline now reads PartiallyVerified, named per database — ADR-008
+        # amendment), so the only remaining way to publish a peer verdict
+        # without checking it is a cluster that declares external peers and has
+        # **no SlapdDatabase at all**: nothing to compare, so nothing is asked.
+        # The expression is unchanged on purpose — it is still the right test
+        # for "verdict without a check", and this is the one condition that can
+        # still produce one.
         - alert: SlaptainPeerUnverified
           expr: >-
             slaptain_cluster_peer_connected == 0
@@ -59,10 +75,13 @@ spec:
             summary: "{{ $labels.site }}: peer {{ $labels.peer }} reported down but never contacted"
             description: >-
               {{ $labels.site }} published connected=false for
-              {{ $labels.peer }} without recording a check. The operator skips
-              the peer check when it cannot read its own databases, so look at
-              {{ $labels.site }} — PodsResponsive and ReplicationConverged
-              there — and treat this peer verdict as unfounded.
+              {{ $labels.peer }} without recording a check, so treat this peer
+              verdict as unfounded and look at {{ $labels.site }}. Since the
+              2026-10-06 fix the operator only skips the check when the cluster
+              has no SlapdDatabase — so start by checking whether its databases
+              exist at all; the peer status field carries a lastError saying
+              so. A local read failure no longer suppresses the check: that
+              reads as PartiallyVerified and fires SlaptainPeerNotSynced.
 
         - alert: SlaptainPeerNotSynced
           expr: slaptain_cluster_peer_connected{replication_state!="Synced"} == 1
@@ -75,7 +94,10 @@ spec:
               The peer answers but its CSN verdict is
               {{ $labels.replication_state }}. PartiallyVerified means at least
               one database yielded no readable contextCSN — unreadable
-              evidence, not proof of health (ADR-008).
+              evidence, not proof of health (ADR-008). The unreadable side may
+              be THIS one: with no local baseline for a database there is
+              nothing to compare against, so read lastError and this site's own
+              ReplicationConverged before suspecting the peer.
 
         - alert: SlaptainPeerStatusStale
           # The operator's CSN pass runs on a 60s tick. A timestamp that stops

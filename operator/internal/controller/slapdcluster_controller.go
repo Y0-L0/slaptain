@@ -408,8 +408,29 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 
 		// CSN convergence check against this peer.
-		if len(dbInfos) > 0 && len(localNewest) > 0 {
+		//
+		// Deliberately NOT gated on having read our own databases. It used to
+		// be, and that turned "we could not read ourselves" into
+		// `connected: false` for a peer nobody dialled — measured on a
+		// three-site lab on 2026-10-06, where the cut site reported both
+		// healthy peers down while the two peers correctly reported it
+		// Unreachable. The check now always runs and the verdict comes from
+		// evaluatePeerConvergence, which names an unreadable local baseline as
+		// unverified evidence rather than scoring it as health (ADR-008
+		// amendment 2026-10-06). The blame lands on the side that earned it.
+		//
+		// A cluster with no databases is still skipped: there is no suffix to
+		// ask about, so contacting the peer would yield "all remote pod CSN
+		// queries failed" — Unreachable for a peer that was never asked
+		// anything. `connected: false` then has no verdict behind it, so say
+		// why in lastError instead of leaving it bare.
+		switch {
+		case len(dbInfos) > 0:
 			r.checkPeerCSNConvergence(ctx, sc, &ep, &status, dbInfos, localNewest)
+		case status.LastError == "":
+			status.LastError = "no SlapdDatabase in this cluster, so there is " +
+				"no contextCSN to compare — this peer was not checked and its " +
+				"replication state is unknown, not down"
 		}
 
 		// Derive Connected from ReplicationState (backward compat).

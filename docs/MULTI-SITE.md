@@ -664,9 +664,9 @@ network path to that site's API server.
 
 | `replicationState` | Means |
 |---|---|
-| `Synced` | the peer answered and every database read is current |
+| `Synced` | the peer answered and every database was read on both sides and is current |
 | `Lagging` | the peer is behind |
-| `PartiallyVerified` | the peer answered and everything readable is current, but at least one database yielded no readable `contextCSN` — `lastError` names it |
+| `PartiallyVerified` | at least one database yielded no readable `contextCSN` on one side of the comparison — `lastError` names the databases. That side may be **this** one: without a local baseline there is nothing to compare against, so read this site's own `ReplicationConverged` and `PodsResponsive` before suspecting the peer |
 | `Unreachable` | the peer did not answer |
 
 One caveat worth internalising: peer status is **consumer-side and

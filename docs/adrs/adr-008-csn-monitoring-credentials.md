@@ -320,3 +320,69 @@ because it binds as the node-local identity; a **not-yet-upgraded** consumer is
 locked out until the legacy entry is repaired by hand. Rotation is therefore an
 operation for a mesh where every site has completed ADR-027 migration step 3 —
 or one that repairs `cn=replication,<suffix>` in the same window.
+
+---
+
+## Amendment (2026-10-06): "unreadable evidence never counts toward the good verdict" is symmetric
+
+The 2026-09-14 amendment's decision 3 defines `PartiallyVerified` as applying
+"only when every verified database is within threshold and at least one database
+has no readable evidence". That sentence survives this amendment verbatim — but
+only because *verified* is widened here. Read with the old meaning (the **peer**
+answered for it), it is wrong, and in the worst direction.
+
+A cross-site comparison has two operands. The amendment stated the rule for the
+remote one, because that is where the 2026-09-13 incident was: db1 bound and
+answered, db2's bind returned `err=49`. The local operand degrades the same way
+and was not guarded. `localNewest` is built from local readings that parsed, so a
+database whose every local read failed is simply **absent** from it; the zero
+`time.Time` that absence yields makes every remote CSN look ahead, the
+remote-ahead clamp turns that into zero lag, and the peer reads `Synced` for a
+database this site never managed to read. Measured by execution on 2026-10-06:
+`state="Synced" lag="" lastError=""`. Decision 2's own words — "unreadable
+evidence never counts toward the good verdict, and does not vanish" — were being
+honoured on one side of the link only.
+
+**So: a database is verified when BOTH sides yielded readable evidence for it.**
+A suffix with no non-zero local baseline is unverified, named in `lastError`, and
+contributes to `PartiallyVerified`; it earns neither `Synced` nor a lag figure.
+The severity order in decision 3 is unchanged. One asymmetry is deliberate and
+must not be generalised away: a zero on the **peer's** side against a readable
+baseline here is a *measured deficit*, not missing evidence — a peer that has not
+received the database — and stays `Lagging`. `lastError` names the databases
+rather than the side, so the state no longer implies the peer is at fault;
+`replicationState`'s own documentation now sends the reader to this site's
+`ReplicationConverged` and `PodsResponsive` first.
+
+The same absence had a second life one level up, in the caller. The peer check
+was gated on `len(localNewest) > 0`, so a site that could read none of its own
+databases skipped the check entirely and derived `connected` from an unset
+`ReplicationState` — publishing `connected: false` for peers it never dialled.
+Measured on the three-site lab on 2026-10-06 under a 2.5-minute inbound blackout
+of one site: the cut site reported both healthy peers down, while the two healthy
+peers correctly reported it `Unreachable`. The gate is removed; with the rule
+above in place the verdict is now computed from evidence that names which side is
+missing, so the blame lands where it belongs. A cluster with **no databases** is
+still skipped — there is no suffix to ask about, and a dial would yield
+`Unreachable` for a peer nobody asked anything — but it records a `lastError`
+saying so, because a bare `connected: false` with no verdict behind it is the
+shape this amendment exists to remove.
+
+**Known cost, accepted for now.** The rule is two-way: it distinguishes "we have
+a baseline" from "we do not", and not "the local read *failed*" from "the
+database was read fine and is legitimately empty". A genuinely empty,
+never-written database is absent from `localNewest` for an innocent reason, and
+every external peer therefore reads `PartiallyVerified` for as long as it stays
+empty. That is withheld judgement rather than a false claim, which is the correct
+direction to fail, but it is noisier than it needs to be. A three-way refinement
+— carrying "answered and empty" through as its own state, making both-sides-empty
+`Synced` and empty-local-against-remote-data `Lagging` — is designed and
+deliberately not implemented here: it changes the seam's signature, and shipping
+the safe coarse rule first is worth more than shipping the precise one later.
+`slctl inspect` grades `PartiallyVerified` as a hard failure by design, so this
+cost is visible rather than silent.
+
+**Bounds unchanged.** Per-database equality on an idle database still means
+"everything replicable has replicated", not "the link works"; the check remains
+consumer-side and one-directional; mesh health is still only readable by reading
+every site's CR.

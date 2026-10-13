@@ -12,10 +12,16 @@
 #     ReplicationConverged=Unknown/CSNQueriesIncomplete. Also working — and
 #     note its pods stay Ready throughout, because the probes are exec probes
 #     on loopback (ADR-030) and no network policy can touch them.
-#   - this site ALSO reports connected=false for both peers, with an empty
-#     replicationState and no lastChecked, having never contacted them. That is
-#     an operator bug (docs/BACKLOG.md), not a property of the cut. The
-#     SlaptainPeerUnverified rule exists to name the right site when it happens.
+#   - this site reports a FILLED-IN verdict for both peers — it dials them even
+#     though it cannot read its own databases. Expect Unreachable while the
+#     policy is up (the cut is ingress-only, but the peers answer and this
+#     site's own baseline is gone, so PartiallyVerified naming every database
+#     is the other legitimate reading). What it must NOT produce is the old
+#     shape: connected=false with an empty replicationState and no
+#     lastChecked, a verdict on peers it never contacted. That was an operator
+#     bug, fixed 2026-10-06 (docs/reconcile-loop-fixes.md, ADR-008 amendment);
+#     this demo is its acceptance test, since the fix has no unit seam.
+#     SlaptainPeerUnverified now only fires for a cluster with no databases.
 #
 # The ipBlock is doing less than it appears to. Cilium resolves in-cluster
 # sources to their pod identity and only tests ipBlock against entities outside

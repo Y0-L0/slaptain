@@ -167,21 +167,33 @@ type peerVerdict struct {
 // evaluatePeerConvergence judges one external peer from the readings taken
 // against it, PER DATABASE.
 //
-// A database is *verified* when at least one of the peer's addresses answered
-// for it; its lag is then our newest CSN for that same suffix minus the peer's
-// newest for it. Comparing across suffixes is meaningless and actively
-// misleading: two healthy databases whose last writes are minutes apart would
-// read as minutes of "lag".
+// A database is *verified* when BOTH sides yielded readable evidence for it: at
+// least one of the peer's addresses answered for it, AND we hold a non-zero
+// local baseline (localNewest) for that same suffix. Its lag is then our newest
+// CSN for the suffix minus the peer's newest for it. Comparing across suffixes
+// is meaningless and actively misleading: two healthy databases whose last
+// writes are minutes apart would read as minutes of "lag".
+//
+// Both sides, because a comparison needs two operands, and the missing-local
+// case fails open in the worst possible direction — a zero baseline makes every
+// remote CSN look ahead, the remote-ahead clamp turns that into zero lag, and
+// the peer reads Synced for a database we never read (ADR-008 amendment
+// 2026-10-06). The one asymmetry is deliberate: a zero on the PEER's side
+// against a readable baseline here is a measured deficit, so it stays Lagging.
 //
 // Severity order — observed problems win over missing evidence:
 //
 //	Unreachable       — nothing answered for any database.
-//	Lagging           — a VERIFIED database is behind by more than threshold.
+//	Lagging           — a VERIFIED database is behind by more than threshold,
+//	                    or the peer answered with no CSN at all for a database
+//	                    we do hold a baseline for.
 //	PartiallyVerified — every verified database is current, but at least one
-//	                    database yielded no readable evidence (named in
-//	                    LastError). Never Synced: a verdict computed from
-//	                    whichever database answered is not the peer's health.
-//	Synced            — every database was read and every one is current.
+//	                    database yielded no readable evidence on one side or
+//	                    the other (named in LastError). Never Synced: a verdict
+//	                    computed from whichever database answered is not the
+//	                    peer's health.
+//	Synced            — every database was read on BOTH sides and every one is
+//	                    current.
 //
 // ADR-008's bound is unchanged: this is consumer-side and one-directional, and
 // on an idle database equality is not proof the link works.
@@ -219,14 +231,31 @@ func evaluatePeerConvergence(
 			unverified = append(unverified, suffix)
 			continue
 		}
+		// Our OWN baseline first, before anything is asked of the remote
+		// value. localNewest is built only from local readings that parsed, so
+		// a database whose every local read failed is simply absent from it —
+		// and the zero time it then yields makes every remote CSN look "ahead",
+		// which the clamp below turns into zero lag and a Synced verdict for a
+		// database we never read. No baseline, no comparison basis: the
+		// database is unverified, exactly as it would be if the PEER had been
+		// the unreadable side.
+		//
+		// The order matters. Checked after the remote-zero branch, a database
+		// empty on BOTH sides would land there, fall through as "nothing to
+		// compare", and still be counted verified.
+		//
+		// Deliberately asymmetric, and only in this direction: a zero on the
+		// PEER's side with a readable baseline here is a measured deficit, not
+		// missing evidence, and stays Lagging.
+		if localNewest[suffix].IsZero() {
+			unverified = append(unverified, suffix)
+			continue
+		}
 		remote := remoteNewest[suffix]
 		if remote.IsZero() {
-			// The peer answered but has no CSN for this database. Behind us
-			// only if we have one; otherwise both are empty and there is
-			// nothing to compare.
-			if !localNewest[suffix].IsZero() {
-				lagging = true
-			}
+			// The peer answered but has no CSN for this database, while we have
+			// one: it is behind us.
+			lagging = true
 			continue
 		}
 		lag := localNewest[suffix].Sub(remote)

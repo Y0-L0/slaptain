@@ -1319,11 +1319,18 @@ spec:
                     replicationState:
                       description: |-
                         replicationState reports the CSN convergence state of this peer, judged
-                        per database (a contextCSN vector is only comparable within one suffix).
-                        Synced: every database was read and each is within threshold of ours.
-                        Lagging: a database that WAS read is behind ours by more than the threshold.
-                        PartiallyVerified: the peer answered and everything read is current, but at
-                        least one database yielded no readable contextCSN (lastError names it).
+                        per database (a contextCSN vector is only comparable within one suffix),
+                        and from evidence read on BOTH sides of each comparison.
+                        Synced: every database was read here and there, and each is within
+                        threshold of ours.
+                        Lagging: a database that WAS read on both sides is behind ours by more
+                        than the threshold.
+                        PartiallyVerified: the peer answered and everything comparable is current,
+                        but at least one database yielded no readable contextCSN — on the peer, or
+                        on THIS site, which has no comparison basis without its own baseline
+                        (lastError names the databases, not the side). Before suspecting the peer,
+                        read this cluster's own ReplicationConverged and PodsResponsive
+                        conditions.
                         Unreachable: no database on the peer could be read at all.
                       enum:
                       - Synced

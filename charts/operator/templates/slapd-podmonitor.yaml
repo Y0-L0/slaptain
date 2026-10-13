@@ -1,0 +1,59 @@
+{{- /*
+Surface 3 (ADR-033): the slapd exporter sidecar on every slapd pod this
+operator manages. It ships here, in the per-site operator chart, and not in
+charts/slapd or charts/slapd-mesh: the mesh chart must render byte-identically
+at every site (ADR-028), and a PodMonitor there would fail the whole release at
+a site without the Prometheus Operator CRDs. Monitoring is site-local (ADR-033
+amendment 2026-10-09), so whether a site has a Prometheus is a per-site fact —
+the same kind of fact as siteName, and it belongs in the same chart.
+*/ -}}
+{{- if .Values.slapdPodMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "operator.fullname" . }}-slapd
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+    {{- with .Values.slapdPodMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    {{- toYaml .Values.slapdPodMonitor.namespaceSelector | nindent 4 }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: slapd
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      scheme: http
+      interval: {{ .Values.slapdPodMonitor.interval }}
+      scrapeTimeout: {{ .Values.slapdPodMonitor.scrapeTimeout }}
+      # The exporter knows slapd, never slaptain: its series carry `dn` or
+      # `suffix` and nothing else. namespace, pod and container come from the
+      # Prometheus Operator's own target labels; the two below are the
+      # slaptain context, read off the pod's instance label. No honorLabels:
+      # the exporter emits no label these could collide with.
+      relabelings:
+        # A stable job name, because the alert rules select on it
+        # (monitoring/prometheus-rules.yaml). The default would be
+        # <namespace>/<podmonitor name>, which moves with the release.
+        - targetLabel: job
+          replacement: slapd-exporter
+        # cluster: the SlapdCluster name. Read-only pods carry
+        # app.kubernetes.io/instance=<cluster>-readonly; strip the suffix.
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_instance]
+          regex: "(.+?)(-readonly)?"
+          targetLabel: cluster
+          replacement: "$1"
+        # role: readwrite unless the instance label ends in -readonly — the
+        # same two values Surface 2's per-pod families carry.
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_instance]
+          regex: ".+"
+          targetLabel: role
+          replacement: readwrite
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_instance]
+          regex: ".+-readonly"
+          targetLabel: role
+          replacement: readonly
+{{- end }}

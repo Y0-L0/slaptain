@@ -31,6 +31,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 - [x] **Operator Phase 2**: N-way multi-master delta-syncrepl; operator-orchestrated bootstrap; per-pod `volumeClaimTemplates`; replication credential management. e2e: pending.
 - [x] **Operator Phase 3**: cross-cluster replication via `ExternalPeers`. Operator owns all syncrepl configuration (in-cluster + external). See ADR-003. **TLS posture, stated precisely (verified 2026-09-14):** consumers verify the provider against a distributed CA (`tls_cacert`), relaxed to `tls_reqcert=allow` for IP-addressed peers (ADR-007). It is NOT mutual: `olcTLSVerifyClient` is never set, so slapd never requests a client certificate — the `tls_cert`/`tls_key` presented on external-peer stanzas are not verified by anything. Peer *authentication* is the simple bind, not the certificate. Cert-based peer auth (SASL EXTERNAL) is considered and deferred in ADR-027.
 - [x] **`cn=Monitor` on every pod** (ADR-033 Surface 3, milestone S3-a, 2026-10-08): operator-converged monitor database with a constant ACL. e2e green on a three-site mesh.
+- [x] **Exporter sidecar** (ADR-033 Surface 3, S3-c, 2026-10-09): `spec.monitoring.enabled` (opt-in) adds the `slapd-exporter` sidecar — our own generic slapd exporter, curated and correctly typed `openldap_*` families (counters `_total`, gauges as gauges, `openldap_up`) plus `openldap_mdb_*` LMDB fill (ADR-033 decision 4, revised 2026-10-11: upstream/mixin-compatible names withdrawn) — on every RW and RO pod, SASL EXTERNAL over ldapi, no credential. Its own Go module (`exporter/`), image (`slapd-exporter`) and version line (git tags `exporter/vX.Y.Z`, ADR-033 decision 4 "Packaging", 2026-10-11): the operator defaults `spec.images.exporter` to a compiled-in exporter release (`exporterDefaultVersion`, 0.0.1) with the repository derived like slapd/slapd-init, and passes no command or arguments, so an operator upgrade rolls nothing through the sidecar. Opt-in rolls each StatefulSet exactly once; full mesh suite 87/0 with it on. Scraped site-locally by an opt-in PodMonitor in charts/operator (`slapdPodMonitor.enabled`, S3-d, live on three sites 2026-10-09).
 - [x] **S3 backup/restore** (ADR-014): `SlapdBackup` (on-demand) + `SlapdScheduledBackup` (cron + retention) → gzipped `slapcat` LDIF to S3 via co-located Jobs; `SlapdDatabase.spec.bootstrapFrom` restores into a fresh DB via a cluster-coordinated scale-to-0 → offline `slapadd` → scale-up machine. e2e green on t3e (versitygw S3 target). See `docs/BACKUP.md`.
 
 ---
@@ -182,6 +183,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
         ├── restore_replay_test.go  # in-place restore under replication: marker written to the backup's SOURCE pod, asserted present in the artifact + source-honesty status; stale accesslog delete must not replay (gated: E2E_BACKUP=1)
         ├── accesslog_test.go        # Per-database accesslog: structure, no cross-DB lost-sync, convergence, ADR-020 ACL
         ├── sessionlog_test.go       # ADR-022: olcSpSessionlog on every RW pod's data DB; none on accesslog DBs
+        ├── monitor_sidecar_test.go   # ADR-033 S3-c: `exporter` container Running + Ready on every RW/RO pod; /metrics via the API-server pod proxy carries `openldap_up 1`, the exporter counters, one representative per curated family group, no `dn`-labelled upstream family, and openldap_mdb_* for every data (and, RW, accesslog) suffix (Labels monitor-sidecar, monitor; ungated; the fixture enables monitoring unless E2E_MONITORING=0)
         ├── tunables_test.go         # ADR-024 degrades/hygiene tunables: cn=config posture per pod (ungated); + Label "monitor" (ADR-033 S3-a): monitor DB on every pod RW+RO, node-local readers only, olmMDB* per mdb (red by design on an upgraded cluster until its pods restart), zero writes at rest (`monitor-at-rest`, 90 s)
         ├── scale_topology_test.go   # spec.replicas up/down must rewrite olcSyncRepl on every surviving pod WITHOUT replacing one: STS revision + pod UIDs unchanged, stanza count +/-1 (ungated, Label "scale-topology")
         ├── cleanup_policy_test.go   # ADR-005 cleanupPolicy: Delete tears a replicated DB (+ its accesslog DB) off EVERY pod; Retain leaves it; re-adoption (ungated, Label "cleanup-policy"; rolls the cluster per ADR-013)
@@ -687,6 +689,11 @@ filesystem namespace. The operator is a separate pod and cannot access it. A sid
 socket was considered but rejected: it trades a narrow RBAC permission (read one Secret) for a
 broader one (pod exec or an unauthenticated network endpoint), which is strictly worse from a
 security perspective.
+
+That rejection is about the *operator*. A sidecar is a different case and ADR-033 Surface 3
+adopts it: a container inside the pod reaches the socket through the shared `/run/openldap`
+emptyDir and binds SASL EXTERNAL with no credential at all, and `cn=Monitor`'s ACL grants
+read to any peercred identity (`dn.children="cn=peercred,cn=external,cn=auth"`).
 
 **OpenLDAP credential types:**
 

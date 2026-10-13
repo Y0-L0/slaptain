@@ -282,6 +282,15 @@ func desiredLogLevel(sc *ldapv1alpha1.SlapdCluster) int32 {
 	return *sc.Spec.LogLevel
 }
 
+// ── Monitoring (ADR-033 Surface 3) ──────────────────────────────────────────
+
+// desiredMonitoringEnabled resolves spec.monitoring.enabled. Opt-in: unset is
+// false, because an opt-out default would make the operator upgrade itself the
+// pod-template roll trigger (ADR-013 amendment 2026-10-08). No CRD default.
+func desiredMonitoringEnabled(sc *ldapv1alpha1.SlapdCluster) bool {
+	return sc != nil && sc.Spec.Monitoring.Enabled != nil && *sc.Spec.Monitoring.Enabled
+}
+
 // ── Syncrepl stanza hardening (finding 11) ──────────────────────────────────
 
 // desiredKeepalive resolves spec.replication.keepalive. Unset gets the

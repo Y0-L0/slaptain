@@ -145,6 +145,35 @@ site:
 - a seeded database on a multi-site mesh names a `seed.site`, and that site exists
 - no two databases share a `ridSegment` (ADR-031)
 
+## Monitoring (ADR-033 Surface 3)
+
+The slapd exporter sidecar — one container next to every slapd pod, serving
+slapd's `cn=Monitor` as `openldap_*` metrics on `:9330/metrics` — is switched on
+here like any other `SlapdCluster` field. Off unless you turn it on; the full
+story is `docs/MONITORING.md`.
+
+| Value | Default | Renders | Notes |
+|---|---|---|---|
+| `cluster.monitoring.enabled` | unset | `spec.monitoring.enabled` | `true` adds the sidecar. It changes the pod template, so every site's pods roll once. |
+| `cluster.monitoring.resources` | unset | `spec.monitoring.resources` | The sidecar's own requests/limits, not `spec.resources`. No default. |
+| `cluster.images.exporter.{repository,tag,pullPolicy}` | unset | `spec.images.exporter` | Empty: `slapd-exporter` beside the operator's image, at the exporter release compiled into the operator. A tag alone keeps that repository. |
+
+`cluster.monitoring` and `cluster.images` are passed through verbatim when set.
+
+Both are in the shared values file, so they are **mesh-wide by construction**:
+one value turns the sidecar on at every site. That is harmless at a site with no
+Prometheus — the sidecar runs and nothing scrapes it. Whether a site *collects*
+the metrics is per-site and lives on that site's operator chart,
+`slapdPodMonitor.enabled`. It cannot live here: a `PodMonitor` would fail this
+chart's identical install at any site without the Prometheus Operator CRDs.
+
+Leave `cluster.images.exporter` empty too, as this chart does for `slapd` and
+`init`. The exporter is its own image and version line (`docs/VERSIONING.md`),
+and the operator defaults it to the exporter release it was built against, so
+an operator upgrade changes the sidecar only when that release moved. It is not
+pinned in lockstep with `slapd` and `init`; pin it only to run a different
+exporter version.
+
 ## What it does not do
 
 - **It does not bootstrap trust.** Cross-site trust is pairwise and circular —

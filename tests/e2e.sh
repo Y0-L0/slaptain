@@ -187,6 +187,20 @@ else
     IMAGE_TAG="sha-${GIT_TAG}"
 fi
 
+# The slapd exporter is its own version line (ADR-033 decision 4,
+# docs/VERSIONING.md): git tags exporter/vX.Y.Z, image tag X.Y.Z, off-tag the
+# same sha-<hash> addressing. Same script, its own stream; mirrors the Makefile's
+# EXPORTER_GIT_TAG/EXPORTER_IMAGE_TAG. Pin EXPORTER_GIT_TAG=exporter/v<X.Y.Z> to
+# run against a released exporter, independently of GIT_TAG.
+if [[ -z "${EXPORTER_GIT_TAG:-}" ]]; then
+    EXPORTER_GIT_TAG="$("$PROJECT_ROOT/scripts/image-tag.sh" exporter)"
+fi
+if [[ "$EXPORTER_GIT_TAG" =~ ^exporter/v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+    EXPORTER_IMAGE_TAG="${EXPORTER_GIT_TAG#exporter/v}"
+else
+    EXPORTER_IMAGE_TAG="sha-${EXPORTER_GIT_TAG}"
+fi
+
 # SLAPD_TAG_SUFFIX: appended to the slapd/slapd-init image tags only (the
 # operator tag is untouched). Empty = OpenLDAP 2.7.1; "-ol26" runs the suite
 # against the legacy OpenLDAP 2.6 pair, which is expected to FAIL the ITS#9580
@@ -691,21 +705,40 @@ build_mesh_values() {
         local repl_extra="{}"
         if [[ -n "${E2E_REPLICAS_PER_PEER:-}" ]]; then
             repl_extra="{\"replication\": {\"replicasPerPeer\": ${E2E_REPLICAS_PER_PEER}}}"
-            log "Cross-site fan-out: replicasPerPeer=${E2E_REPLICAS_PER_PEER}"
+            log "Cross-site fan-out: replicasPerPeer=${E2E_REPLICAS_PER_PEER}" >&2  # stdout is the values file
         fi
+        # monitoring.enabled: the exporter sidecar (ADR-033 Surface 3) is ON in
+        # the fixture, so every run covers it (monitor_sidecar_test.go, Label
+        # "monitor-sidecar") and every other spec runs against the pod shape a
+        # monitored install has. spec.images.exporter is PINNED to the exporter
+        # image built for this run, like slapd and init: the operator's default
+        # is a compiled-in exporter RELEASE (ADR-033 decision 4, "Packaging"),
+        # which names a version that may not be published yet and in any case
+        # is not the code under test. The default itself is unit-tested
+        # (exporter_sidecar_test.go).
+        # E2E_MONITORING=0 renders enabled: false — for showing the sidecar spec
+        # red, and for flipping it on afterwards to watch the opt-in roll.
+        local monitoring=true
+        [[ "${E2E_MONITORING:-1}" == "0" ]] && monitoring=false
+        log "Exporter sidecar (cluster.monitoring.enabled): $monitoring" >&2  # stdout is the values file
+        MESH_MONITORING="$monitoring" \
         MESH_REPL_EXTRA="$repl_extra" \
         MESH_SLAPD_REPO="$REGISTRY/$PROJECT/slapd" \
         MESH_SLAPD_TAG="$SLAPD_TAG" \
         MESH_INIT_REPO="$REGISTRY/$PROJECT/slapd-init" \
         MESH_INIT_TAG="$SLAPD_TAG" \
+        MESH_EXPORTER_REPO="$REGISTRY/$PROJECT/slapd-exporter" \
+        MESH_EXPORTER_TAG="$EXPORTER_IMAGE_TAG" \
         MESH_PULL_SECRETS="$pull_secrets" \
         yq -N '{"cluster": (. * {
                     "name": "slapd",
                     "images": {
                         "slapd": {"repository": strenv(MESH_SLAPD_REPO), "tag": strenv(MESH_SLAPD_TAG)},
-                        "init":  {"repository": strenv(MESH_INIT_REPO),  "tag": strenv(MESH_INIT_TAG)}
+                        "init":  {"repository": strenv(MESH_INIT_REPO),  "tag": strenv(MESH_INIT_TAG)},
+                        "exporter": {"repository": strenv(MESH_EXPORTER_REPO), "tag": strenv(MESH_EXPORTER_TAG)}
                     },
-                    "imagePullSecrets": (strenv(MESH_PULL_SECRETS) | from_json)
+                    "imagePullSecrets": (strenv(MESH_PULL_SECRETS) | from_json),
+                    "monitoring": {"enabled": (strenv(MESH_MONITORING) == "true")}
                 } * (strenv(MESH_REPL_EXTRA) | from_json))}' "$VALUES_FILE"
 
         yq -N ea '[select(.kind == "SlapdDatabase")
@@ -1608,7 +1641,7 @@ require_image_in_registry() { # image-name tag
     code=$(registry_probe "$url")
     case "$code" in
         200) : ;;
-        404) die "$REGISTRY/$PROJECT/$1:$2 is not in the registry. Build and push first (make push REGISTRY=$REGISTRY), or pin GIT_TAG=<a pushed tag>. Untagged builds are addressed sha-<hash>, and a dirty tree derives sha-<hash>-dirty-<state8> (scripts/image-tag.sh + docs/VERSIONING.md) — those exist only after you push them." ;;
+        404) die "$REGISTRY/$PROJECT/$1:$2 is not in the registry. Build and push first (make push REGISTRY=$REGISTRY), or pin GIT_TAG=<a pushed tag> (EXPORTER_GIT_TAG=exporter/v<X.Y.Z> for slapd-exporter). Untagged builds are addressed sha-<hash>, and a dirty tree derives sha-<hash>-dirty-<state8> (scripts/image-tag.sh + docs/VERSIONING.md) — those exist only after you push them." ;;
         401|403) log "WARN: $REGISTRY/$PROJECT/$1:$2 needs credentials to verify (HTTP $code) — continuing. A private image is fine if the cluster can pull it; a typo in the registry path looks the same from here." ;;
         *)   log "WARN: cannot verify $1:$2 in the registry (HTTP $code) — continuing" ;;
     esac
@@ -1618,6 +1651,9 @@ do_setup() {
     require_discovery_transport
     require_image_in_registry slapd "$SLAPD_TAG"
     require_image_in_registry operator "$IMAGE_TAG"
+    if [[ "${E2E_MONITORING:-1}" != "0" ]]; then
+        require_image_in_registry slapd-exporter "$EXPORTER_IMAGE_TAG"
+    fi
     build_script_lab_file
     setup_foundation
     # The bootstrap proper, in the order docs/MULTI-SITE.md documents, each step
@@ -1659,6 +1695,7 @@ if [[ "$subcommand" == "config" ]]; then
     echo "peer[ca,kubeconfig]:  ${peer_map% }"
     echo "registry/project:     $REGISTRY / $PROJECT"
     echo "image tag:            $IMAGE_TAG${SLAPD_TAG_SUFFIX:+ (slapd pair: $IMAGE_TAG$SLAPD_TAG_SUFFIX)}"
+    echo "exporter image tag:   $EXPORTER_IMAGE_TAG"
     echo "operator namespace:   $NAMESPACE"
     echo "testing namespace:    $NAMESPACE_TESTING"
     echo "test resources:       $TEST_RESOURCES"

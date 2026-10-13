@@ -92,6 +92,31 @@ type SlapdImages struct {
 	// init is the slapd-init bootstrap container image.
 	// +optional
 	Init SlapdImageConfig `json:"init,omitempty"`
+	// exporter is the image the slapd exporter sidecar runs (spec.monitoring,
+	// ADR-033 Surface 3). The exporter is its own image, slapd-exporter, with
+	// its own version line (git tags exporter/vX.Y.Z, image tag X.Y.Z). When
+	// the repository is empty it is derived from the operator's like slapd and
+	// slapd-init (trailing path segment swapped for slapd-exporter); when the
+	// tag is empty it is the exporter release compiled into the operator — NOT
+	// the operator's own tag. An operator upgrade therefore leaves the sidecar,
+	// and the pods, unchanged unless that compiled-in release moved. A tag
+	// alone keeps the derived repository; repository and tag together are used
+	// exactly. pullPolicy: once this object is present at all, the CRD default
+	// stores IfNotPresent, and that is what the sidecar gets unless set
+	// otherwise; only with the object absent is the pull policy left to the
+	// API server's tag-based default (Always for :latest, IfNotPresent
+	// otherwise).
+	//
+	// The operator passes the sidecar no command and no arguments: the image's
+	// entrypoint and the exporter's flag defaults (ldapi socket in
+	// /run/openldap, SASL EXTERNAL, :9330/metrics) are the whole contract, so
+	// any slapd-exporter release can be pinned here. Pin it to run a different
+	// exporter version; it is not pinned in lockstep with slapd and init. A
+	// future operator that changes the sidecar's pod-side shape (mounts, port,
+	// securityContext) still rolls a pinned cluster. Ignored while monitoring
+	// is off.
+	// +optional
+	Exporter SlapdImageConfig `json:"exporter,omitempty"`
 }
 
 // SlapdTLSConfig configures TLS for slapd.
@@ -823,15 +848,51 @@ type SlapdClusterSpec struct {
 	// +optional
 	Replication SlapdReplicationConfig `json:"replication,omitempty"`
 	// imagePullSecrets references Secrets in the same namespace that the kubelet
-	// uses to pull the slapd and slapd-init images. Each Secret must be of
-	// type kubernetes.io/dockerconfigjson. Equivalent to setting imagePullSecrets
-	// on the StatefulSet pod template directly.
+	// uses to pull the slapd and slapd-init images — and, with spec.monitoring
+	// enabled, the exporter sidecar's image (slapd-exporter, beside the operator's image by default), so
+	// list a Secret for that registry too when it is private. Each Secret must
+	// be of type kubernetes.io/dockerconfigjson. Equivalent to setting
+	// imagePullSecrets on the StatefulSet pod template directly.
 	//
 	// Alternative if you standardize pull secrets at the namespace level: skip
 	// this field and patch the default ServiceAccount in the workload namespace
 	// with its own imagePullSecrets; the kubelet inherits them automatically.
 	// +optional
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+	// monitoring configures Surface 3 of ADR-033: the slapd exporter sidecar,
+	// which reads cn=Monitor over the pod's ldapi socket and serves it as
+	// Prometheus metrics. Unset adds nothing to the pod.
+	// +optional
+	Monitoring SlapdMonitoringConfig `json:"monitoring,omitempty"`
+}
+
+// SlapdMonitoringConfig configures the slapd exporter sidecar (ADR-033 Surface 3).
+//
+// The monitor database itself is always present on every pod, with no switch
+// (ADR-033 amendment 2026-10-08); only its exposure — the sidecar — is opt-in.
+type SlapdMonitoringConfig struct {
+	// enabled adds the exporter sidecar to every slapd pod, read-write and
+	// read-only alike. It runs the slapd-exporter image (spec.images.exporter;
+	// by default the exporter release compiled into the operator) with no
+	// command or arguments, so the exporter's defaults apply: it binds SASL
+	// EXTERNAL over ldapi:///run/openldap/slapd.ldapi — no password, no
+	// Secret — and serves /metrics on port 9330 (named "metrics").
+	//
+	// Opt-in: unset means false. Off or unset adds NOTHING to the pod template,
+	// so upgrading the operator onto an existing cluster rolls no pod. Flipping
+	// it changes the pod template and therefore rolls the pods once, when the
+	// user flips it and only then (ADR-013 amendment 2026-10-08: a field whose
+	// purpose is to change the pod is not a roll trigger).
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+	// resources sets the exporter sidecar's compute requests and limits. No
+	// default: the exporter is small and collects only on scrape. The field
+	// exists for namespaces whose ResourceQuota or LimitRange rejects, or
+	// silently defaults, a container that declares nothing — there the sidecar
+	// would otherwise block or skew the whole pod. Separate from spec.resources,
+	// which belongs to the slapd container.
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
 // ExternalPeerReplicationState summarises the replication health of one external peer.

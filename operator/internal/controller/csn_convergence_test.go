@@ -17,11 +17,15 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
@@ -491,4 +495,310 @@ func mustCSNTime(t *testing.T, csns []string) time.Time {
 		t.Fatalf("newestCSN(%v): %v", csns, err)
 	}
 	return ts
+}
+
+// ─── ADR-033 Surface 2: the per-database readout ─────────────────────────────
+//
+// The verdict above is a judgement; what follows pins the MEASUREMENT it
+// reduces away — the quantity ADR-033 decision 3 exports as
+// slaptain_csn_spread_seconds / _pairs_read / _pairs_expected, which exists
+// nowhere else in the codebase. The spread the diverged branch computes for its
+// message does not count: it is a function-local that never escapes, and it
+// never runs on a healthy database at all.
+//
+// `csnsAOlder` is 146.716636 s behind `csnsA` (21:23:12.073437 against
+// 21:20:45.356801 on the two pods' newest CSN), which is the same gap
+// TestEvaluatePeerConvergence reads as "146.7".
+const spreadAOlder = 146716636 * time.Microsecond
+
+func TestEvaluateLocalConvergenceReadoutBySuffix(t *testing.T) {
+	tests := []struct {
+		name     string
+		readings []csnReading
+		replicas int32
+		want     map[string]dbCSNReadout
+		// because states the RULE, so a failure explains itself rather than
+		// printing two structs (TestEvaluatePeerConvergence's idiom).
+		because string
+	}{
+		{
+			// The healthy reading, and the one the whole surface turns on: a
+			// spread of 0 over three pods that agree is a MEASUREMENT, and
+			// obsmetrics' wantHealthyCluster carries exactly that line
+			// (`slaptain_csn_spread_seconds{...,database="default",...} 0`).
+			// A readout computed only inside the diverged branch — where the
+			// existing lag figure lives — has nothing to say here, which is
+			// why this case is first.
+			name: "a converged database measures a spread of zero over the pods that answered",
+			readings: []csnReading{
+				{Pod: "slapd-0", Suffix: sfxA, CSNs: csnsA},
+				{Pod: "slapd-1", Suffix: sfxA, CSNs: csnsA},
+				{Pod: "slapd-2", Suffix: sfxA, CSNs: csnsA},
+			},
+			replicas: 3,
+			want: map[string]dbCSNReadout{
+				sfxA: {PodsExpected: 3, PodsRead: 3, Spread: ptr.To(time.Duration(0))},
+			},
+			because: "0 with two or more readings is perfect convergence observed, " +
+				"not evidence missing — ADR-033 decision 5's converse",
+		},
+		{
+			// The measured quantity itself: newest minus oldest across the pods
+			// that answered, in the units the gauge exports.
+			name: "a diverged database measures the gap between its newest and oldest pod",
+			readings: []csnReading{
+				{Pod: "slapd-0", Suffix: sfxA, CSNs: csnsA},
+				{Pod: "slapd-1", Suffix: sfxA, CSNs: csnsAOlder},
+			},
+			replicas: 2,
+			want: map[string]dbCSNReadout{
+				sfxA: {PodsExpected: 2, PodsRead: 2, Spread: ptr.To(spreadAOlder)},
+			},
+			because: "the spread is the lag the boolean verdict throws away, and it is " +
+				"what a dashboard plots between a converged and a broken site",
+		},
+		{
+			// Per database, from that database's own readings. The incident
+			// shape (two healthy databases whose last writes are minutes apart)
+			// must not leak one database's count or spread into the other's —
+			// so the two databases here deliberately differ in BOTH numbers.
+			name: "each database is measured only from its own readings",
+			readings: []csnReading{
+				{Pod: "slapd-0", Suffix: sfxA, CSNs: csnsA},
+				{Pod: "slapd-1", Suffix: sfxA, CSNs: csnsA},
+				{Pod: "slapd-2", Suffix: sfxA, CSNs: csnsA},
+				{Pod: "slapd-0", Suffix: sfxB, CSNs: csnsB},
+				{Pod: "slapd-1", Suffix: sfxB, Err: "bind cn=repl-db2: LDAP Result Code 49"},
+				{Pod: "slapd-2", Suffix: sfxB, CSNs: csnsB},
+			},
+			replicas: 3,
+			want: map[string]dbCSNReadout{
+				sfxA: {PodsExpected: 3, PodsRead: 3, Spread: ptr.To(time.Duration(0))},
+				sfxB: {PodsExpected: 3, PodsRead: 2, Spread: ptr.To(time.Duration(0))},
+			},
+			because: "a contextCSN vector belongs to one database on one pod (ADR-008 " +
+				"amendment), so every number here is scoped to one suffix",
+		},
+		{
+			// Fewer than two readable pods is not a spread. This is the rule
+			// obsmetrics.RenderCluster enforces at the boundary (it omits
+			// csn_spread_seconds while PairsRead < 2) and the rule is stated
+			// here too, at the source, so nothing downstream of the readout can
+			// be handed a fabricated 0 either.
+			name: "one readable pod yields pair counts but no spread",
+			readings: []csnReading{
+				{Pod: "slapd-0", Suffix: sfxA, CSNs: csnsA},
+				{Pod: "slapd-1", Suffix: sfxA, Err: "dial slapd-1: connection refused"},
+			},
+			replicas: 2,
+			want: map[string]dbCSNReadout{
+				sfxA: {PodsExpected: 2, PodsRead: 1, Spread: nil},
+			},
+			because: "a spread needs two readings to be a spread at all, and 0 here " +
+				"would be indistinguishable from two pods that agree",
+		},
+		{
+			// THE 2026-10-06 SHAPE: "could not read contextCSN for 6 of 6
+			// (pod, database) pairs", a fact that lived only as English inside a
+			// condition message. PodsRead = 0 is the observation — the pass
+			// attempted and every read failed — and it is what makes
+			// `read < expected` an alertable comparison with no division.
+			name: "a database no pod could read reports zero read, expected intact, no spread",
+			readings: []csnReading{
+				{Pod: "slapd-0", Suffix: sfxA, Err: "dial: i/o timeout"},
+				{Pod: "slapd-1", Suffix: sfxA, Err: "dial: i/o timeout"},
+			},
+			replicas: 2,
+			want: map[string]dbCSNReadout{
+				sfxA: {PodsExpected: 2, PodsRead: 0, Spread: nil},
+			},
+			because: "the attempt is the observation; dropping the entry would make a " +
+				"site that can read none of its own databases look like a site with " +
+				"no databases",
+		},
+		{
+			// A pod that ANSWERED but holds no contextCSN is not a reading. An
+			// empty vector carries no timestamp, so counting it would put a pod
+			// in the spread's denominator while contributing nothing to its
+			// value — and the resulting 0 would claim perfect convergence over a
+			// database one pod has never received, which is the never-synced /
+			// hidden-glue shape (ADR-025).
+			name: "a pod answering with no contextCSN did not yield a reading",
+			readings: []csnReading{
+				{Pod: "slapd-0", Suffix: sfxA, CSNs: csnsA},
+				{Pod: "slapd-1", Suffix: sfxA, CSNs: nil},
+			},
+			replicas: 2,
+			want: map[string]dbCSNReadout{
+				sfxA: {PodsExpected: 2, PodsRead: 1, Spread: nil},
+			},
+			because: "readable means parseable; an answer with nothing in it is counted " +
+				"as attempted-and-unread, exactly like a failed query",
+		},
+		{
+			// Both counts come from the readings the pass actually holds, never
+			// from spec.replicas. Same evidence, so `read < expected` has one
+			// meaning — a pod was asked and could not be read — rather than two
+			// causes a time series cannot tell apart.
+			name: "pods expected counts the pairs the pass holds, not spec.replicas",
+			readings: []csnReading{
+				{Pod: "slapd-0", Suffix: sfxA, CSNs: csnsA},
+				{Pod: "slapd-1", Suffix: sfxA, CSNs: csnsA},
+			},
+			replicas: 5,
+			want: map[string]dbCSNReadout{
+				sfxA: {PodsExpected: 2, PodsRead: 2, Spread: ptr.To(time.Duration(0))},
+			},
+			because: "spec.replicas is a declared desire; the readout reports what was " +
+				"attempted, so the two numbers are commensurable",
+		},
+		{
+			// Presence in the readout is what means "attempted" — the same rule
+			// obsmetrics states for presence in ClusterObservation.Databases. A
+			// database the pass never asked about must get no entry, because an
+			// entry of zeros would claim the operator looked.
+			name: "a database absent from the readings is absent from the readout",
+			readings: []csnReading{
+				{Pod: "slapd-0", Suffix: sfxA, CSNs: csnsA},
+				{Pod: "slapd-1", Suffix: sfxA, CSNs: csnsA},
+			},
+			replicas: 2,
+			want: map[string]dbCSNReadout{
+				sfxA: {PodsExpected: 2, PodsRead: 2, Spread: ptr.To(time.Duration(0))},
+			},
+			because: "an absent database and a database at zero are different facts, and " +
+				"only one of them is an outage",
+		},
+		{
+			// Nothing was asked at all (the Silent verdict's input). There is
+			// nothing to measure, and nothing to invent.
+			// Green from birth against the stub, and kept deliberately: the
+			// plausible failure on this input is not a wrong number but a
+			// panic (an index or a divide on an empty set), and an operator
+			// that panics in checkLocalCSNConvergence takes the reconcile with
+			// it.
+			name:     "no readings at all yields no readout entries",
+			readings: nil,
+			replicas: 3,
+			want:     map[string]dbCSNReadout{},
+			because:  "an empty pass measures nothing; it does not measure zero",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := evaluateLocalConvergence(tt.readings, tt.replicas).ReadoutBySuffix
+
+			if len(got) != len(tt.want) || !readoutsEqual(got, tt.want) {
+				t.Errorf("ReadoutBySuffix =\n  %s\nwant\n  %s%s",
+					formatReadouts(got), formatReadouts(tt.want), becauseTail(tt.because))
+			}
+
+			// The invariant, asserted on every case rather than as its own
+			// expectation: a spread exists exactly when two or more pods were
+			// read.
+			//
+			// This is the ONLY place it is enforced, and deliberately so since
+			// 2026-10-06. obsmetrics.RenderCluster used to re-derive it from
+			// PairsRead, which made a measured 0 and an unmeasured database
+			// indistinguishable the moment the two sides disagreed; the render
+			// now gates on the pointer alone and trusts this. So a regression
+			// here is not caught one layer down — it is published.
+			for suffix, r := range got {
+				if (r.Spread != nil) != (r.PodsRead >= 2) {
+					t.Errorf("%s: PodsRead = %d with Spread = %s; a spread must be present "+
+						"exactly when two or more pods were read (obsmetrics.RenderCluster's "+
+						"PairsRead >= 2 rule, stated here at the source)",
+						suffix, r.PodsRead, formatSpread(r.Spread))
+				}
+			}
+		})
+	}
+}
+
+// TestEvaluateLocalConvergenceReadoutDoesNotDisturbTheVerdict is the guard on
+// the brief's one prohibition: the readout is additive, and Status, Reason,
+// Message and NewestBySuffix keep their current behaviour exactly.
+//
+// Green from birth — it asserts behaviour that already exists — and it is here
+// because the implementer's obvious move is to feed the new measurement into
+// the diverged branch's message, which would change a verdict while adding a
+// metric.
+//
+// NB a defect this guard deliberately does NOT fix: with a pod that answers
+// with no contextCSN, the message reports "9223372036.9s lag" (a saturated
+// time.Duration — the oldest-tracking in evaluateLocalConvergence takes the
+// zero time from an empty vector). It is reported as a finding, not repaired
+// here: changing it is a verdict change, which this milestone forbids, and it
+// deserves its own red-first case.
+func TestEvaluateLocalConvergenceReadoutDoesNotDisturbTheVerdict(t *testing.T) {
+	readings := []csnReading{
+		{Pod: "slapd-0", Suffix: sfxA, CSNs: csnsA},
+		{Pod: "slapd-1", Suffix: sfxA, CSNs: csnsAOlder},
+		{Pod: "slapd-0", Suffix: sfxB, CSNs: csnsB},
+		{Pod: "slapd-1", Suffix: sfxB, CSNs: csnsB},
+	}
+	got := evaluateLocalConvergence(readings, 2)
+
+	if got.Status != metav1.ConditionFalse || got.Reason != "CSNsDiverged" {
+		t.Errorf("Status/Reason = %q/%q, want False/CSNsDiverged", got.Status, got.Reason)
+	}
+	// The lag figure in the message is the DIVERGED BRANCH's own, and it stays
+	// there: it is part of a verdict this milestone does not touch.
+	if !strings.Contains(got.Message, "146.7s lag") {
+		t.Errorf("Message = %q, want it to keep its own lag figure %q", got.Message, "146.7s lag")
+	}
+	if !strings.Contains(got.Message, "1 of 2 databases") {
+		t.Errorf("Message = %q, want it to keep naming 1 of 2 databases", got.Message)
+	}
+	if len(got.NewestBySuffix) != 2 {
+		t.Errorf("NewestBySuffix has %d entries, want one per database — the readout is "+
+			"additive and must not displace the cross-site baseline", len(got.NewestBySuffix))
+	}
+	if got.Silent {
+		t.Error("Silent = true for a pass with readings")
+	}
+}
+
+// readoutsEqual compares two readouts maps, following the Spread pointers so a
+// nil spread and a pointer-to-zero are different (which is the whole
+// distinction this seam draws).
+//
+// An empty map and a nil map ARE the same thing here: both read as "no database
+// measured" at every call site, and pinning which one an implementation returns
+// would be pinning a detail that no consumer can observe.
+func readoutsEqual(got, want map[string]dbCSNReadout) bool {
+	if len(got) == 0 && len(want) == 0 {
+		return true
+	}
+	return reflect.DeepEqual(got, want)
+}
+
+// formatReadouts renders a readouts map in a stable, readable form, so a
+// failure says which database is wrong rather than printing pointer addresses.
+func formatReadouts(m map[string]dbCSNReadout) string {
+	if len(m) == 0 {
+		return "{} (no database measured)"
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		r := m[k]
+		parts = append(parts, fmt.Sprintf("%s: read %d of %d, spread %s",
+			k, r.PodsRead, r.PodsExpected, formatSpread(r.Spread)))
+	}
+	return strings.Join(parts, "\n  ")
+}
+
+// formatSpread names the absent spread in words, because "nil" and "0s" are the
+// two readings this seam exists to keep apart.
+func formatSpread(d *time.Duration) string {
+	if d == nil {
+		return "ABSENT (not measurable)"
+	}
+	return fmt.Sprintf("%s (measured)", *d)
 }

@@ -46,6 +46,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
+	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/obsmetrics"
 )
 
 const (
@@ -90,6 +91,11 @@ type SlapdClusterReconciler struct {
 	// features"; a SlapdCluster carrying spec.meshRef then reports
 	// MeshResolved=False/SiteIdentityMissing rather than guessing a site.
 	SiteName string
+	// Observations holds the last cluster pass's Surface 2 readings for the
+	// Prometheus collector to render on scrape (ADR-033 decision 3). Injected
+	// rather than a package-level global, so a test gets its own or none at all;
+	// nil is legal and simply records nothing.
+	Observations *obsmetrics.Store[obsmetrics.ClusterObservation]
 }
 
 // imageRef builds the "repository:tag" image reference for a data-plane image,
@@ -181,6 +187,11 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	sc := &ldapv1alpha1.SlapdCluster{}
 	if err := r.Get(ctx, req.NamespacedName, sc); err != nil {
 		if errors.IsNotFound(err) {
+			// The cluster is gone, so its Surface 2 series must stop rather than
+			// freeze at its last value (ADR-033 decision 5). This kind has no
+			// finalizer and no deletion handler, so this branch is the only
+			// signal there is.
+			r.evictObservation(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -380,11 +391,24 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// against the same database here, never against whichever of ours wrote
 	// most recently.
 	var localNewest map[string]time.Time
+	var csnReadouts map[string]dbCSNReadout
 	if sc.Spec.Replication.Enabled && ready >= 2 && len(dbInfos) > 0 {
-		localNewest = r.checkLocalCSNConvergence(ctx, sc, dbInfos)
+		verdict := r.checkLocalCSNConvergence(ctx, sc, dbInfos)
+		localNewest = verdict.NewestBySuffix
+		csnReadouts = verdict.ReadoutBySuffix
 	}
 
 	// External peer status: discovery, connectivity, and CSN convergence.
+	//
+	// discoveryFailed records which peers could not be ASKED this pass, for
+	// Surface 2 (ADR-033 decision 5). It is collected HERE, in the branch that
+	// holds the error, because the fact does not survive into status: the same
+	// pass overwrites LastError with "no remote addresses available" when no
+	// addresses are found — which is also what a discovery that RAN and found
+	// nothing leaves — and with the CSN verdict's text on a healthy peer. A
+	// provider count of 0 for a local fault (a rotated kubeconfig Secret, an
+	// unreachable remote API) points a reader at a remote site that is fine.
+	var discoveryFailed map[string]string
 	sc.Status.ExternalPeerStatuses = nil
 	for _, ep := range sc.Spec.Replication.ExternalPeers {
 		status := ldapv1alpha1.ExternalPeerStatus{
@@ -395,6 +419,10 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			providers, err := r.discoverRemotePeerProviders(ctx, sc, &ep)
 			if err != nil {
 				status.LastError = err.Error()
+				if discoveryFailed == nil {
+					discoveryFailed = make(map[string]string, 1)
+				}
+				discoveryFailed[ep.Name] = err.Error()
 				log.Info("remote peer discovery failed", "peer", ep.Name, "err", err)
 			} else {
 				status.DiscoveredProviders = providers
@@ -474,6 +502,21 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// The mesh verdict on the success path. The failure path returned long
 	// before here, having set the same condition with its own reason.
 	meshResolveCondition(sc, nil)
+
+	// Surface 2 (ADR-033 decision 3): publish what this pass OBSERVED, once, at
+	// the one point where the whole pass is in hand — the per-database CSN
+	// measurement the ReplicationConverged condition reduces to a boolean, and
+	// the per-peer discovery result just written above.
+	//
+	// Deliberately NOT recorded at the partial and early paths (the restore
+	// early return, a failed mesh resolution, spec.suspend, every early
+	// applyStatus). Those passes leave the previous observation standing with
+	// its timestamp AGEING, and the timestamp is what makes staleness visible:
+	// one staleness rule over this anchor then covers all of
+	// them. Recording at five more sites would mean five more decisions about
+	// what a half-finished pass may claim to have measured, each with its own
+	// way of being wrong. Please do not "fix" this by adding them.
+	r.recordObservation(sc, csnReadouts, dbInfos, discoveryFailed)
 
 	// SSA patch on the status subresource: no resourceVersion check, no conflict possible.
 	if err := r.applyStatus(ctx, sc); err != nil {
@@ -1289,6 +1332,11 @@ func (r *SlapdClusterReconciler) getConfigPassword(ctx context.Context, sc *ldap
 
 // databaseCSNInfo holds the suffix and replication credentials for CSN queries.
 type databaseCSNInfo struct {
+	// name is the SlapdDatabase's own name. Carried alongside the suffix
+	// because they answer different questions: a suffix is what slapd is asked
+	// about, a name is what a reader takes back to `kubectl get sd` — and it is
+	// what Surface 2's `database` label has to be (ADR-033 decision 3).
+	name   string
 	suffix string
 	// bindDNs are the identities to try, in order (csnBindDNs): the node-local
 	// replication identity first, the legacy cn=replication,<suffix> second.
@@ -1314,6 +1362,7 @@ func (r *SlapdClusterReconciler) listDatabaseInfo(ctx context.Context, sc *ldapv
 			continue
 		}
 		info := databaseCSNInfo{
+			name:    db.Name,
 			suffix:  db.Spec.Suffix,
 			bindDNs: csnBindDNs(db.Name, db.Spec.Suffix),
 		}
@@ -1339,13 +1388,17 @@ func (r *SlapdClusterReconciler) listDatabaseInfo(ctx context.Context, sc *ldapv
 
 // checkLocalCSNConvergence queries contextCSN on all local RW pods, for every
 // database, and sets the ReplicationConverged condition from the per-database
-// verdict (see evaluateLocalConvergence). Returns the newest local CSN
-// timestamp PER DATABASE SUFFIX, the baseline cross-site comparison uses.
+// verdict (see evaluateLocalConvergence).
+//
+// Returns the whole verdict, because this pass produces two things the caller
+// needs and they are not the same thing: NewestBySuffix is the baseline
+// cross-site comparison uses, and ReadoutBySuffix is the MEASUREMENT the
+// condition reduces to a boolean — what Surface 2 exports (ADR-033 decision 3).
 func (r *SlapdClusterReconciler) checkLocalCSNConvergence(
 	ctx context.Context,
 	sc *ldapv1alpha1.SlapdCluster,
 	dbInfos []databaseCSNInfo,
-) map[string]time.Time {
+) localVerdict {
 	log := logf.FromContext(ctx)
 	headlessSvc := sc.Name + "-headless"
 	tlsEnabled := sc.Spec.LDAP.TLS.Enabled
@@ -1412,7 +1465,7 @@ func (r *SlapdClusterReconciler) checkLocalCSNConvergence(
 		})
 	}
 
-	return verdict.NewestBySuffix
+	return verdict
 }
 
 // csnSyncThreshold is the maximum CSN lag considered "Synced".

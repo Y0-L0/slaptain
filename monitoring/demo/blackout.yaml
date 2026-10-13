@@ -1,0 +1,46 @@
+# Reversible fault injection: take ONE site dark to inbound LDAP — including to
+# its own operator.
+#
+#   make monitoring-demo-blackout CONTEXT=<site> SITE_POD_CIDR=<that site's pod CIDR>
+#   make monitoring-demo-restore  CONTEXT=<site>
+#
+# VERIFIED on a three-site lab, 2026-10-06, 2.5 minutes. What it produces:
+#
+#   - the OTHER sites report this one Unreachable, with the verdict filled in.
+#     They dialled and failed. This is the signal working.
+#   - this site reports PodsResponsive=False/PodsNotAnswering and
+#     ReplicationConverged=Unknown/CSNQueriesIncomplete. Also working — and
+#     note its pods stay Ready throughout, because the probes are exec probes
+#     on loopback (ADR-030) and no network policy can touch them.
+#   - this site ALSO reports connected=false for both peers, with an empty
+#     replicationState and no lastChecked, having never contacted them. That is
+#     an operator bug (docs/BACKLOG.md), not a property of the cut. The
+#     SlaptainPeerUnverified rule exists to name the right site when it happens.
+#
+# The ipBlock is doing less than it appears to. Cilium resolves in-cluster
+# sources to their pod identity and only tests ipBlock against entities outside
+# the cluster, so allowing the site's own pod CIDR allows nothing in-cluster and
+# this is a deny-all-ingress. That is why it is named blackout and why there is
+# a second file: monitoring/demo/cut-inbound.yaml uses fromEndpoints on the
+# cluster label for a genuinely one-directional cut that leaves the local
+# operator alone.
+#
+# The allowed CIDR is the ONE local fact here and is left as a placeholder, so
+# this file cannot be applied blind — which for a fault injection is a feature.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: slaptain-demo-blackout
+  namespace: slaptain-testing
+  labels:
+    app.kubernetes.io/part-of: slaptain
+    slaptain.chuck-chuck-chuck.net/demo: blackout
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: slapd
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: __SITE_POD_CIDR__

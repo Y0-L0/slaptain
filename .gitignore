@@ -10,3 +10,6 @@ tests/image-pull-secret.yaml
 
 # Local shell configurations
 .envrc
+
+# Monitoring: lab-specific scrape targets live outside the repo
+monitoring/*.local.yaml

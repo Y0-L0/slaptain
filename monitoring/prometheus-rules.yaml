@@ -1,0 +1,212 @@
+# Alert rules over Surface 1 (ADR-033).
+#
+# Fuses differ per condition REASON on purpose: docs/MULTI-SITE.md gives
+# DataMissingOnReadOnlyPods a longer fuse than its siblings because an RO
+# initial sync is legitimately transient, while GlueSuffix (ADR-025) is never
+# transient and never heals itself.
+#
+# NOT covered by a generic "condition == 0 is bad" rule, deliberately: the two
+# ReplicationMode*WiringRequired conditions have inverted semantics — True
+# means a human still owes the cluster some wiring — so they are informational
+# and a healthy peer-mode cluster reports one of them True and the other False.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: slaptain
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: slaptain
+spec:
+  groups:
+    - name: slaptain.cross-site
+      rules:
+        # Gated on the check having actually RUN. `connected` is derived from
+        # replicationState (slapdcluster_controller.go), and the operator skips
+        # the peer check entirely when it cannot read its OWN databases — which
+        # leaves connected=0 on a peer it never contacted, and drops
+        # lastChecked. Ungated, this alert names the wrong site: measured on a
+        # three-site lab, where cutting inbound LDAP to site-3 made site-3
+        # report site-1 and site-2 down. SlaptainPeerUnverified below is the
+        # one that tells the truth in that case.
+        - alert: SlaptainPeerLinkDown
+          expr: >-
+            slaptain_cluster_peer_connected == 0
+            and on (site, peer) (time() - slaptain_cluster_peer_last_checked_seconds < 180)
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.site }}: no connection to peer {{ $labels.peer }}"
+            description: >-
+              The operator at {{ $labels.site }} dialled peer
+              {{ $labels.peer }} and failed. Cross-site replication for every
+              database on that link has stopped.
+
+        # The companion case, and the reason this is a separate alert rather
+        # than a looser expression on the one above: `connected=0` with NO
+        # lastChecked means the peer was never contacted, so the fault is at
+        # THIS site, not at the peer. Absence is the signal, which is why it
+        # needs `unless` — a staleness comparison against a missing series
+        # yields nothing and would never fire.
+        - alert: SlaptainPeerUnverified
+          expr: >-
+            slaptain_cluster_peer_connected == 0
+            unless on (site, peer) slaptain_cluster_peer_last_checked_seconds
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.site }}: peer {{ $labels.peer }} reported down but never contacted"
+            description: >-
+              {{ $labels.site }} published connected=false for
+              {{ $labels.peer }} without recording a check. The operator skips
+              the peer check when it cannot read its own databases, so look at
+              {{ $labels.site }} — PodsResponsive and ReplicationConverged
+              there — and treat this peer verdict as unfounded.
+
+        - alert: SlaptainPeerNotSynced
+          expr: slaptain_cluster_peer_connected{replication_state!="Synced"} == 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.site }}: peer {{ $labels.peer }} is {{ $labels.replication_state }}"
+            description: >-
+              The peer answers but its CSN verdict is
+              {{ $labels.replication_state }}. PartiallyVerified means at least
+              one database yielded no readable contextCSN — unreadable
+              evidence, not proof of health (ADR-008).
+
+        - alert: SlaptainPeerStatusStale
+          # The operator's CSN pass runs on a 60s tick. A timestamp that stops
+          # advancing means the operator stopped observing, which no other
+          # series here can tell you — every one of them would hold its last
+          # value and read healthy.
+          #
+          # This catches a STALE timestamp only. A timestamp that disappears is
+          # SlaptainPeerUnverified's case: `>` against an absent series is not
+          # true, it is empty.
+          expr: time() - slaptain_cluster_peer_last_checked_seconds > 300
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.site }}: peer status for {{ $labels.peer }} is stale"
+            description: >-
+              No CSN check has run against this peer for over 5 minutes. The
+              operator is not observing; treat every other peer series at this
+              site as unverified rather than healthy.
+
+    - name: slaptain.cluster
+      rules:
+        - alert: SlaptainReplicationDiverged
+          expr: slaptain_cluster_condition{condition="ReplicationConverged",reason="CSNsDiverged"} == 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.site }}: {{ $labels.cluster }} contextCSNs diverged"
+            description: >-
+              Pods disagree on contextCSN for at least one database. Lag is
+              only observable while writes flow, so a divergence that persists
+              with traffic is real.
+
+        - alert: SlaptainCSNEvidenceIncomplete
+          expr: slaptain_cluster_condition{condition="ReplicationConverged",reason="CSNQueriesIncomplete"} == 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.site }}: contextCSN unreadable for some pod/database pair"
+            description: >-
+              A pod x database pair could not be read, so convergence is
+              unproven rather than broken. Unreadable evidence never counts
+              toward healthy (ADR-008).
+
+        - alert: SlaptainPodSilent
+          expr: slaptain_cluster_condition{condition="PodsResponsive"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.site }}: a read-write pod answers no LDAP"
+            description: >-
+              How long it has been silent is the transition age of this
+              condition — slaptain_cluster_condition_last_transition_seconds
+              with condition="PodsResponsive". There is no liveness probe by
+              design (ADR-030): a frozen pod leaves the Service, not the
+              cluster, and nothing will restart it for you.
+
+        - alert: SlaptainClusterNotReady
+          expr: slaptain_cluster_replicas_ready < slaptain_cluster_replicas_desired
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.site }}: {{ $labels.cluster }} has {{ $value }} ready read-write replicas short of desired"
+
+        - alert: SlaptainTLSSecretMissing
+          expr: slaptain_cluster_condition{condition="TLSReady"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.site }}: TLS is on but the certificate Secret is not usable"
+            description: >-
+              The cluster controller withholds the StatefulSet until the Secret
+              carries tls.crt and tls.key (ADR-029). A running cluster is not
+              torn down for this, so an existing cluster keeps serving.
+
+    - name: slaptain.database
+      rules:
+        # Never transient and never self-healing: one pod's suffix entry is a
+        # hidden glue entry, every CSN health signal reads clean, and backups
+        # from that pod are unrestorable (ADR-025). No `for`.
+        - alert: SlaptainGlueSuffix
+          expr: slaptain_database_condition{condition="DataPresent",reason="GlueSuffix"} == 0
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.site }}: {{ $labels.database }} has a GLUE suffix entry"
+            description: >-
+              A multi-site seed race demoted the suffix entry to a permanent
+              hidden glue entry. There is no auto-heal; follow the ADR-025
+              runbook. Backups taken from the affected pod cannot be restored.
+
+        - alert: SlaptainDataMissingOnPods
+          expr: slaptain_database_condition{condition="DataPresent",reason="DataMissingOnPods"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.site }}: {{ $labels.database }} is empty on at least one pod"
+
+        - alert: SlaptainDataMissingOnReadOnlyPods
+          # Longer fuse than its siblings: an RO initial sync legitimately
+          # looks like this, which is why it has its own reason.
+          expr: slaptain_database_condition{condition="DataPresent",reason="DataMissingOnReadOnlyPods"} == 0
+          for: 20m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.site }}: {{ $labels.database }} is empty on a read-only pod"
+
+        - alert: SlaptainSyncreplStanzasWithheld
+          expr: slaptain_database_condition{condition="SyncreplStanzasReady"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.site }}: {{ $labels.database }} syncrepl convergence withheld ({{ $labels.reason }})"
+            description: >-
+              The operator refused to write syncrepl stanzas rather than
+              converge to a set missing a peer. Replication is paused, not
+              silently reduced. The reason names what to fix.
+
+        - alert: SlaptainDatabaseNotRunning
+          expr: slaptain_database_info{phase!="Running"} == 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.site }}: {{ $labels.database }} is in phase {{ $labels.phase }}"

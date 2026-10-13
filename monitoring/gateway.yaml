@@ -1,0 +1,90 @@
+# Gateway API front door for the observing site, so the dashboard has a URL
+# instead of a port-forward.
+#
+#   kubectl --context <observing-site> apply -f monitoring/gateway.yaml
+#   kubectl --context <observing-site> -n monitoring get gateway
+#
+# ONE GATEWAY PER APP, deliberately. The obvious shape — one Gateway with two
+# listeners and a `sectionName` on each HTTPRoute — does not work here: both
+# routes are catch-all (no hostname, no path match), Cilium merges the routes
+# attached to a Gateway into one Envoy virtualhost, and requests end up split
+# across both backends. Measured on this lab: port 9090 answered Grafana's
+# login redirect. Two Gateways cost one extra address out of a /24 and are
+# unambiguous.
+#
+# The alternatives both cost more than an address: hostname-based routes need
+# DNS for names that do not exist yet, and path-based routes need Grafana's
+# root_url and Prometheus' routePrefix reconfigured to match.
+#
+# No address is pinned here, so this file carries no local fact and LB-IPAM
+# assigns whatever is free. To pin them — worth it if a URL has to survive a
+# recreate, e.g. for a demo — pass free addresses from the site's own pool:
+#
+#   make monitoring-gateway-apply CONTEXT=<site> \
+#     MONITORING_GRAFANA_IP=<free-ip> MONITORING_PROMETHEUS_IP=<free-ip>
+#
+# Read the assigned addresses back with:
+#   kubectl -n monitoring get gateway -o wide
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: slaptain-grafana
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: slaptain
+spec:
+  gatewayClassName: cilium
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: grafana
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: slaptain
+spec:
+  parentRefs:
+    - name: slaptain-grafana
+  rules:
+    - backendRefs:
+        - name: monitoring-grafana
+          port: 80
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: slaptain-prometheus
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: slaptain
+spec:
+  gatewayClassName: cilium
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: prometheus
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: slaptain
+spec:
+  parentRefs:
+    - name: slaptain-prometheus
+  rules:
+    - backendRefs:
+        - name: monitoring-kube-prometheus-prometheus
+          port: 9090

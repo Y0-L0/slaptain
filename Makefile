@@ -516,6 +516,130 @@ helm-lint:
 verify-generated:
 	@./hack/verify-generated.sh
 
+## ── Monitoring (ADR-033 Surface 1) ──────────────────────────────────────────
+## Off-the-shelf components only: kube-state-metrics exports SlapdCluster and
+## SlapdDatabase state from CR status, kube-prometheus-stack scrapes every site
+## from one place. No slaptain code is involved, so these work against any
+## operator release whose status carries the fields. See docs/MONITORING.md.
+MONITORING_NS ?= monitoring
+MONITORING_KSM_RELEASE ?= ksm
+MONITORING_STACK_RELEASE ?= monitoring
+## Node address and NodePort each site's kube-state-metrics is scraped on.
+## Must be the node's CROSS-SITE interface — on dual-homed nodes the one a
+## workstation reaches is a different NIC and is not registered with k8s, the
+## same trap E2E_NODE_ACCESS_IP exists for.
+MONITORING_KSM_NODEPORT ?= 30090
+## Values file for the observing site. The committed one carries RFC 5737
+## placeholders for the per-site scrape targets; keep your lab's real addresses
+## in a gitignored *.local.yaml copy and point this at it.
+MONITORING_STACK_VALUES ?= monitoring/kube-prometheus-stack-values.yaml
+## Optional: pin the Gateway addresses so a URL survives a recreate. Unset
+## means LB-IPAM assigns whatever is free.
+MONITORING_GRAFANA_IP ?=
+MONITORING_PROMETHEUS_IP ?=
+
+monitoring-repo: ## Add/update the prometheus-community Helm repo
+	helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+	helm repo update prometheus-community
+
+## monitoring-ksm-install: kube-state-metrics at ONE site. Apply at EVERY site,
+## with the same values file — it carries no per-site fact:
+##   for ctx in site1 site2 site3; do make monitoring-ksm-install CONTEXT=$$ctx; done
+monitoring-ksm-install:
+	$(HELM) upgrade --install $(MONITORING_KSM_RELEASE) prometheus-community/kube-state-metrics \
+		--namespace $(MONITORING_NS) --create-namespace \
+		-f monitoring/kube-state-metrics-values.yaml --wait
+	@# The chart puts no checksum annotation on the custom-resource-state
+	@# ConfigMap, so a changed config leaves the running pod on the OLD one —
+	@# and the only symptom is a label quietly missing from the output.
+	$(KUBECTL) rollout restart deployment/$(MONITORING_KSM_RELEASE)-kube-state-metrics -n $(MONITORING_NS)
+	$(KUBECTL) rollout status deployment/$(MONITORING_KSM_RELEASE)-kube-state-metrics -n $(MONITORING_NS) --timeout=120s
+
+monitoring-ksm-uninstall:
+	$(HELM) uninstall $(MONITORING_KSM_RELEASE) --namespace $(MONITORING_NS)
+
+## monitoring-stack-install: Prometheus + Grafana at the ONE observing site.
+## Edit the per-site scrape targets in the values file first — they are node
+## addresses and cannot be derived from here.
+monitoring-stack-install:
+	$(HELM) upgrade --install $(MONITORING_STACK_RELEASE) prometheus-community/kube-prometheus-stack \
+		--namespace $(MONITORING_NS) --create-namespace \
+		-f $(MONITORING_STACK_VALUES) --wait --timeout 10m
+	$(MAKE) monitoring-rules-apply monitoring-dashboard-apply CONTEXT=$(CONTEXT)
+
+## monitoring-gateway-apply: expose Grafana and Prometheus over Gateway API,
+## one Gateway each (see the header of monitoring/gateway.yaml for why not one
+## Gateway with two listeners). Pin the addresses with MONITORING_GRAFANA_IP /
+## MONITORING_PROMETHEUS_IP, or leave them unset and let LB-IPAM choose.
+monitoring-gateway-apply:
+	$(KUBECTL) apply -f monitoring/gateway.yaml
+	@if [ -n "$(MONITORING_GRAFANA_IP)" ]; then \
+		$(KUBECTL) patch gateway slaptain-grafana -n $(MONITORING_NS) --type=merge \
+			-p '{"spec":{"addresses":[{"type":"IPAddress","value":"$(MONITORING_GRAFANA_IP)"}]}}'; \
+	fi
+	@if [ -n "$(MONITORING_PROMETHEUS_IP)" ]; then \
+		$(KUBECTL) patch gateway slaptain-prometheus -n $(MONITORING_NS) --type=merge \
+			-p '{"spec":{"addresses":[{"type":"IPAddress","value":"$(MONITORING_PROMETHEUS_IP)"}]}}'; \
+	fi
+	@$(KUBECTL) get gateway -n $(MONITORING_NS) \
+		-o custom-columns='NAME:.metadata.name,ADDRESS:.status.addresses[*].value,PROGRAMMED:.status.conditions[?(@.type=="Programmed")].status'
+
+monitoring-gateway-delete:
+	$(KUBECTL) delete -f monitoring/gateway.yaml --ignore-not-found
+
+## monitoring-demo-cut: cut inbound LDAP to ONE site's slapd pods, to watch the
+## cross-site signals move. CILIUM_CLUSTER is that site's cilium cluster-name
+## and is required — the manifest ships with a placeholder on purpose. Read it
+## with: kubectl -n kube-system get cm cilium-config -o jsonpath='{.data.cluster-name}'
+monitoring-demo-cut:
+	@test -n "$(CILIUM_CLUSTER)" || { echo "CILIUM_CLUSTER is required (that site's cilium cluster-name)"; exit 1; }
+	@sed 's|__CILIUM_CLUSTER__|$(CILIUM_CLUSTER)|' monitoring/demo/cut-inbound.yaml | $(KUBECTL) apply -f -
+	@echo "cut applied. Expect the OTHER sites to report this one Unreachable within ~60-120s."
+	@echo "CHECK THE CUT SITE TOO: it should still report its own peers Synced. If it reports"
+	@echo "them down with an empty replicationState, the policy is blocking the local operator"
+	@echo "as well and the cut is broader than intended."
+
+## monitoring-demo-blackout: take ONE site dark to inbound LDAP, its own
+## operator included. The verified fault injection — see the file header for
+## exactly what it produces, including the operator bug it exposes.
+monitoring-demo-blackout:
+	@test -n "$(SITE_POD_CIDR)" || { echo "SITE_POD_CIDR is required (that site's pod CIDR)"; exit 1; }
+	@sed 's|__SITE_POD_CIDR__|$(SITE_POD_CIDR)|' monitoring/demo/blackout.yaml | $(KUBECTL) apply -f -
+	@echo "blackout applied. Within ~60-120s the OTHER sites report this one Unreachable;"
+	@echo "this site reports PodsNotAnswering + CSNQueriesIncomplete, and (bug) its peers down."
+
+## monitoring-demo-restore: remove either fault injection. Name-based, so it
+## does not need the parameter the cut was applied with.
+monitoring-demo-restore:
+	@sed 's|__CILIUM_CLUSTER__|placeholder|' monitoring/demo/cut-inbound.yaml | $(KUBECTL) delete -f - --ignore-not-found
+	@sed 's|__SITE_POD_CIDR__|0.0.0.0/0|' monitoring/demo/blackout.yaml | $(KUBECTL) delete -f - --ignore-not-found
+
+monitoring-stack-uninstall:
+	$(HELM) uninstall $(MONITORING_STACK_RELEASE) --namespace $(MONITORING_NS)
+
+monitoring-rules-apply: ## Apply the alert rules (needs the Prometheus Operator CRDs)
+	$(KUBECTL) apply -f monitoring/prometheus-rules.yaml
+
+## monitoring-dashboard-apply: (re)load the Grafana dashboard from the repo.
+## The JSON is the source of truth; a dashboard edited in the UI must be
+## exported back over this file or the next run of this target discards it.
+monitoring-dashboard-apply:
+	$(KUBECTL) create configmap slaptain-dashboards --namespace $(MONITORING_NS) \
+		--from-file=slaptain-mesh.json=monitoring/dashboards/slaptain-mesh.json \
+		--dry-run=client -o yaml | \
+		$(KUBECTL) label --local -f - grafana_dashboard=1 -o yaml --dry-run=client | \
+		$(KUBECTL) apply -f -
+
+## Port-forwards, as a fallback where Gateway API or a LoadBalancer is not
+## available. With monitoring-gateway-apply these are not needed.
+monitoring-grafana: ## Port-forward Grafana to http://localhost:3000 (admin / see values)
+	@echo "Grafana → http://localhost:3000  (user admin)"
+	$(KUBECTL) --namespace $(MONITORING_NS) port-forward svc/$(MONITORING_STACK_RELEASE)-grafana 3000:80
+
+monitoring-prometheus: ## Port-forward Prometheus to http://localhost:9090
+	@echo "Prometheus → http://localhost:9090"
+	$(KUBECTL) --namespace $(MONITORING_NS) port-forward svc/$(MONITORING_STACK_RELEASE)-kube-prometheus-prometheus 9090:9090
+
 show-tag: ## Print the git tag and the image/chart tag derived from it
 	@echo "git:    $(GIT_TAG)"
 	@echo "image:  $(IMAGE_TAG)"

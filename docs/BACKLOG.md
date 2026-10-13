@@ -95,6 +95,62 @@ tests, so the atomic `Replace` remains guarded by prose.
 
 ---
 
+## A site that cannot read its OWN databases reports every external peer as disconnected
+
+`slapdcluster_controller.go:410` gates the peer CSN check on local evidence:
+
+```go
+if len(dbInfos) > 0 && len(localNewest) > 0 {
+    r.checkPeerCSNConvergence(ctx, sc, &ep, &status, dbInfos, localNewest)
+}
+status.Connected = status.ReplicationState != "" && status.ReplicationState != ldapv1alpha1.ReplicationUnreachable
+```
+
+When every local contextCSN read fails, `localNewest` is empty, the peer check
+is skipped, and `Connected` is then derived from an **unset** `ReplicationState`
+— so the site publishes `connected: false` for every peer it never contacted,
+with no `replicationState`, no `lastError`, and no `lastChecked` (the status
+struct is rebuilt fresh each pass at `:389`, so the previous timestamp is
+dropped rather than going stale).
+
+The reader is pointed at the wrong site. Nothing in the peer entry says the
+fault is local, and `connected: false` is the same value a genuinely dead link
+produces.
+
+**Measured 2026-10-06** on a three-site lab while validating the monitoring
+work. Inbound LDAP to site-3's slapd pods was blocked for 2.5 minutes:
+
+- site-1 and site-2 reported site-3 `Unreachable` **with** the verdict — they
+  dialled and failed. Correct.
+- site-3 reported site-1 and site-2 `connected=false` with an empty
+  `replicationState`, for the five scrape intervals 13:13:30–13:15:30, with
+  `lastChecked` absent across exactly that window. Its own pods were `Ready`
+  throughout (exec probes on loopback are unaffected by a network policy) and
+  its status carried `PodsResponsive=False/PodsNotAnswering` and
+  `ReplicationConverged=Unknown/CSNQueriesIncomplete` — the two conditions that
+  *did* tell the truth.
+
+This is ADR-008's rule broken one level up: unreadable evidence does not merely
+fail to count toward healthy, it is converted into a positive claim about a
+remote peer. ADR-033 decision 5 names the same failure for the metric surface.
+
+**Fix shape:** unreadable local evidence must produce an explicit unknown, not
+`false`. `PartiallyVerified` already exists for "the peer answered but some
+evidence is missing"; this is the sibling case, "we never asked", and wants its
+own reason rather than reuse. `Connected` cannot express it at all — it is a
+bool derived for backward compatibility — so either it stops being derived from
+an unset state, or the peer entry grows something that can say "not assessed".
+Red-first: a cluster whose local CSN reads all fail must NOT publish
+`connected: false` for a peer that is up.
+
+**Monitoring already works around it**, which is not a fix: the shipped
+`SlaptainPeerUnverified` rule keys on `peer_connected == 0 unless on (site,
+peer) peer_last_checked_seconds` and names the local site. Note the shape — the
+signal is the *absence* of the timestamp, so the obvious staleness comparison
+(`time() - lastChecked > 300`) can never catch it.
+
+---
+
 ## `ensureServerIDs` will renumber a live pod if the derivation ever moves again
 
 `ensureServerIDs` converges `olcServerID` per pod: it compares the derived value

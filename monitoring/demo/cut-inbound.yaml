@@ -1,0 +1,50 @@
+# Reversible fault injection: cut INBOUND LDAP to one site's slapd pods, so the
+# monitoring signals can be watched moving rather than asserted to work.
+#
+#   make monitoring-demo-cut     CONTEXT=<site> CILIUM_CLUSTER=<that site's cilium cluster-name>
+#   make monitoring-demo-restore CONTEXT=<site>
+#
+# A CiliumNetworkPolicy, not a plain NetworkPolicy, and this is the whole
+# lesson of the file. The first version allowed ingress from the site's own pod
+# CIDR via `ipBlock`, on the theory that an address block cannot accidentally
+# match remote ClusterMesh pods the way a selector can. It cannot — but it does
+# not match LOCAL pods either: Cilium resolves in-cluster sources to their pod
+# identity and only tests `ipBlock` against entities it considers outside the
+# cluster. The result was a deny-all-ingress that also blinded the site's own
+# operator, measured on a three-site lab: the operator at 10.x.y.148, inside
+# the allowed /22, timed out dialling its own pods at 10.x.y.105.
+#
+# `fromEndpoints` on the cluster label is the ClusterMesh-aware form: local
+# endpoints match, remote ones do not, because a remote endpoint's identity
+# carries its own cluster name.
+#
+# Why ingress, and why only one direction: syncrepl is pull-based, so blocking
+# ingress stops this site SERVING its peers while it keeps RECEIVING from them.
+# The other sites' operators also bind this site to read contextCSN, so they
+# report it Unreachable. Peer status is consumer-side and one-directional
+# (ADR-008 amendment), which is why the dashboard gives A -> B and B -> A their
+# own rows.
+#
+# NOT YET VERIFIED in this form. The ipBlock version was, and it did something
+# else than it claimed. Run it once and check that the cut site still reports
+# its own peers Synced — if it reports them down with no replicationState, the
+# local side is being blocked again and the policy is still too broad.
+#
+# The readiness and startup probes are exec probes on loopback (ADR-030), so no
+# probe traverses the network and none is affected.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: slaptain-demo-cut-inbound
+  namespace: slaptain-testing
+  labels:
+    app.kubernetes.io/part-of: slaptain
+    slaptain.chuck-chuck-chuck.net/demo: cut-inbound
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: slapd
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            io.cilium.k8s.policy.cluster: __CILIUM_CLUSTER__

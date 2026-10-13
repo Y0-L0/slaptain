@@ -52,6 +52,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── MIGRATION-PLAN.md           # Phased plan for replacing a legacy OpenLDAP with slaptain
 │   ├── MIGRATION-LEGACY-SOURCE.md  # Source-side (legacy slapd) prep for hot migration
 │   ├── BACKUP.md                   # S3 backup/restore user guide (ADR-014)
+│   ├── MONITORING.md               # What slaptain exposes to Prometheus, and what it cannot tell you (ADR-033)
 │   ├── VERSIONING.md               # Where the `v` goes: git tags only; images/charts/appVersion bare
 │   ├── TLS.md                      # Certificates: where they come from, and how clients come to trust them (ADR-029)
 │   ├── TUNING.md                   # Tuning & sizing guide: defaults, placement classes, lab→prod sizing (ADR-024)
@@ -115,6 +116,16 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── mesh-establish-trust.sh     # a cert per site, then every site's CA to the others (ADR-007)
 │   ├── mesh-authorize-peers.sh     # RBAC + one kubeconfig Secret per ordered site pair
 │   └── image-tag.sh                # the one tag derivation, shared by Makefile and e2e.sh
+├── monitoring/                     # Monitoring deployment inputs — off-the-shelf only (ADR-033 Surface 1)
+│   ├── kube-state-metrics-values.yaml      # CRS config; applied IDENTICALLY at every site
+│   ├── kube-prometheus-stack-values.yaml   # the ONE observing site; scrapes every site's ksm NodePort
+│   ├── prometheus-rules.yaml               # alert rules; fuses differ per condition REASON
+│   ├── gateway.yaml                        # Gateway API front door — ONE Gateway PER APP (a merged
+│   │                                       # catch-all route splits requests across both backends)
+│   ├── dashboards/slaptain-mesh.json       # Grafana dashboard (the JSON is the source of truth)
+│   └── demo/                               # reversible fault injection; the parameter is substituted
+│       ├── blackout.yaml                   # a site dark to inbound LDAP incl. its own operator (VERIFIED)
+│       └── cut-inbound.yaml                # one-directional cut via CiliumNetworkPolicy (unverified)
 ├── operator/                       # kubebuilder v4 Go operator (own Go module)
 │   ├── api/v1alpha1/
 │   │   ├── slapdcluster_types.go   # SlapdCluster CRD (+ Restoring phase, status.restore — ADR-014)
@@ -416,6 +427,7 @@ runs without readpw configuration but skips those test cases.
 | `make e2e-run` | Run Ginkgo e2e tests in `tests/e2e/` (requires NodePort cluster pre-deployed) |
 | `make e2e-multisite CONTEXTS="c1 c2"` | All-in-one multi-site e2e cycle via the unified `tests/e2e.sh` |
 | `make e2e-external-replication` | Run cross-cluster external replication tests (E2E_EXTERNAL_REPL=1) |
+| `make monitoring-ksm-install` | kube-state-metrics at one site (same values file at every site). `monitoring-stack-install` adds Prometheus+Grafana at the ONE observing site; `monitoring-dashboard-apply`, `monitoring-rules-apply`, `monitoring-grafana`, `monitoring-prometheus` round it out. See `docs/MONITORING.md` |
 
 ### Makefile Targets (operator/)
 

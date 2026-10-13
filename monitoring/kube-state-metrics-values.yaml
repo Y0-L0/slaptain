@@ -1,0 +1,214 @@
+# kube-state-metrics values — APPLIED IDENTICALLY AT EVERY SITE.
+#
+# Surface 1 of ADR-033: CR state, exported by an off-the-shelf component from
+# what the operator has already recorded in status. No slaptain code, no
+# operator release; this works against any operator version whose status
+# carries the fields below.
+#
+#   helm install ksm prometheus-community/kube-state-metrics \
+#     -n monitoring --create-namespace -f monitoring/kube-state-metrics-values.yaml
+#
+# Scraped from the one Prometheus at the observing site over NodePort 30090 —
+# see monitoring/kube-prometheus-stack-values.yaml.
+
+# Only slaptain's CRs. The built-in collectors for core kinds are left off:
+# this deployment exists to export SlapdCluster/SlapdDatabase state, and a
+# second opinion on Pod/Node state is not what the mesh dashboard is short of.
+collectors: []
+
+customResourceState:
+  enabled: true
+  config:
+    kind: CustomResourceStateMetrics
+    spec:
+      resources:
+        # ── SlapdCluster ──────────────────────────────────────────────────
+        - groupVersionKind:
+            group: ldap.chuck-chuck-chuck.net
+            version: v1alpha1
+            kind: SlapdCluster
+          metricNamePrefix: slaptain_cluster
+          labelsFromPath:
+            namespace: [metadata, namespace]
+            cluster: [metadata, name]
+            # A site can run more than one mesh, so every cluster series has to
+            # say which one it belongs to or an aggregate silently spans them.
+            # `meshRef` is a plain string on the spec, not an object. Absent on
+            # a non-mesh cluster, and kube-state-metrics omits a label it cannot
+            # resolve — so `mesh=~".*"` still matches those.
+            mesh: [spec, meshRef]
+          metrics:
+            - name: info
+              help: "SlapdCluster phase and replication mode (ADR-010)."
+              each:
+                type: Info
+                info:
+                  labelsFromPath:
+                    phase: [status, phase]
+                    replication_mode: [status, replicationMode]
+
+            - name: replicas_ready
+              help: "Ready read-write replicas."
+              each:
+                type: Gauge
+                gauge:
+                  path: [status, readyReplicas]
+            - name: replicas_desired
+              help: "Desired read-write replicas."
+              each:
+                type: Gauge
+                gauge:
+                  path: [status, replicas]
+            - name: readonly_replicas_ready
+              help: "Ready read-only consumer replicas."
+              each:
+                type: Gauge
+                gauge:
+                  path: [status, readOnlyReadyReplicas]
+            - name: readonly_replicas_desired
+              help: "Desired read-only consumer replicas."
+              each:
+                type: Gauge
+                gauge:
+                  path: [status, readOnlyReplicas]
+            - name: observed_generation
+              help: "Generation the operator last reconciled."
+              each:
+                type: Gauge
+                gauge:
+                  path: [status, observedGeneration]
+
+            # The condition's reason is a LABEL, not a separate series: the
+            # reasons carry different operational meaning and different alert
+            # fuses (docs/MULTI-SITE.md), e.g. DataMissingOnPods against
+            # DataMissingOnReadOnlyPods against GlueSuffix.
+            - name: condition
+              help: "SlapdCluster status condition; 1 True, 0 False. Unknown is ABSENT, never 0 (ADR-033 decision 5)."
+              each:
+                type: Gauge
+                gauge:
+                  path: [status, conditions]
+                  labelsFromPath:
+                    condition: [type]
+                    reason: [reason]
+                  valueFrom: [status]
+
+            # For PodsResponsive the AGE of the transition is the signal —
+            # how long a read-write pod has answered no LDAP at all (ADR-030).
+            - name: condition_last_transition_seconds
+              help: "Unix time of the condition's last transition."
+              each:
+                type: Gauge
+                gauge:
+                  path: [status, conditions]
+                  labelsFromPath:
+                    condition: [type]
+                    reason: [reason]
+                  valueFrom: [lastTransitionTime]
+
+            # ── Cross-site, the part no exporter can see ──────────────────
+            # replicationState rides as a label so a rule can say
+            # replication_state!="Synced" without enumerating the enum.
+            - name: peer_connected
+              help: "External peer reachability, labelled with its per-database CSN verdict (ADR-008 amendment)."
+              each:
+                type: Gauge
+                gauge:
+                  path: [status, externalPeerStatuses]
+                  labelsFromPath:
+                    peer: [name]
+                    replication_state: [replicationState]
+                  valueFrom: [connected]
+
+            # Only set while replicationState is Lagging, so this series is
+            # ABSENT on a healthy link — and absent on an idle-but-broken one,
+            # because lag is observable only while writes flow.
+            - name: peer_lag_seconds
+              help: "Max per-database CSN timestamp delta to this peer."
+              each:
+                type: Gauge
+                gauge:
+                  path: [status, externalPeerStatuses]
+                  labelsFromPath:
+                    peer: [name]
+                  valueFrom: [lagSeconds]
+
+            - name: peer_last_checked_seconds
+              help: "Unix time the CSN check against this peer last ran."
+              each:
+                type: Gauge
+                gauge:
+                  path: [status, externalPeerStatuses]
+                  labelsFromPath:
+                    peer: [name]
+                  valueFrom: [lastChecked]
+
+        # ── SlapdDatabase ─────────────────────────────────────────────────
+        - groupVersionKind:
+            group: ldap.chuck-chuck-chuck.net
+            version: v1alpha1
+            kind: SlapdDatabase
+          metricNamePrefix: slaptain_database
+          labelsFromPath:
+            namespace: [metadata, namespace]
+            database: [metadata, name]
+            # `clusterRef` is a plain string, not an object. It was written as
+            # [spec, clusterRef, name] at first, which resolved to nothing and
+            # dropped the label from every database series without any error —
+            # a wrong path here is silent, so check the labels you expect are
+            # actually on the output.
+            cluster: [spec, clusterRef]
+          metrics:
+            - name: info
+              help: "SlapdDatabase phase, owning cluster and suffix."
+              each:
+                type: Info
+                info:
+                  labelsFromPath:
+                    phase: [status, phase]
+                    suffix: [spec, suffix]
+            - name: condition
+              help: "SlapdDatabase status condition; 1 True, 0 False."
+              each:
+                type: Gauge
+                gauge:
+                  path: [status, conditions]
+                  labelsFromPath:
+                    condition: [type]
+                    reason: [reason]
+                  valueFrom: [status]
+            - name: condition_last_transition_seconds
+              help: "Unix time of the condition's last transition."
+              each:
+                type: Gauge
+                gauge:
+                  path: [status, conditions]
+                  labelsFromPath:
+                    condition: [type]
+                    reason: [reason]
+                  valueFrom: [lastTransitionTime]
+
+# kube-state-metrics needs list/watch on the CRs it exports.
+rbac:
+  extraRules:
+    - apiGroups: ["ldap.chuck-chuck-chuck.net"]
+      resources:
+        - slapdclusters
+        - slapddatabases
+        - slapdschemas
+        - slapdmeshes
+        - slapdbackups
+        - slapdscheduledbackups
+        - slapdrestores
+      verbs: ["list", "watch"]
+
+# Reached from the observing site's Prometheus across the lab's node network.
+service:
+  type: NodePort
+  nodePort: 30090
+
+# No ServiceMonitor: the Prometheus Operator CRDs exist only at the observing
+# site, and this same values file is applied at all three.
+prometheus:
+  monitor:
+    enabled: false

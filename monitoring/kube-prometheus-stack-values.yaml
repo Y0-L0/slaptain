@@ -1,9 +1,13 @@
 # kube-prometheus-stack values — APPLIED IDENTICALLY AT EVERY SITE.
 #
+# This stack gives visibility on slaptain, its slapds, and the environment they
+# run in: the Kubernetes objects, the pods' containers and the nodes.
+#
 # Monitoring is site-local (ADR-033 amendment 2026-10-09): each site's
 # Prometheus scrapes only what runs at that site — its own kube-state-metrics
-# (Surface 1), its own operator (Surface 2) and its own slapd exporter
-# sidecars (Surface 3), all over ClusterIP via ServiceMonitor/PodMonitor.
+# (Surface 1, plus the core kinds), its own operator (Surface 2), its own slapd
+# exporter sidecars (Surface 3), and its own nodes, kubelets and API server,
+# all via ServiceMonitor/PodMonitor.
 # Nothing here reaches across a site boundary, and nothing here names a site:
 # the Prometheus is the site. The only cross-site view is the one the operator
 # already holds and exports locally (peer status, discovered providers).
@@ -12,7 +16,10 @@
 #     -n monitoring --create-namespace -f monitoring/kube-prometheus-stack-values.yaml
 #
 # Install this FIRST at a site: it brings the Prometheus Operator CRDs the
-# ServiceMonitors and the PodMonitor of the later releases need.
+# ServiceMonitors and the PodMonitor of the later releases need. On a cluster
+# that enforces PodSecurity `baseline` (Talos does by default), label the
+# namespace privileged first, or node-exporter never gets a pod:
+#   kubectl label namespace monitoring pod-security.kubernetes.io/enforce=privileged
 #
 # Grafana: kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80
 # (or monitoring/gateway.yaml).
@@ -20,23 +27,40 @@
 # We run kube-state-metrics ourselves, as its own release, from
 # monitoring/kube-state-metrics-values.yaml: that release carries the
 # custom-resource-state config that turns SlapdCluster/SlapdDatabase status
-# into series, with its core collectors off. The bundled one would export core
-# kinds and know nothing of slaptain's CRs.
+# into series, AND the core kinds the Kubernetes dashboards and rules below
+# read. Its job label is `kube-state-metrics`, which is what those rules
+# select on, so one instance serves both. The bundled one would know nothing
+# of slaptain's CRs.
 kube-state-metrics:
   enabled: false
 kubeStateMetrics:
   enabled: false
 
-# Off, deliberately: this stack exists to show slaptain's own state. Node and
-# control-plane metrics are a different conversation and a lot of series.
+# The environment: node-exporter (OS and kernel: CPU, memory, disks,
+# filesystems, network, pressure) and the kubelets with cAdvisor
+# (per-container CPU, memory, throttling, I/O, volume usage). These are what
+# the stack's standard dashboards (kubernetes-mixin, node-exporter-mixin) are
+# built on. Measured on a 4-node lab: about 23k series from node-exporter (most
+# of it node_cpu_seconds_total, per core and mode — 128-core nodes) and 20k
+# from the kubelets.
 nodeExporter:
-  enabled: false
-prometheus-node-exporter:
-  enabled: false
+  enabled: true
+kubelet:
+  enabled: true
+
+# Off, by size: the API server's histograms were 144k of 213k series on the
+# same lab, even after the chart's own bucket drops — more than the 10Gi
+# volume below holds over 7d. They feed only the "API server" dashboard and
+# the apiserver SLO/burn-rate rules, which describe the control plane rather
+# than the environment slapd runs in. The chart drops those with it.
 kubeApiServer:
   enabled: false
-kubelet:
-  enabled: false
+
+# Off: these listen on localhost only by default on most clusters whose
+# control plane we do not own (Talos, managed offerings), so enabling them
+# gives targets that are permanently down and alerts about it. kube-proxy is
+# often not there at all (Cilium replaces it). The chart drops their rule
+# groups and dashboards with them. Turn one on where it is reachable.
 kubeControllerManager:
   enabled: false
 kubeScheduler:
@@ -48,36 +72,77 @@ kubeEtcd:
 coreDns:
   enabled: false
 
-# Rules are shipped (monitoring/prometheus-rules.yaml) and visible as
-# pending/firing in the Prometheus UI. Routing them somewhere is a decision
-# about someone's on-call, not about slaptain.
+# Alert rules are visible as pending/firing in the Prometheus UI only — ours
+# (monitoring/prometheus-rules.yaml) and the chart's. Routing them somewhere
+# is a decision about someone's on-call, not about slaptain.
 alertmanager:
   enabled: false
+# The chart's rules are needed, not optional: the standard dashboards read
+# recording rules (e.g. node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate),
+# and without them half their panels stay empty. The alertmanager group is
+# the one not gated on a component, so it goes here.
 defaultRules:
-  create: false
+  create: true
+  rules:
+    alertmanager: false
 
 prometheus:
   prometheusSpec:
     scrapeInterval: 15s
     retention: 7d
+    # Safety net under the volume (storageSpec below, 20Gi): without it a
+    # bigger cluster than measured fills the PVC and Prometheus stops
+    # ingesting. With it, the oldest blocks go first.
+    retentionSize: 16GiB
     # Pick up PrometheusRules, ServiceMonitors and PodMonitors regardless of
     # release labels: the ksm ServiceMonitor and the operator chart's
     # ServiceMonitor and slapd PodMonitor belong to other releases.
     ruleSelectorNilUsesHelmValues: false
     serviceMonitorSelectorNilUsesHelmValues: false
     podMonitorSelectorNilUsesHelmValues: false
+    # Accept pushed metrics, not only scraped ones: a load generator reports
+    # its own throughput and latency by remote write rather than by being
+    # scraped — it is short-lived and has nothing to serve once it exits.
+    # The chart default is false, and then /api/v1/write answers 404: the
+    # generator logs an error per flush but its run still succeeds, so the
+    # visible symptom is an empty dashboard.
+    #
+    # Native histograms need nothing further. Verified against the 3.15.0
+    # this chart pins: a k6 run with trend-as-native-histogram arrives as a
+    # native histogram and histogram_quantile() answers, with no
+    # --enable-feature flag. (`scrape_native_histograms` is about SCRAPING
+    # them off a target and does not apply to a pushed series.)
+    #
+    # The receiver has no authentication. Anything that reaches the
+    # Prometheus Service can write series into it; the Service is ClusterIP,
+    # so that is the site's own cluster.
+    enableRemoteWriteReceiver: true
     storageSpec:
       volumeClaimTemplate:
         spec:
           accessModes: ["ReadWriteOnce"]
           resources:
             requests:
-              storage: 10Gi
+              # On the default StorageClass. Growing it later: the
+              # Prometheus Operator does not resize an existing PVC, so patch
+              # the PVC too (needs allowVolumeExpansion on the class).
+              storage: 20Gi
 
 grafana:
   enabled: true
-  defaultDashboardsEnabled: false
-  adminPassword: slaptain
+  # Dashboards imported through the UI, users and preferences live in
+  # Grafana's database; without a volume a pod restart (any stack upgrade)
+  # loses them. Dashboards meant to stay belong in a ConfigMap labelled
+  # grafana_dashboard=1 all the same — those are re-read on every start.
+  persistence:
+    enabled: true
+    size: 2Gi
+  # The standard Kubernetes and node dashboards, next to slaptain's own.
+  defaultDashboardsEnabled: true
+  # adminPassword unset on purpose: the chart generates a random one into the
+  # Secret <release>-grafana and keeps it across upgrades. Read it with
+  #   kubectl -n monitoring get secret monitoring-grafana \
+  #     -o jsonpath='{.data.admin-password}' | base64 -d
   service:
     type: ClusterIP
   sidecar:

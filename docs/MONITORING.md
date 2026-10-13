@@ -30,6 +30,21 @@ it off, slapd's own load is invisible: connection growth, a filling LMDB and an
 operation storm arrive unannounced. Everything about *replication health and mesh
 topology* is covered by Surfaces 1 and 2 alone.
 
+**The environment.** The shipped stack also scrapes what slapd runs on: the
+nodes (node-exporter: CPU, memory, disks, filesystems, network, pressure), the
+pods' containers (kubelet and cAdvisor: CPU, memory, throttling, I/O, volume
+usage) and the core Kubernetes objects (kube-state-metrics). It
+installs the stack's standard dashboards for them (kubernetes-mixin,
+node-exporter-mixin: "Kubernetes / Compute Resources / …", "Node Exporter /
+Nodes", "USE Method / …") and the recording and alert rules those dashboards
+read. Controller manager, scheduler, etcd, kube-proxy and CoreDNS stay off:
+on most clusters whose control plane you do not own they are not reachable,
+and enabling them gives permanently down targets. The API server stays off for
+size: on a 4-node lab its histograms were two thirds of all series, for one
+control-plane dashboard. Prometheus keeps 7 days, capped at 16 GiB of its
+20 GiB volume; Grafana gets a 2 GiB volume, so dashboards imported through the
+UI survive a restart. Both use the default StorageClass.
+
 ## Monitoring is site-local
 
 Each site's Prometheus scrapes only what runs at that site — its own
@@ -94,6 +109,13 @@ helm repo add prometheus-community https://prometheus-community.github.io/helm-c
 helm repo update prometheus-community
 
 # 1. The stack (brings the Prometheus Operator CRDs), then rules and dashboards.
+#    node-exporter needs hostNetwork, hostPID and host paths. Where PodSecurity
+#    enforces `baseline` (Talos does by default) the namespace must be
+#    privileged, or the DaemonSet never gets a pod and says so only in its events.
+kubectl --context "$ctx" create namespace monitoring --dry-run=client -o yaml |
+  kubectl --context "$ctx" apply -f -
+kubectl --context "$ctx" label namespace monitoring --overwrite \
+  pod-security.kubernetes.io/enforce=privileged
 helm --kube-context "$ctx" upgrade --install monitoring \
   prometheus-community/kube-prometheus-stack --version 92.2.0 \
   -n monitoring --create-namespace \
@@ -152,16 +174,22 @@ for ctx in <site-1> <site-2> <site-3>; do
     --set slapdPodMonitor.enabled=true
 done
 
-# optional: a URL for each site's Grafana
-make monitoring-gateway-apply CONTEXT=<site> \
-  MONITORING_GRAFANA_IP=<free-ip> MONITORING_PROMETHEUS_IP=<free-ip>
+# optional: a URL for each site's Grafana — see "The Gateway" below for which
+# form fits the site's Cilium. Preview first: the render target prints the
+# manifest, KUBECTL_APPLY_FLAGS=--dry-run=server sends it without persisting.
+make monitoring-gateway-render CONTEXT=<site>            # + the same variables
+make monitoring-gateway-apply  CONTEXT=<site>            # LB-IPAM, addresses assigned
+make monitoring-gateway-apply  CONTEXT=<site> \
+  MONITORING_GRAFANA_IP=<free-ip> MONITORING_PROMETHEUS_IP=<free-ip>   # LB-IPAM, pinned
+make monitoring-gateway-apply  CONTEXT=<site> \
+  MONITORING_GRAFANA_PORT=3000 MONITORING_PROMETHEUS_PORT=9090         # host-network mode
 ```
 
 `make monitoring-dashboard-apply CONTEXT=<site>` alone reloads the dashboards:
 it puts every `monitoring/dashboards/*.json` into the `slaptain-dashboards`
-ConfigMap and replaces it. The gateway is a plain `kubectl apply -f
-monitoring/gateway.yaml` without the make target; the target only adds the
-optional address pinning.
+ConfigMap and replaces it. Without the variables the gateway target applies
+`monitoring/gateway.yaml` unchanged; the variables only set listener ports and
+addresses in the rendered copy.
 
 **Step 3 on an existing operator is `helm upgrade --reuse-values`, not
 `make operator-helm-install`.** The make target sets `image.repository` and
@@ -229,10 +257,44 @@ the operator's port, not the exporter's. The series carry namespaces, cluster
 and mesh names, database names, pod names and condition reasons — no
 credentials, but a map of the deployment.
 
-Grafana then answers on its Gateway address (`admin`, password in the stack
-values) and the dashboards are at `/d/slaptain-mesh/` and `/d/slaptain-slapd/`. Pinning the addresses is
-optional — unset, LB-IPAM assigns what is free and
-`kubectl -n monitoring get gateway -o wide` reads them back.
+Grafana then answers on its Gateway address and the dashboards are at
+`/d/slaptain-mesh/` and `/d/slaptain-slapd/`.
+
+### The Gateway
+
+Which form fits depends on how the site's Cilium serves Gateway API. Check:
+
+```bash
+kubectl -n kube-system get cm cilium-config -o yaml | grep -i -E 'gateway|hostnetwork'
+```
+
+- **LB-IPAM (the default).** Each Gateway gets a LoadBalancer Service and an
+  address of its own from the site's pool, so both listen on port 80. Pinning
+  the addresses is optional — unset, LB-IPAM assigns what is free and
+  `kubectl -n monitoring get gateway -o wide` reads them back. Pin them when a
+  URL has to survive a recreate.
+- **Host-network mode** (`gateway-api-hostnetwork-enabled`). Envoy listens on
+  every node's own address and there is no LoadBalancer Service, so there is no
+  address to pick — leave the IP variables unset. The two Gateways then share
+  each node's address, so they need **different ports**:
+  `MONITORING_GRAFANA_PORT=3000 MONITORING_PROMETHEUS_PORT=9090`, and Grafana
+  answers on `http://<any-node-ip>:3000`. Ports at or above 1024 also avoid the
+  question of whether Cilium's Envoy keeps `NET_BIND_SERVICE` (Helm value
+  `envoy.securityContext.capabilities.keepCapNetBindService`), which a port
+  below 1024 needs. Verified on a host-network site: Grafana and Prometheus
+  each answered on their own port on every node address, and port 80 not at
+  all. That two Gateways on port 80 would collide follows from the mode and
+  was not tried. The Gateway's `status.addresses` lists every node, but
+  `kubectl get gateway` prints only the first; the make target prints them all.
+  Cilium's `gateway-api-hostnetwork-nodelabelselector` narrows which nodes
+  listen.
+
+The login is `admin` with a random password, generated by the Grafana chart on
+first install and kept across upgrades. The stack ships no default password:
+
+```bash
+kubectl -n monitoring get secret monitoring-grafana -o jsonpath='{.data.admin-password}' | base64 -d
+```
 
 **One Gateway per app**, which is not the obvious shape. One Gateway with two
 listeners and a `sectionName` per HTTPRoute does not work when both routes are
@@ -241,7 +303,7 @@ virtualhost and requests end up split across both backends — measured on a lab
 where the Prometheus listener answered Grafana's login redirect. Hostname-based
 routes would need DNS for names that do not exist yet, and path-based routes
 would need Grafana's `root_url` and Prometheus' `routePrefix` reconfigured. Two
-Gateways cost one extra address.
+Gateways cost one extra address — or, in host-network mode, one extra port.
 
 Where there is no Gateway API and no LoadBalancer, `make monitoring-grafana` and
 `make monitoring-prometheus` port-forward instead.
@@ -780,13 +842,20 @@ exported back over its file, or the next run of the target discards the edit.
 | Dashboard | Grain | Answers |
 |---|---|---|
 | **slaptain — mesh state** (`/d/slaptain-mesh/`) | one mesh at this site | Is replication healthy, and what does the operator think of every link and pod? Surfaces 1 and 2, plus a short Surface 3 overview. |
-| **slaptain — slapd** (`/d/slaptain-slapd/`) | pod × database at this site | What is slapd itself doing — load, queues, capacity? Surface 3 only. |
+| **slaptain — slapd** (`/d/slaptain-slapd/`) | cluster, pod × database at this site | Is the cluster replicating within the site, and what is slapd itself doing — load, queues, capacity? Surface 3, plus one row from Surfaces 1 and 2. |
 
 They are split by **question, not by surface count**. The mesh dashboard is the
 one to open first; it is scoped by mesh, which the exporter's series do not
 carry. The slapd dashboard is scoped by what they do carry — cluster, fleet,
 pod, database — so it works with Surface 3 alone, without kube-state-metrics or
-the operator's metrics. Each links to the other in its header, carrying the data
+the operator's metrics; only its replication row then stays empty.
+
+**Replication within a site needs no mesh.** `ReplicationConverged` and the
+contextCSN spread compare the pods of one cluster with each other, so every
+replicated cluster has them, and a single-site cluster usually runs without a
+`meshRef`. The mesh dashboard selects on `mesh` and so cannot show such a
+cluster; the slapd dashboard's replication row selects on namespace and cluster
+only, and shows every cluster. The alert rules never select on `mesh`. Each links to the other in its header, carrying the data
 source, namespace, cluster and time range; and every per-pod line in the mesh
 dashboard's Surface 3 section is a data link that opens the slapd dashboard on
 that pod (and, from the fill panel, that database).
@@ -844,9 +913,10 @@ database panels only; everything else is per pod.
 | Section | Panels | What it cannot tell you |
 |---|---|---|
 | *(headline)* | share of pods with a `cn=Monitor` reading; fullest data database and fullest accesslog (the rules' thresholds, 80/90 % and 70/85 %); busiest LMDB reader table; operations per second; slapd restarts in the time range | — |
+| Replication within this site | `ReplicationConverged` per cluster, with its reason; contextCSN spread per database; CSN evidence, pairs read of expected | Needs kube-state-metrics (the condition) and the operator's ServiceMonitor (spread, evidence). Scoped by cluster and database name, so the fleet, pod and database selectors do not apply. A cluster appears in the cluster selector only once its exporter is scraped. Cross-site links are on the mesh dashboard. |
 | Exporter and process health | `cn=Monitor` reading per pod as a state timeline — *reading*, *slapd unreadable* (the exporter answered, slapd did not: `SlaptainSlapdMonitorUnreadable`), *exporter down* (`SlaptainSlapdExporterDown`); scrape duration against the exporter's 5 s `--timeout`; uptime; failed dials and binds | The failure counters' `result="fail"` series only exist after a first failure, so a healthy exporter shows *no data* there — the absence of failures since the sidecar started, not a reading of zero. |
-| Databases (LMDB) | data-database fill and accesslog fill on separate panels, each with its own rule thresholds; a table of every pod × database now — fill, bytes in use, map size, entries, reader slots; entries over time; reader-slot use | Bytes are `pages × olmMDBPageSize`, which the `-ol26` image does not report, so those two columns are empty there. Equal entry counts across pods are a hint, not convergence — that is `contextCSN`, on the mesh dashboard. |
-| Connections and operations | current connections; new connections per second; operations per second per pod; the operation mix by type and fleet; writes (Add, Modify, Delete, Modrdn) per pod — the rate an accesslog fills at | The panels draw completed operations only; `openldap_operations_initiated_total` is exported alongside but not drawn. |
+| Databases (LMDB) | data-database fill and accesslog fill on separate panels, each with its own rule thresholds; a table of every pod × database now — fill, bytes in use, map size, entries, reader slots; entries over time; reader-slot use | Bytes are `pages × olmMDBPageSize`, which the `-ol26` image does not report, so those two columns are empty there. Equal entry counts across pods are a hint, not convergence — that is `contextCSN`, in the replication row. |
+| Connections and operations | current connections; new connections per second; operations per second per pod; the operation mix by type and fleet; writes (Add, Modify, Delete, Modrdn) per pod, as clients sent them | The panels draw completed operations only; `openldap_operations_initiated_total` is exported alongside but not drawn. `cn=Monitor` counts client operations only, so a change applied through syncrepl counts nowhere: measured under a bulk add, the writer counted 821 adds/s and its read-write peer 0, while the peer's data and accesslog databases each grew about 575 entries/s. The rate an accesslog fills at is its entry count over time, not the write panel. |
 | Threads and waiters *(collapsed)* | active and open threads against `cn=Max` (`olcThreads`); pending and backload; read and write waiters | A non-zero queue is depth, not saturation: live, `cn=Pending` read above zero with only 2–9 of 16 threads active, which is why no rule watches it. Saturation is a queue that grows while Active sits at Max. |
 | Traffic sent *(collapsed)* | bytes per second; PDUs, entries and referrals per second | — |
 
@@ -917,6 +987,37 @@ read from the policy's shape; the verified run predates the PodMonitor.
 Expect the state change on the order of the operator's 60 s CSN tick, not
 instantly. Nothing here is fresher than that pass, and a scrape interval below
 it only resamples the same reading.
+
+## Pushed metrics: a load generator
+
+The stack's Prometheus also accepts remote write
+(`enableRemoteWriteReceiver` in `monitoring/kube-prometheus-stack-values.yaml`),
+so a load generator running at the site can push its own throughput and
+latency next to slapd's series. Native histograms need no feature flag on the
+pinned Prometheus 3.15. With k6, from a pod in that cluster:
+
+```bash
+K6_PROMETHEUS_RW_SERVER_URL=http://monitoring-kube-prometheus-prometheus.monitoring.svc:9090/api/v1/write \
+  k6 run --features native-histograms -o experimental-prometheus-rw --tag testid=<run-name> script.js
+```
+
+From outside the cluster, point the URL at the Prometheus Gateway instead
+(`http://<gateway-address>:<port>/api/v1/write`). k6 2.x takes native
+histograms as `--features native-histograms` (or `K6_FEATURES`); the older
+`K6_PROMETHEUS_RW_TREND_AS_NATIVE_HISTOGRAM=true` still works but logs a
+deprecation warning. Without `-o experimental-prometheus-rw` the URL is never
+used, and k6 pushes nothing. The `testid` tag is what Grafana's k6 dashboards
+(e.g. "k6 Prometheus (Native Histograms)", grafana.com 18030) select runs by.
+That dashboard's panels are HTTP panels (`k6_http_req_*`); an LDAP workload
+fills only VUs, iteration duration and data sent/received, and its own `Trend`s
+need panels of their own.
+
+A time `Trend` (`new Trend('ldap_bind_duration', true)`) then arrives as the native histogram
+`k6_ldap_bind_duration_seconds`, and
+`histogram_quantile(0.99, sum(rate(k6_ldap_bind_duration_seconds[1m])))`
+answers. If the receiver is off, the endpoint answers 404: k6 logs an error per
+flush but the run still succeeds, so check its log before trusting an empty
+panel. The receiver is unauthenticated; whatever reaches the Service can write.
 
 ## Related
 

@@ -584,8 +584,14 @@ MONITORING_KSM_VERSION ?= 8.6.0
 MONITORING_STACK_VALUES ?= monitoring/kube-prometheus-stack-values.yaml
 ## Optional: pin the Gateway addresses so a URL survives a recreate. Unset
 ## means LB-IPAM assigns whatever is free.
+comma := ,
 MONITORING_GRAFANA_IP ?=
 MONITORING_PROMETHEUS_IP ?=
+## Listener ports. 80 suits LB-IPAM, where each Gateway gets an address of its
+## own. Under Cilium's host-network Gateway mode both Gateways listen on every
+## node's own address, so they need DIFFERENT ports — e.g. 3000 and 9090.
+MONITORING_GRAFANA_PORT ?= 80
+MONITORING_PROMETHEUS_PORT ?= 80
 
 monitoring-repo: ## Add/update the prometheus-community Helm repo
 	helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
@@ -599,8 +605,12 @@ monitoring-install:
 
 ## monitoring-stack-install: Prometheus + Grafana at ONE site, then the alert
 ## rules and the dashboard. Install it first: it brings the Prometheus
-## Operator CRDs every later ServiceMonitor/PodMonitor needs.
+## Operator CRDs every later ServiceMonitor/PodMonitor needs. The namespace is
+## labelled privileged because node-exporter needs hostNetwork/hostPID/host
+## paths; under an enforced `baseline` (Talos' default) it would get no pod.
 monitoring-stack-install:
+	$(KUBECTL) create namespace $(MONITORING_NS) --dry-run=client -o yaml | $(KUBECTL) apply -f -
+	$(KUBECTL) label namespace $(MONITORING_NS) --overwrite pod-security.kubernetes.io/enforce=privileged
 	$(HELM) upgrade --install $(MONITORING_STACK_RELEASE) prometheus-community/kube-prometheus-stack \
 		--version $(MONITORING_STACK_VERSION) \
 		--namespace $(MONITORING_NS) --create-namespace \
@@ -625,20 +635,26 @@ monitoring-ksm-uninstall:
 
 ## monitoring-gateway-apply: expose Grafana and Prometheus over Gateway API,
 ## one Gateway each (see the header of monitoring/gateway.yaml for why not one
-## Gateway with two listeners). Pin the addresses with MONITORING_GRAFANA_IP /
-## MONITORING_PROMETHEUS_IP, or leave them unset and let LB-IPAM choose.
+## Gateway with two listeners). Everything is rendered into the manifest before
+## a single apply, so KUBECTL_APPLY_FLAGS=--dry-run=server previews all of it.
+##   LB-IPAM (default): optionally pin MONITORING_GRAFANA_IP /
+##     MONITORING_PROMETHEUS_IP; unset, LB-IPAM chooses.
+##   Cilium host-network Gateway mode: no addresses, distinct ports —
+##     make monitoring-gateway-apply CONTEXT=<site> \
+##       MONITORING_GRAFANA_PORT=3000 MONITORING_PROMETHEUS_PORT=9090
+MONITORING_GATEWAY_EXPR = \
+  (select(.kind == "Gateway" and .metadata.name == "slaptain-grafana") | .spec.listeners[0].port) = $(MONITORING_GRAFANA_PORT) | \
+  (select(.kind == "Gateway" and .metadata.name == "slaptain-prometheus") | .spec.listeners[0].port) = $(MONITORING_PROMETHEUS_PORT) \
+  $(if $(MONITORING_GRAFANA_IP),| (select(.kind == "Gateway" and .metadata.name == "slaptain-grafana") | .spec.addresses) = [{"type": "IPAddress"$(comma) "value": "$(MONITORING_GRAFANA_IP)"}]) \
+  $(if $(MONITORING_PROMETHEUS_IP),| (select(.kind == "Gateway" and .metadata.name == "slaptain-prometheus") | .spec.addresses) = [{"type": "IPAddress"$(comma) "value": "$(MONITORING_PROMETHEUS_IP)"}])
+
+monitoring-gateway-render: ## Print the Gateway manifest monitoring-gateway-apply would apply
+	@yq '$(MONITORING_GATEWAY_EXPR)' monitoring/gateway.yaml
+
 monitoring-gateway-apply:
-	$(KUBECTL) apply -f monitoring/gateway.yaml
-	@if [ -n "$(MONITORING_GRAFANA_IP)" ]; then \
-		$(KUBECTL) patch gateway slaptain-grafana -n $(MONITORING_NS) --type=merge \
-			-p '{"spec":{"addresses":[{"type":"IPAddress","value":"$(MONITORING_GRAFANA_IP)"}]}}'; \
-	fi
-	@if [ -n "$(MONITORING_PROMETHEUS_IP)" ]; then \
-		$(KUBECTL) patch gateway slaptain-prometheus -n $(MONITORING_NS) --type=merge \
-			-p '{"spec":{"addresses":[{"type":"IPAddress","value":"$(MONITORING_PROMETHEUS_IP)"}]}}'; \
-	fi
+	yq '$(MONITORING_GATEWAY_EXPR)' monitoring/gateway.yaml | $(KUBECTL) apply $(KUBECTL_APPLY_FLAGS) -f -
 	@$(KUBECTL) get gateway -n $(MONITORING_NS) \
-		-o custom-columns='NAME:.metadata.name,ADDRESS:.status.addresses[*].value,PROGRAMMED:.status.conditions[?(@.type=="Programmed")].status'
+		-o custom-columns='NAME:.metadata.name,ADDRESS:.status.addresses[*].value,PORT:.spec.listeners[0].port,PROGRAMMED:.status.conditions[?(@.type=="Programmed")].status'
 
 monitoring-gateway-delete:
 	$(KUBECTL) delete -f monitoring/gateway.yaml --ignore-not-found
@@ -702,8 +718,8 @@ monitoring-dashboard-apply:
 
 ## Port-forwards, as a fallback where Gateway API or a LoadBalancer is not
 ## available. With monitoring-gateway-apply these are not needed.
-monitoring-grafana: ## Port-forward Grafana to http://localhost:3000 (admin / see values)
-	@echo "Grafana → http://localhost:3000  (user admin)"
+monitoring-grafana: ## Port-forward Grafana to http://localhost:3000 (admin, generated password)
+	@echo "Grafana → http://localhost:3000  (user admin; password: kubectl -n $(MONITORING_NS) get secret $(MONITORING_STACK_RELEASE)-grafana -o jsonpath='{.data.admin-password}' | base64 -d)"
 	$(KUBECTL) --namespace $(MONITORING_NS) port-forward svc/$(MONITORING_STACK_RELEASE)-grafana 3000:80
 
 monitoring-prometheus: ## Port-forward Prometheus to http://localhost:9090

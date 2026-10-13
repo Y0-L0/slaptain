@@ -13,10 +13,11 @@
 # first, it brings the CRD. Monitoring is site-local (ADR-033 amendment
 # 2026-10-09); nothing here names a site.
 
-# Only slaptain's CRs. The built-in collectors for core kinds are left off:
-# this deployment exists to export SlapdCluster/SlapdDatabase state, and a
-# second opinion on Pod/Node state is not what the mesh dashboard is short of.
-collectors: []
+# slaptain's CRs (customResourceState below) AND the chart's default
+# collectors for core kinds: the kube-prometheus-stack's Kubernetes dashboards
+# and rules read those, selecting on job="kube-state-metrics", which this
+# release's ServiceMonitor produces. One instance serves both. No slaptain
+# query reads a core-kind series, and the CR series are all slaptain_*.
 
 customResourceState:
   enabled: true

@@ -25,6 +25,15 @@
 #   make monitoring-gateway-apply CONTEXT=<site> \
 #     MONITORING_GRAFANA_IP=<free-ip> MONITORING_PROMETHEUS_IP=<free-ip>
 #
+# Under Cilium's host-network Gateway mode there is no address to pin: Envoy
+# listens on every node's own address, so both Gateways on port 80 would
+# collide. Give them different ports instead:
+#
+#   make monitoring-gateway-apply CONTEXT=<site> \
+#     MONITORING_GRAFANA_PORT=3000 MONITORING_PROMETHEUS_PORT=9090
+#
+# `make monitoring-gateway-render` prints what either form would apply.
+#
 # Read the assigned addresses back with:
 #   kubectl -n monitoring get gateway -o wide
 apiVersion: gateway.networking.k8s.io/v1

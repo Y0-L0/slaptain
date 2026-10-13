@@ -128,7 +128,20 @@ since 2.7), and `golang.org/x/crypto/argon2` produces the verifier. To decide:
 
 The CodeQL alerts stay open until the scheme changes; they are not dismissed.
 
-## A site that cannot read its OWN databases reports every external peer as disconnected
+## ~~A site that cannot read its OWN databases reports every external peer as disconnected~~ — DONE (2026-10-06)
+
+**Fixed**, together with a second defect of the same family found while writing
+the fix — a database with no local baseline read as `Synced`, because the
+remote-ahead clamp turned a zero-time subtraction into zero lag. Both halves and
+the measured evidence are in `docs/reconcile-loop-fixes.md`; `PartiallyVerified`
+is widened to "either side" by the ADR-008 amendment of the same date. Red-first:
+three table cases observed failing before the fix, and the deliberate asymmetry
+(a zero on the PEER's side against a readable local baseline stays `Lagging`)
+carries its own guard case, proven by mutation.
+
+Two follow-ups came out of it, below. The original entry follows for its
+evidence.
+
 
 `slapdcluster_controller.go:410` gates the peer CSN check on local evidence:
 
@@ -181,6 +194,213 @@ Red-first: a cluster whose local CSN reads all fail must NOT publish
 peer) peer_last_checked_seconds` and names the local site. Note the shape — the
 signal is the *absence* of the timestamp, so the obvious staleness comparison
 (`time() - lastChecked > 300`) can never catch it.
+
+---
+
+## The cross-site CSN baseline is gated on `ready >= 2`, so a 1-replica cluster reads PartiallyVerified forever
+
+`slapdcluster_controller.go:383`:
+
+```go
+if sc.Spec.Replication.Enabled && ready >= 2 && len(dbInfos) > 0 {
+    localNewest = r.checkLocalCSNConvergence(ctx, sc, dbInfos)
+}
+```
+
+Two pods are needed to judge local *divergence*. They are **not** needed to hold
+a *baseline* for cross-site comparison — one pod's newest contextCSN is a
+perfectly good operand. But one gate serves both purposes, so a single-replica
+cluster never gets a `localNewest` at all.
+
+Before the 2026-10-06 fix that meant "peer check skipped" (and the bare
+`connected: false` that entry describes). After it, every external peer at such a
+site reads `PartiallyVerified` with every database named, permanently. Strictly
+more honest than before and it fails in the safe direction — but it is permanent
+yellow for topologies that are not broken:
+
+- the ADR-011 hot-migration shape, which is single-replica by design;
+- any `consumer-only` site (ADR-010);
+- any cluster scaled to 1.
+
+**Fix shape:** split the gate. The divergence verdict keeps `ready >= 2`; the
+baseline needs only `ready >= 1`. That changes what `ReplicationConverged` is
+written on a 1-replica cluster, which no committed test covers, so it wants its
+own red — which is why it was left out of the fix rather than folded in.
+
+**Found 2026-10-06** by the implementer of that fix, reported rather than taken.
+
+---
+
+## `evaluatePeerConvergence` cannot tell a failed local read from an empty database
+
+`csnReading.Answered` is true whenever `Err` is empty
+(`csn_convergence.go:45-52`), so a database **read fine and genuinely empty** is
+distinguishable from one whose read **failed**. But `localVerdict`
+(`csn_convergence.go:56-66`) carries only `NewestBySuffix`, and both collapse to
+an absent key.
+
+The 2026-10-06 fix therefore treats them alike, which is safe but coarse, and has
+two costs:
+
+1. A never-written database makes every external peer read `PartiallyVerified`
+   for as long as it stays empty — on a healthy cluster. The kind of standing
+   warning that trains people to ignore the field.
+2. **A third false-`Synced` survives, and it is the most reachable of the
+   family.** A local database that is empty-but-readable while the peer HAS data
+   still reports `Synced`, via the same clamp: we hold no baseline, so the
+   remote's CSN looks ahead, and the clamp zeroes the deficit. That is every new
+   site's initial-sync window — the peer holds entries we do not, and the verdict
+   says in sync. No failure required, just a fresh site joining a mesh.
+
+**The three-way rule:**
+
+| local | remote | verdict |
+|---|---|---|
+| read FAILED | anything | unverified (what the 2026-10-06 fix does for all of these) |
+| answered, EMPTY | empty | `Synced` — both agree there is nothing |
+| answered, EMPTY | has data | `Lagging` — we are missing what the peer has |
+| answered, has data | empty | `Lagging` (unchanged) |
+
+Cost: a field on `localVerdict`, a signature change on
+`evaluatePeerConvergence`, and one case in the red commit `01f8091` would have to
+change — it expects `PartiallyVerified` where the refined rule says `Synced`.
+Deferred deliberately rather than rewriting a committed red.
+
+---
+
+
+---
+
+## A pod with an empty contextCSN makes the divergence message report a 292-year lag
+
+`newestCSN` (`csn.go:135-152`) errors only when a CSN was present but unparseable:
+
+```go
+if newestRaw == "" && len(csns) > 0 {
+    return time.Time{}, "", fmt.Errorf("no parseable CSN in %v", csns)
+}
+return newest, newestRaw, nil
+```
+
+So an **empty** slice returns the zero time with **no error** — a legitimate
+reading, as far as the caller can tell.
+
+`evaluateLocalConvergence` then treats the two bounds asymmetrically
+(`csn_convergence.go:114-119`):
+
+```go
+if t.After(v.NewestBySuffix[r.Suffix]) { v.NewestBySuffix[r.Suffix] = t }   // guarded
+if o, seen := oldestBySuffix[r.Suffix]; !seen || t.Before(o) { ... }        // NOT guarded
+```
+
+A zero time can never displace a real value as *newest*, but it always wins as
+*oldest*. The divergence message at `:128-129` then subtracts it:
+
+```
+CSN divergence on 1 of 1 databases across 2 pods: dc=example,dc=org (9223372036.9s lag)
+```
+
+9223372036.9 s is a saturated `time.Duration` — about 292 years. The same input
+one pod later, with a real older CSN, reads `(146.7s lag)`.
+
+**It fires on exactly the shape a reader most needs a trustworthy number for**: a
+pod that never received the database — the ADR-025 glue / never-synced case. The
+existing case `a pod with no contextCSN diverges from pods that have one` passes
+today because it only asserts the suffix is named, not the figure.
+
+**Found 2026-10-06** by M2's test-author while building the per-database readout,
+reported rather than taken: the message belongs to a verdict that milestone was
+forbidden to change, and under Fix Discipline a wrong number wants its own
+red-first case.
+
+**Fix shape:** guard the oldest bound the way the newest one is guarded, or have
+`newestCSN` distinguish "no CSN at all" from "a CSN I could read" so the caller
+can skip the reading entirely. The second is better — it removes the class rather
+than the instance — but it changes a shared helper with four call sites, so it
+needs its own blast-radius pass. Red-first: a reading with an empty CSN vector
+must not contribute a bound.
+
+**Not a false-health claim**, unlike its three siblings on this branch — a
+nonsense figure is at least visibly nonsense. Filed with them because it is the
+same cause: evidence that is absent being used as though it were a measurement.
+The per-database readout added in the same milestone is immune by construction
+(such a pod counts as attempted-and-unread, so it yields no spread).
+
+---
+
+## `judgeExternalPeers` refuses a duplicate `siteIndex` but not a duplicate peer `name`
+
+`ExternalPeers` carries no `+listMapKey=name`, so the API server will not reject
+two peers sharing a name, and `judgeExternalPeers` checks `siteIndex` only. A
+duplicate name is therefore an accepted spec.
+
+It is not harmless. Anything that joins spec to status **by name** gets a
+non-injective map: measured during the ADR-033 Surface 2 review, two peers named
+`dup` with 3 and 0 discovered providers produced a reading where the peer with
+three reported **zero**. That is a *wrong* value rather than a missing one, which
+is the one failure mode a monitoring surface has no way to look suspicious while
+committing.
+
+Surface 2 now joins by index, which is reliable because the status list is
+rebuilt from the same spec slice in the same order every pass, and
+`TestClusterObservationJoinsPeersByIndexNotByName` pins it. But the join is only
+one consumer: the defect is that the spec admits the state at all.
+
+**Fix shape:** refuse a duplicate `name` the way a duplicate `siteIndex` is
+already refused — same place, same shape of message. A `+listMapKey=name` marker
+on the field would additionally let the API server reject it, which is better
+still, but it is a CRD change and wants its own blast-radius pass (it also makes
+the list a merge key for server-side apply, which this operator uses).
+
+**Consequence worth stating:** once refused, the Surface 2 fixture becomes
+unconstructible from a real spec, and those tests turn into the record of *why*
+the join is index-keyed rather than coverage of a reachable state. They stay
+correct either way — the fixture builds the spec directly rather than through
+validation — so tightening validation cannot rot them.
+
+**Found 2026-10-06** during the Surface 2 correctness review, reported rather
+than taken: it is a validation change with its own blast radius, not part of a
+metrics milestone.
+
+---
+
+## Surface 1 does not export three things ADR-033 decision 2 says it does
+
+Decision 2 names `status.restore.phase`, `SourceConverged` and
+`SourceSuffixHealthy` among the CR-state quantities kube-state-metrics exports.
+It exports none of them.
+
+`monitoring/kube-state-metrics-values.yaml` declares two
+`groupVersionKind` resources, `SlapdCluster` and `SlapdDatabase`. `SlapdBackup`
+is not among them, and `SourceConverged` / `SourceSuffixHealthy` are
+**SlapdBackup** conditions — so they have no series at all. Confirmed against
+the live Prometheus: the whole `slaptain_database_condition` family carries only
+
+```
+['DataPresent', 'Ready', 'SyncreplStanzasReady', 'TunablesConverged']
+```
+
+`status.restore.phase` is a `SlapdCluster` field and so is reachable, but no
+metric is declared for it either — the config exports `phase`, not the restore
+sub-phase.
+
+**Why it matters more than a missing gauge.** ADR-033's whole architecture is
+that a quantity belongs to exactly one surface, and Surface 2 deliberately does
+**not** export these three *because decision 2 assigned them to Surface 1*. The
+restore sub-phase in particular was explicitly withdrawn from Surface 2 on that
+basis (2026-10-07 amendment). So right now they are exported by neither surface,
+and the gap is invisible precisely because each side can point at the other.
+
+**Fix shape:** both are config-only and blocked by nothing. Add `SlapdBackup`
+(and `SlapdScheduledBackup`, `SlapdRestore`) to the CRS resource list — the RBAC
+`extraRules` in that same file already grant list/watch on all of them, so only
+the metric declarations are missing — and declare a metric for
+`status.restore.phase`. The kinds were granted and then never used, which is
+itself the tell.
+
+**Found 2026-10-07** while amending ADR-033: the agent reading decision 2 against
+the shipped config noticed the inventory did not match. No ADR change is needed —
+decision 2 is right about where these belong; the config simply never caught up.
 
 ---
 
@@ -533,6 +753,118 @@ and the remaining debt is 128 findings (errcheck 40, lll 31, modernize 15,
 goconst 13, prealloc 13, gocyclo 9, unused 4, unparam 2, revive 1).
 
 ---
+
+## Deleting a replicated database live, then re-creating it, crashes slapd 2.7.1
+
+Measured 2026-10-08 on the 2.7.1 build slaptain ships (`0.3.0` images). If a slapd
+process deletes a replicated database from `cn=config` while it is running, and that
+same process later re-creates a database with the same suffix, the process can crash.
+This is what `cleanupPolicy: Delete` followed by re-adding the SlapdDatabase does, and
+the cleanup-policy e2e does exactly that.
+
+**Demonstrated**
+
+- *Local reproduction, two slapd processes in one container.* The provider holds the
+  suffix with syncprov plus accesslog. Each iteration on the consumer, all through
+  `cn=config` over LDAP:
+  1. ADD the data mdb database, then ADD the accesslog mdb database.
+  2. ADD syncprov on the log DB, then syncprov and accesslog on the data DB.
+  3. MOD `olcSyncRepl` (three delta-syncrepl stanzas: one valid provider, one with a
+     wrong password, one to a closed port) together with `olcMultiProvider: TRUE`.
+  4. Wait 0.05–0.5 s, then replace the stanza set.
+  5. Delete deepest-first: the data DB's overlays, the data DB, the log DB's overlay,
+     the log DB.
+
+  Same suffix every iteration, fresh directories each time. Result: **7 crashes in 7
+  runs, with or without a monitor database**. Every crash came at iteration 2–6 and
+  never at iteration 1; a delete earlier in the same process is needed.
+- *Two crash signatures, both seen in both arms:*
+  - SIGABRT (exit 134): `back-mdb/id2entry.c:828: mdb_opinfo_get: Assertion '!rc'`,
+    reached via `mdb_entry_get` ← `overlay_entry_get_ov` ← `fe_acl_attribute` ←
+    `backend_attribute`.
+  - SIGSEGV (exit 139): a call through a NULL or garbage pointer under
+    `mdb_cursor_open` ← `mdb_dn2id` ← `mdb_dn2entry` ← `mdb_entry_get` ←
+    `overlay_entry_get_ov` ← syncprov or accesslog.
+
+  No back-monitor frame appeared on any crashing thread.
+- *Variants that did not crash:*
+  - 0 crashes in 50 iterations of a fresh process re-creating the databases on the
+    leftover LMDB files, with no delete in that process.
+  - 0 crashes in 120 iterations of the same with two live peers consuming from the
+    re-created databases.
+  - 0 crashes in 1,200 live `olcSyncRepl` replacements with peers attached.
+
+  Each count spans both arms, monitor database present and absent.
+- *Reproduced through the operator* on a throwaway three-replica cluster, three rounds
+  of {add a SlapdDatabase with `cleanupPolicy: Delete`, delete it, scale 3→2→3}. One
+  pod exited 139 during the round-2 re-add. That process had deleted the same database
+  in round 1. It died about 10 ms after the `olcSyncRepl` + `olcMultiProvider` MOD on
+  the re-created data database, which sat at the same `{N}` positions the deleted one
+  had used.
+
+**Inferred, not reproduced**
+
+A fixture pod crashed (exit 139) during the cleanup-policy spec the same day. Its
+process had issued no delete; it was re-creating a database on leftover state from an
+earlier run (old CSNs applied, peers answering "consumer has state info but provider
+doesn't"). Treated as the same class by inference only.
+
+**Reasoned, not proven**
+
+The stacks point at a dead LMDB environment or transaction, reached through a
+reference that outlived the deleted database: the accesslog overlay's log-DB pointer,
+syncprov's per-database state, or syncrepl's write backend. Our build ships no debug
+symbols (the vendored packaging produces no dbgsym packages), so the backtraces stop
+at exported symbols.
+
+**Upstream:** ITS#10607 (a cn=config use-after-free under *concurrent*
+modify/modrdn/delete, fixed after 2.7.1) was checked and does not match: every
+crashing sequence here was sequential on one connection, and that ITS leaves ADD
+unaffected. No ITS for this class was found.
+
+**Coverage gap:** the cleanup-policy e2e passed while the pod crashed underneath it,
+because it never looks at `restartCount`. A spec that deletes databases on live pods
+should fail when a slapd restarts during it.
+
+*Candidate mitigation, needs its own design:* do not re-create a suffix in a slapd
+process that deleted a database earlier, without a pod restart in between. That is in
+the spirit of ADR-019's "never reuse an olcDatabase={N} DN across a delete". Whether it
+is enough, and what it costs in rolls (ADR-013), is open.
+
+## A one-replica replicated cluster never gets its accesslog directory
+
+Observed once, on a throwaway cluster on the three-site lab (2026-10-08, data plane
+0.3.0, operator sha-69e1981): `replicas: 1`, `readReplicas: 1`,
+`replication.enabled: true`, one SlapdDatabase with `replication.deltaSync: true`.
+The data database came up on both pods. The accesslog database never did. Every
+ADD of `cn=accesslog-<db>` on the RW pod failed with
+
+    LDAP Result Code 80 "Other": olcDbDirectory: value #0: invalid path: No such file or directory
+
+and the operator went round a loop: "creating per-database directories", a mkdir
+Job that completes, the ADD, the same error. About 20 rounds in seven minutes, with
+the SlapdDatabase stuck at `Degraded`, `Ready=False/PartiallyApplied` ("applied to
+1 pods, 1 failed or pending"). `/accesslog/<db>` evidently never exists where slapd
+looks. The same shape with `replicas: 2` came up clean, accesslog included.
+
+*Cause unconfirmed.* Not investigated. The candidates are whether the accesslog
+volume is mounted at all when replication is configured but inactive
+(`replicas: 1`), and what the mkdir Job writes into in that case. Nor is it settled
+which side is wrong: should a one-replica cluster want an accesslog database, or
+should it get the directory?
+
+## `tryDialPodConfig` dials every read-only pod as its RW namesake
+
+`tryDialPodConfig` / `dialPodConfigEventually` (`tests/e2e/accesslog_test.go`)
+always resolve the address through `E2E_POD_NODEPORT_BASE`. A pod name like
+`slapd-readonly-0` therefore lands on the NodePort of `slapd-0`, the RW pod with the
+same ordinal. Nothing errors. The read-only loops in `tunables_test.go` and
+`authidentity_test.go` think they inspect the RO fleet but read slapd-0 a second time,
+so an RO-only divergence cannot turn them red. Found by the ADR-033 S3-a test author,
+whose `cn=monitor` specs bypass the helper and pick the base by pod kind
+(`anyPodAddr`, `E2E_RO_POD_NODEPORT_BASE`). *Fix:* move that choice into
+`tryDialPodConfig` itself, then watch the RO loops go red once against an RO pod that
+has been made to diverge, so the fix is shown to bite.
 
 ## e2e framework: specs cannot provision their own topology
 
@@ -1331,31 +1663,13 @@ re-entered below with their evidence.
   Upstream's defaults are defensible and the reference production platform
   leaves them alone too, so these wait for a measurement that asks for one.
   `spec.tuning` is the home when one does.
-- **No `cn=monitor`, no native metrics** (hygiene; *attempted 2026-09-13 and
-  withdrawn*). The monitor backend module is not loaded, no monitor database
-  exists, `olcMonitoring` is never set — so there are no per-database operation
-  counters and nothing an exporter can read. Monitoring today is the operator's
-  CSN polling, which by ADR-008's own amendment cannot see an idle-but-broken
-  link.
-
-  An implementation landed and was reverted the same day. Individually every
-  piece works on a running 2.7.1 pod: `olcModuleLoad: back_monitor` is accepted,
-  `olcDatabase=monitor` can be added live, `cn=Monitor` answers immediately, and
-  an ACL granting read to the existing `cn=replication,<suffix>` identity
-  (ADR-008 reuse) enforces correctly — anonymous gets `No such object`. What
-  does **not** work is converging it: with a monitor database present, an
-  `ldapmodify` of its `olcAccess` hangs slapd with the same signature as the
-  connection timeouts above (CSN queued, never graduates, pod dead to all
-  clients), observed on three of four pods. The operator rewrote that ACL every
-  reconcile because its comparison of what it wrote against what slapd stores
-  never matched — so steady state was one modify away from bricking the cluster.
-
-  *Surface when picked up again:* fix the ACL comparison FIRST and prove the
-  operator reaches a no-write steady state, then establish whether an `olcAccess`
-  modify on a monitor database is safe at all. Until both are answered this is
-  not a hygiene feature, it is an outage generator. The e2e assertions (monitor
-  database present per pod; readable by the replication identity; denied
-  anonymously) are worth restoring from commit `07b89af`'s parent.
+- ~~**No `cn=monitor`, no native metrics**~~ (*resolved by the ADR-033 amendment
+  of 2026-10-08*). The monitor database is converged on every pod with a constant
+  ACL, it is ensured before every mdb database ADD so back-mdb's per-database
+  statistics attach, and at rest the operator writes nothing. The withdrawal on 2026-09-13 was blamed on the monitor
+  ACL modify. The amendment re-measured that and puts the hang on the `timeout=`
+  freeze instead. See `docs/adrs/adr-033-three-monitoring-surfaces.md` and
+  `docs/TUNING.md`.
 - **TLS: no CRL policy, no `olcLocalSSF`/`olcSecurity`** (hygiene; the protocol
   floor and cipher policy landed 2026-09-13 as `spec.ldap.tls.protocolMin` /
   `.cipherSuite`). `olcTLSCRLCheck` and a minimum-SSF statement are still

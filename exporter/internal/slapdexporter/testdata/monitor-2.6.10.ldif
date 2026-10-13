@@ -1,0 +1,871 @@
+# Recorded 2026-10-11 from a throwaway slapd (OpenLDAP 2.6.10+dfsg-1) by testdata/record.sh,
+# run in the slaptain -ol26 slapd-init image (Debian's 2.6.10 package, the pair of the -ol26 slapd image).
+# Search: ldapsearch -b cn=Monitor -s sub '(objectClass=*)' '*' '+'
+# Bound by SASL EXTERNAL over ldapi as the sidecar would be, under the
+# constant monitor ACL of the ADR-033 2026-10-08 amendment. Unedited below this
+# header: suffixes are RFC 2606 names, paths are the throwaway container's.
+#
+# Database 1 (dc=example,dc=org) was opened BEFORE the monitor database was
+# added, so it carries no olmMDB*; Database 3 (dc=example,dc=net) was ADDed after
+# it and carries six (2.6 has no olmMDBPageSize).
+#
+dn: cn=Monitor
+objectClass: monitorServer
+structuralObjectClass: monitorServer
+cn: Monitor
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+description: This subtree contains monitoring/managing objects.
+description: This object contains information about this server.
+description: Most of the information is held in operational attributes, which must be explicitly requested.
+monitoredInfo: OpenLDAP: slapd 2.6.10+dfsg-1 (May 29 2025 23:41:48)
+entryDN: cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: TRUE
+
+dn: cn=Backends,cn=Monitor
+objectClass: monitorContainer
+structuralObjectClass: monitorContainer
+cn: Backends
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+description: This subsystem contains information about available backends.
+monitoredInfo: config
+monitoredInfo: ldif
+monitoredInfo: monitor
+monitoredInfo: mdb
+entryDN: cn=Backends,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: TRUE
+
+dn: cn=Backend 0,cn=Backends,cn=Monitor
+objectClass: monitoredObject
+structuralObjectClass: monitoredObject
+cn: Backend 0
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitoredInfo: config
+monitorRuntimeConfig: TRUE
+supportedControl: 2.16.840.1.113730.3.4.2
+supportedControl: 1.3.6.1.1.13.1
+supportedControl: 1.3.6.1.1.13.2
+seeAlso: cn=Database 0,cn=Databases,cn=Monitor
+entryDN: cn=Backend 0,cn=Backends,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Backend 1,cn=Backends,cn=Monitor
+objectClass: monitoredObject
+structuralObjectClass: monitoredObject
+cn: Backend 1
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitoredInfo: ldif
+monitorRuntimeConfig: TRUE
+supportedControl: 2.16.840.1.113730.3.4.2
+supportedControl: 1.3.6.1.1.13.1
+supportedControl: 1.3.6.1.1.13.2
+entryDN: cn=Backend 1,cn=Backends,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Backend 2,cn=Backends,cn=Monitor
+objectClass: monitoredObject
+structuralObjectClass: monitoredObject
+cn: Backend 2
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitoredInfo: monitor
+monitorRuntimeConfig: TRUE
+supportedControl: 2.16.840.1.113730.3.4.2
+seeAlso: cn=Database 2,cn=Databases,cn=Monitor
+entryDN: cn=Backend 2,cn=Backends,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Backend 3,cn=Backends,cn=Monitor
+objectClass: monitoredObject
+structuralObjectClass: monitoredObject
+cn: Backend 3
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitoredInfo: mdb
+monitorRuntimeConfig: TRUE
+supportedControl: 1.3.6.1.1.12
+supportedControl: 2.16.840.1.113730.3.4.2
+supportedControl: 1.3.6.1.4.1.4203.666.5.2
+supportedControl: 1.2.840.113556.1.4.319
+supportedControl: 1.3.6.1.1.13.1
+supportedControl: 1.3.6.1.1.13.2
+supportedControl: 1.3.6.1.4.1.4203.1.10.1
+supportedControl: 1.2.840.113556.1.4.1413
+supportedControl: 1.3.6.1.1.21.2
+seeAlso: cn=Database 1,cn=Databases,cn=Monitor
+entryDN: cn=Backend 3,cn=Backends,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Connections,cn=Monitor
+objectClass: monitorContainer
+structuralObjectClass: monitorContainer
+cn: Connections
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+description: This subsystem contains information about connections.
+entryDN: cn=Connections,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: TRUE
+
+dn: cn=Connection 1007,cn=Connections,cn=Monitor
+objectClass: monitorConnection
+structuralObjectClass: monitorConnection
+cn: Connection 1007
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105222Z
+modifyTimestamp: 20261011105222Z
+monitorConnectionNumber: 1007
+monitorConnectionProtocol: 3
+monitorConnectionOpsReceived: 2
+monitorConnectionOpsExecuting: 1
+monitorConnectionOpsPending: 0
+monitorConnectionOpsCompleted: 1
+monitorConnectionOpsAsync: 0
+monitorConnectionGet: 2
+monitorConnectionRead: 2
+monitorConnectionWrite: 0
+monitorConnectionMask: rx
+monitorConnectionAuthzDN: gidNumber=1024+uidNumber=1024,cn=peercred,cn=external,cn=auth
+monitorConnectionListener: ldapi://%2ftmp%2fw%2frun%2fslapd.ldapi
+monitorConnectionPeerDomain: local
+monitorConnectionPeerAddress: PATH=/tmp/w/run/slapd.ldapi
+monitorConnectionLocalAddress: PATH=/tmp/w/run/slapd.ldapi
+monitorConnectionStartTime: 20261011105222Z
+monitorConnectionActivityTime: 20261011105222Z
+entryDN: cn=Connection 1007,cn=Connections,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Max File Descriptors,cn=Connections,cn=Monitor
+objectClass: monitorCounterObject
+structuralObjectClass: monitorCounterObject
+cn: Max File Descriptors
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitorCounter: 524288
+entryDN: cn=Max File Descriptors,cn=Connections,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Total,cn=Connections,cn=Monitor
+objectClass: monitorCounterObject
+structuralObjectClass: monitorCounterObject
+cn: Total
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitorCounter: 8
+entryDN: cn=Total,cn=Connections,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Current,cn=Connections,cn=Monitor
+objectClass: monitorCounterObject
+structuralObjectClass: monitorCounterObject
+cn: Current
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitorCounter: 1
+entryDN: cn=Current,cn=Connections,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Databases,cn=Monitor
+objectClass: monitorContainer
+structuralObjectClass: monitorContainer
+cn: Databases
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+description: This subsystem contains information about configured databases.
+readOnly: FALSE
+namingContexts:
+namingContexts: cn=config
+namingContexts: dc=example,dc=org
+namingContexts: dc=example,dc=net
+monitorContext: cn=Monitor
+entryDN: cn=Databases,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: TRUE
+
+dn: cn=Frontend,cn=Databases,cn=Monitor
+objectClass: monitoredObject
+structuralObjectClass: monitoredObject
+cn: Frontend
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitoredInfo: frontend
+monitorIsShadow: FALSE
+namingContexts:
+readOnly: FALSE
+entryDN: cn=Frontend,cn=Databases,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Database 0,cn=Databases,cn=Monitor
+objectClass: monitoredObject
+structuralObjectClass: monitoredObject
+cn: Database 0
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitoredInfo: config
+monitorIsShadow: FALSE
+namingContexts: cn=config
+readOnly: FALSE
+seeAlso: cn=Backend 0,cn=Backends,cn=Monitor
+entryDN: cn=Database 0,cn=Databases,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Database 1,cn=Databases,cn=Monitor
+objectClass: monitoredObject
+structuralObjectClass: monitoredObject
+cn: Database 1
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitoredInfo: mdb
+monitorIsShadow: FALSE
+namingContexts: dc=example,dc=org
+readOnly: FALSE
+seeAlso: cn=Backend 3,cn=Backends,cn=Monitor
+entryDN: cn=Database 1,cn=Databases,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Database 2,cn=Databases,cn=Monitor
+objectClass: monitoredObject
+structuralObjectClass: monitoredObject
+cn: Database 2
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitoredInfo: monitor
+monitorIsShadow: FALSE
+monitorContext: cn=Monitor
+readOnly: FALSE
+seeAlso: cn=Backend 2,cn=Backends,cn=Monitor
+entryDN: cn=Database 2,cn=Databases,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Database 3,cn=Databases,cn=Monitor
+objectClass: monitoredObject
+objectClass: olmMDBDatabase
+structuralObjectClass: monitoredObject
+cn: Database 3
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitoredInfo: mdb
+monitorIsShadow: FALSE
+namingContexts: dc=example,dc=net
+readOnly: FALSE
+seeAlso: cn=Backend 3,cn=Backends,cn=Monitor
+olmMDBPagesMax: 2560
+olmMDBPagesUsed: 17
+olmMDBPagesFree: 10
+olmMDBReadersMax: 126
+olmMDBReadersUsed: 1
+olmMDBEntries: 3
+olmDbDirectory: /tmp/w/db2/
+entryDN: cn=Database 3,cn=Databases,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Listeners,cn=Monitor
+objectClass: monitorContainer
+structuralObjectClass: monitorContainer
+cn: Listeners
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+description: This subsystem contains information about active listeners.
+entryDN: cn=Listeners,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: TRUE
+
+dn: cn=Listener 0,cn=Listeners,cn=Monitor
+objectClass: monitoredObject
+structuralObjectClass: monitoredObject
+cn: Listener 0
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitorConnectionLocalAddress: PATH=/tmp/w/run/slapd.ldapi
+labeledURI: ldapi://%2ftmp%2fw%2frun%2fslapd.ldapi
+entryDN: cn=Listener 0,cn=Listeners,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Log,cn=Monitor
+objectClass: monitorContainer
+structuralObjectClass: monitorContainer
+cn: Log
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+description: This subsystem contains information about logging.
+description: Set the "monitorLogLevel" or "monitorDebugLevel" attributes to the desired levels.
+monitorDebugLevel: 0
+monitorLogLevel: 0
+entryDN: cn=Log,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Operations,cn=Monitor
+objectClass: monitorContainer
+structuralObjectClass: monitorContainer
+cn: Operations
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+description: This subsystem contains information about performed operations.
+monitorOpInitiated: 26
+monitorOpCompleted: 25
+entryDN: cn=Operations,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: TRUE
+
+dn: cn=Bind,cn=Operations,cn=Monitor
+objectClass: monitorOperation
+structuralObjectClass: monitorOperation
+cn: Bind
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitorOpInitiated: 8
+monitorOpCompleted: 8
+entryDN: cn=Bind,cn=Operations,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Unbind,cn=Operations,cn=Monitor
+objectClass: monitorOperation
+structuralObjectClass: monitorOperation
+cn: Unbind
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitorOpInitiated: 7
+monitorOpCompleted: 7
+entryDN: cn=Unbind,cn=Operations,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Search,cn=Operations,cn=Monitor
+objectClass: monitorOperation
+structuralObjectClass: monitorOperation
+cn: Search
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitorOpInitiated: 3
+monitorOpCompleted: 2
+entryDN: cn=Search,cn=Operations,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Compare,cn=Operations,cn=Monitor
+objectClass: monitorOperation
+structuralObjectClass: monitorOperation
+cn: Compare
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitorOpInitiated: 0
+monitorOpCompleted: 0
+entryDN: cn=Compare,cn=Operations,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Modify,cn=Operations,cn=Monitor
+objectClass: monitorOperation
+structuralObjectClass: monitorOperation
+cn: Modify
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitorOpInitiated: 0
+monitorOpCompleted: 0
+entryDN: cn=Modify,cn=Operations,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Modrdn,cn=Operations,cn=Monitor
+objectClass: monitorOperation
+structuralObjectClass: monitorOperation
+cn: Modrdn
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitorOpInitiated: 0
+monitorOpCompleted: 0
+entryDN: cn=Modrdn,cn=Operations,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Add,cn=Operations,cn=Monitor
+objectClass: monitorOperation
+structuralObjectClass: monitorOperation
+cn: Add
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitorOpInitiated: 8
+monitorOpCompleted: 8
+entryDN: cn=Add,cn=Operations,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Delete,cn=Operations,cn=Monitor
+objectClass: monitorOperation
+structuralObjectClass: monitorOperation
+cn: Delete
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitorOpInitiated: 0
+monitorOpCompleted: 0
+entryDN: cn=Delete,cn=Operations,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Abandon,cn=Operations,cn=Monitor
+objectClass: monitorOperation
+structuralObjectClass: monitorOperation
+cn: Abandon
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitorOpInitiated: 0
+monitorOpCompleted: 0
+entryDN: cn=Abandon,cn=Operations,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Extended,cn=Operations,cn=Monitor
+objectClass: monitorOperation
+structuralObjectClass: monitorOperation
+cn: Extended
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitorOpInitiated: 0
+monitorOpCompleted: 0
+entryDN: cn=Extended,cn=Operations,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Overlays,cn=Monitor
+objectClass: monitorContainer
+structuralObjectClass: monitorContainer
+cn: Overlays
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+description: This subsystem contains information about available overlays.
+monitoredInfo: glue
+entryDN: cn=Overlays,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: TRUE
+
+dn: cn=Overlay 0,cn=Overlays,cn=Monitor
+objectClass: monitoredObject
+structuralObjectClass: monitoredObject
+cn: Overlay 0
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitoredInfo: glue
+monitorRuntimeConfig: FALSE
+entryDN: cn=Overlay 0,cn=Overlays,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=SASL,cn=Monitor
+objectClass: monitorContainer
+structuralObjectClass: monitorContainer
+cn: SASL
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+description: This subsystem contains information about SASL.
+entryDN: cn=SASL,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Statistics,cn=Monitor
+objectClass: monitorContainer
+structuralObjectClass: monitorContainer
+cn: Statistics
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+description: This subsystem contains statistics.
+entryDN: cn=Statistics,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: TRUE
+
+dn: cn=Bytes,cn=Statistics,cn=Monitor
+objectClass: monitorCounterObject
+structuralObjectClass: monitorCounterObject
+cn: Bytes
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitorCounter: 19540
+entryDN: cn=Bytes,cn=Statistics,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=PDU,cn=Statistics,cn=Monitor
+objectClass: monitorCounterObject
+structuralObjectClass: monitorCounterObject
+cn: PDU
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitorCounter: 56
+entryDN: cn=PDU,cn=Statistics,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Entries,cn=Statistics,cn=Monitor
+objectClass: monitorCounterObject
+structuralObjectClass: monitorCounterObject
+cn: Entries
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitorCounter: 39
+entryDN: cn=Entries,cn=Statistics,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Referrals,cn=Statistics,cn=Monitor
+objectClass: monitorCounterObject
+structuralObjectClass: monitorCounterObject
+cn: Referrals
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitorCounter: 0
+entryDN: cn=Referrals,cn=Statistics,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Threads,cn=Monitor
+objectClass: monitorContainer
+structuralObjectClass: monitorContainer
+cn: Threads
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+description: This subsystem contains information about threads.
+entryDN: cn=Threads,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: TRUE
+
+dn: cn=Max,cn=Threads,cn=Monitor
+objectClass: monitoredObject
+structuralObjectClass: monitoredObject
+cn: Max
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitoredInfo: 16
+description: Maximum number of threads as configured
+entryDN: cn=Max,cn=Threads,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Max Pending,cn=Threads,cn=Monitor
+objectClass: monitoredObject
+structuralObjectClass: monitoredObject
+cn: Max Pending
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitoredInfo: 0
+description: Maximum number of pending threads
+entryDN: cn=Max Pending,cn=Threads,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Open,cn=Threads,cn=Monitor
+objectClass: monitoredObject
+structuralObjectClass: monitoredObject
+cn: Open
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitoredInfo: 2
+description: Number of open threads
+entryDN: cn=Open,cn=Threads,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Starting,cn=Threads,cn=Monitor
+objectClass: monitoredObject
+structuralObjectClass: monitoredObject
+cn: Starting
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitoredInfo: 0
+description: Number of threads being started
+entryDN: cn=Starting,cn=Threads,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Active,cn=Threads,cn=Monitor
+objectClass: monitoredObject
+structuralObjectClass: monitoredObject
+cn: Active
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitoredInfo: 1
+description: Number of active threads
+entryDN: cn=Active,cn=Threads,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Pending,cn=Threads,cn=Monitor
+objectClass: monitoredObject
+structuralObjectClass: monitoredObject
+cn: Pending
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitoredInfo: 0
+description: Number of pending threads
+entryDN: cn=Pending,cn=Threads,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Backload,cn=Threads,cn=Monitor
+objectClass: monitoredObject
+structuralObjectClass: monitoredObject
+cn: Backload
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitoredInfo: 1
+description: Number of active plus pending threads
+entryDN: cn=Backload,cn=Threads,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=State,cn=Threads,cn=Monitor
+objectClass: monitoredObject
+structuralObjectClass: monitoredObject
+cn: State
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitoredInfo: unknown
+description: Thread pool state
+entryDN: cn=State,cn=Threads,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Runqueue,cn=Threads,cn=Monitor
+objectClass: monitoredObject
+structuralObjectClass: monitoredObject
+cn: Runqueue
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+description: Queue of running threads - besides those handling operations
+entryDN: cn=Runqueue,cn=Threads,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Tasklist,cn=Threads,cn=Monitor
+objectClass: monitoredObject
+structuralObjectClass: monitoredObject
+cn: Tasklist
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+description: List of running plus standby threads - besides those handling operations
+entryDN: cn=Tasklist,cn=Threads,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Time,cn=Monitor
+objectClass: monitorContainer
+structuralObjectClass: monitorContainer
+cn: Time
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+description: This subsystem contains information about time.
+entryDN: cn=Time,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: TRUE
+
+dn: cn=Start,cn=Time,cn=Monitor
+objectClass: monitoredObject
+structuralObjectClass: monitoredObject
+cn: Start
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitorTimestamp: 20261011105220Z
+entryDN: cn=Start,cn=Time,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Current,cn=Time,cn=Monitor
+objectClass: monitoredObject
+structuralObjectClass: monitoredObject
+cn: Current
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitorTimestamp: 20261011105222Z
+entryDN: cn=Current,cn=Time,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Uptime,cn=Time,cn=Monitor
+objectClass: monitoredObject
+structuralObjectClass: monitoredObject
+cn: Uptime
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitoredInfo: 2
+entryDN: cn=Uptime,cn=Time,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=TLS,cn=Monitor
+objectClass: monitorContainer
+structuralObjectClass: monitorContainer
+cn: TLS
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+description: This subsystem contains information about TLS.
+entryDN: cn=TLS,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Waiters,cn=Monitor
+objectClass: monitorContainer
+structuralObjectClass: monitorContainer
+cn: Waiters
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+description: This subsystem contains information about read/write waiters.
+entryDN: cn=Waiters,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: TRUE
+
+dn: cn=Read,cn=Waiters,cn=Monitor
+objectClass: monitorCounterObject
+structuralObjectClass: monitorCounterObject
+cn: Read
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitorCounter: 1
+entryDN: cn=Read,cn=Waiters,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+
+dn: cn=Write,cn=Waiters,cn=Monitor
+objectClass: monitorCounterObject
+structuralObjectClass: monitorCounterObject
+cn: Write
+creatorsName: cn=admin,cn=config
+modifiersName: cn=admin,cn=config
+createTimestamp: 20261011105220Z
+modifyTimestamp: 20261011105220Z
+monitorCounter: 0
+entryDN: cn=Write,cn=Waiters,cn=Monitor
+subschemaSubentry: cn=Subschema
+hasSubordinates: FALSE
+

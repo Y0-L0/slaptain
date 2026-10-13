@@ -228,3 +228,49 @@ answers the question a *user* would get:
 
 The second is the one worth running after every release: it reads back what the pipeline
 actually stamped, which is the field the four traps above all corrupt.
+
+---
+
+## 7. A second version line: the slapd exporter
+
+The slapd exporter (ADR-033 Surface 3) is its own Go module (`exporter/`), its own image
+(`slapd-exporter`) and its own version line, released on its own schedule (ADR-033
+decision 4, "Packaging"). Everything above applies to it unchanged, with a different tag
+prefix:
+
+| Surface | Main stream | Exporter stream |
+|---|---|---|
+| git tag | `v0.3.1` | `exporter/v0.1.0`: the form Go requires for a module in a subdirectory |
+| image tag, on a version tag | `operator:0.3.1` | `slapd-exporter:0.1.0` |
+| image tag, untagged commit | `sha-09ecf10`, `sha-09ecf10-dirty-<state8>` | the same, from the same commit |
+| what HEAD is | `GIT_TAG`, from `scripts/image-tag.sh` | `EXPORTER_GIT_TAG`, from `scripts/image-tag.sh exporter` |
+| how it is addressed | `IMAGE_TAG` | `EXPORTER_IMAGE_TAG` |
+
+`make show-tag` prints both streams.
+
+**Each stream matches only its own tags.** `git describe --tags --exact-match` with no
+pattern returns *some* tag on HEAD, and on a commit carrying both `v9.9.9` and
+`exporter/v9.9.9` it returned `exporter/v9.9.9`. The main stream would then have addressed
+its images as `sha-exporter/v9.9.9`. So the main stream matches `v*` and the exporter
+stream matches `exporter/v*`, and each resolves to its own tag whether or not the other
+one is present.
+
+**What a version number means for the exporter.** The metric families are the exporter's
+API: the shipped rules and dashboards (`monitoring/`) query them by name and type. Renaming
+or retyping a family, or changing a label's meaning, is a **major** version. Adding a family
+is a minor. The flag defaults are the contract with the operator, which passes the sidecar no
+command and no arguments: the `ldapi` socket in `/run/openldap`, SASL EXTERNAL and
+`:9330/metrics`. Those defaults stay stable across versions, and changing one is a major
+too. The first release is `0.0.1`, a lab trial. `0.1.0` follows once it has run live at all, and
+`1.0.0` once the families have run on a live mesh.
+While the version is `0.x`, the shipped rules and dashboards expect the `0.x` families.
+
+**How the operator picks a version.** It does not use its own tag. It defaults the sidecar to
+a compiled-in exporter release (`exporterDefaultVersion` in
+`operator/internal/controller/exporter_sidecar.go`), with the repository derived from its own
+like `slapd` and `slapd-init`. That constant moves only when the operator adopts a newer
+exporter, and it must name a **released** exporter, because the image has to exist
+(checklist above). An operator upgrade therefore leaves monitored pods alone unless that
+constant moved. `spec.images.exporter` overrides it. A local or e2e build of an unreleased
+exporter has to be pinned there, since the default names a published release and not the
+working tree (`tests/e2e.sh` does this).

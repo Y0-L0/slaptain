@@ -248,6 +248,8 @@ pod, and the check is now a precondition of the class, not a nicety:
   but modifying an existing monitor database's `olcAccess` hangs slapd with the
   same signature. Withdrawn to `docs/BACKLOG.md`.
 
+  *Superseded by the [ADR-033 amendment of 2026-10-08](adr-033-three-monitoring-surfaces.md): the monitor database is R1 and always present.*
+
 Three consequences for the doctrine:
 
 1. **R1 membership is empirical, and the test is per attribute.** The criterion

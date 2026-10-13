@@ -761,6 +761,7 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 		}
 		log.Info("creating database", "host", host, "suffix", sd.Spec.Suffix,
 			"consumerOnly", sc.IsConsumerOnly())
+		ensureMonitorBeforeDBAdd(ctx, conn, host)
 		dataDN, err = r.createDatabase(conn, sd, sc, rootPW)
 		if err != nil {
 			return fmt.Errorf("create database at %s: %w", host, err)
@@ -912,7 +913,7 @@ func (r *SlapdDatabaseReconciler) convergeScaleTunables(
 	}
 
 	// Durability and read-transaction tunables (ADR-024 R1): fsync mode,
-	// checkpoint interval, read-txn bound, per-database monitor counters. noSync
+	// checkpoint interval, read-txn bound. noSync
 	// used to be create-only — flipping it on a live database was a silent
 	// no-op, the R4 violation this converges away.
 	if err := r.ensureBackendTunables(ctx, conn, host, dataDN, sd, sc, ""); err != nil {
@@ -1825,6 +1826,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 			return dirErr
 		}
 		log.Info("creating accesslog DB", "host", host, "suffix", logSuffix)
+		ensureMonitorBeforeDBAdd(ctx, conn, host)
 		addReq := ldap.NewAddRequest("olcDatabase=mdb,cn=config", nil)
 		addReq.Attribute("objectClass", []string{ocDatabaseConfig, ocMdbConfig})
 		addReq.Attribute("olcDatabase", []string{backendMDB})

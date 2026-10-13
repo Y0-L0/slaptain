@@ -30,6 +30,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 - [x] **Kubernetes Operator — Phase 1** (`operator/`): standalone single-replica StatefulSet managed by a kubebuilder controller. e2e: 33/33 green.
 - [x] **Operator Phase 2**: N-way multi-master delta-syncrepl; operator-orchestrated bootstrap; per-pod `volumeClaimTemplates`; replication credential management. e2e: pending.
 - [x] **Operator Phase 3**: cross-cluster replication via `ExternalPeers`. Operator owns all syncrepl configuration (in-cluster + external). See ADR-003. **TLS posture, stated precisely (verified 2026-09-14):** consumers verify the provider against a distributed CA (`tls_cacert`), relaxed to `tls_reqcert=allow` for IP-addressed peers (ADR-007). It is NOT mutual: `olcTLSVerifyClient` is never set, so slapd never requests a client certificate — the `tls_cert`/`tls_key` presented on external-peer stanzas are not verified by anything. Peer *authentication* is the simple bind, not the certificate. Cert-based peer auth (SASL EXTERNAL) is considered and deferred in ADR-027.
+- [x] **`cn=Monitor` on every pod** (ADR-033 Surface 3, milestone S3-a, 2026-10-08): operator-converged monitor database with a constant ACL. e2e green on a three-site mesh.
 - [x] **S3 backup/restore** (ADR-014): `SlapdBackup` (on-demand) + `SlapdScheduledBackup` (cron + retention) → gzipped `slapcat` LDIF to S3 via co-located Jobs; `SlapdDatabase.spec.bootstrapFrom` restores into a fresh DB via a cluster-coordinated scale-to-0 → offline `slapadd` → scale-up machine. e2e green on t3e (versitygw S3 target). See `docs/BACKUP.md`.
 
 ---
@@ -179,7 +180,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
         ├── restore_replay_test.go  # in-place restore under replication: marker written to the backup's SOURCE pod, asserted present in the artifact + source-honesty status; stale accesslog delete must not replay (gated: E2E_BACKUP=1)
         ├── accesslog_test.go        # Per-database accesslog: structure, no cross-DB lost-sync, convergence, ADR-020 ACL
         ├── sessionlog_test.go       # ADR-022: olcSpSessionlog on every RW pod's data DB; none on accesslog DBs
-        ├── tunables_test.go         # ADR-024 degrades/hygiene tunables: cn=config posture per pod (ungated)
+        ├── tunables_test.go         # ADR-024 degrades/hygiene tunables: cn=config posture per pod (ungated); + Label "monitor" (ADR-033 S3-a): monitor DB on every pod RW+RO, node-local readers only, olmMDB* per mdb (red by design on an upgraded cluster until its pods restart), zero writes at rest (`monitor-at-rest`, 90 s)
         ├── scale_topology_test.go   # spec.replicas up/down must rewrite olcSyncRepl on every surviving pod WITHOUT replacing one: STS revision + pod UIDs unchanged, stanza count +/-1 (ungated, Label "scale-topology")
         ├── cleanup_policy_test.go   # ADR-005 cleanupPolicy: Delete tears a replicated DB (+ its accesslog DB) off EVERY pod; Retain leaves it; re-adoption (ungated, Label "cleanup-policy"; rolls the cluster per ADR-013)
         ├── scale_test.go            # many-entries fixture: 1200-entry seed + churn (gated: E2E_SCALE=1; knobs E2E_SCALE_ENTRIES/E2E_SCALE_CHURN)

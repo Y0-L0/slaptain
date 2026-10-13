@@ -79,8 +79,11 @@ func (r *SlapdClusterReconciler) reconcileTunables(
 // already-bound connection. Kept separate from reconcilePodTunables so the
 // connection setup has one home and this list can grow without it.
 //
-// Order is intentional but not load-bearing: nothing here depends on anything
-// else here. It is best-effort as a whole — see reconcileTunables — so a pod
+// Order is load-bearing in one place: the monitor database must come before the
+// auth database. back-mdb attaches a database's olmMDB* statistics only if the
+// monitor database exists when that database is opened, and the ADD that
+// creates the auth database opens it (ADR-033 correction). Nothing else here
+// depends on anything else here. It is best-effort as a whole — see reconcileTunables — so a pod
 // that is mid-restart costs a log line and a retry, never a failed reconcile.
 func (r *SlapdClusterReconciler) reconcilePodInfrastructure(
 	ctx context.Context,
@@ -90,13 +93,20 @@ func (r *SlapdClusterReconciler) reconcilePodInfrastructure(
 ) error {
 	// Every step runs even if an earlier one fails, and all failures are
 	// reported together (runConvergenceSteps). This used to short-circuit, and
-	// the auth database — listed second, and a hard precondition for
+	// the auth database — listed after the global tunables, and a hard precondition for
 	// replication since ADR-027's cutover — was consequently never created on
 	// any cluster whose global tunables slapd refused. See podinfra.go for the
 	// measurement that found it.
 	return runConvergenceSteps(
 		convergenceStep{"global tunables", func() error {
 			return r.ensureGlobalTunables(ctx, conn, host, sc)
+		}},
+		// The monitor backend (ADR-033 amendment 2026-10-08): always present,
+		// no switch. planMonitor decides; this only executes. MUST stay before
+		// the auth database step: an mdb database opened before the monitor
+		// database exists gets no olmMDB* statistics until slapd restarts.
+		convergenceStep{"monitor database", func() error {
+			return ensureMonitorDatabase(ctx, conn, host)
 		}},
 		// The node-local authentication database (ADR-027 decision 7): this
 		// controller is its single creator, on every pod, read-write and
@@ -266,4 +276,82 @@ func (r *SlapdClusterReconciler) ensureGlobalTunables(
 	}
 
 	return runConvergenceSteps(steps...)
+}
+
+// ensureMonitorDatabase reads what planMonitor needs — the monitor database's
+// DN and its olcAccess, in one search — and executes the plan. At steady state
+// that one read is the whole cost: no write at all. Safe to call from both
+// controllers concurrently: a losing ADD is recognised by looking again.
+//
+// Removing a monitor database is never done here: deleting a cn=config
+// database renumbers every database ordered after it (ADR-019), and with no
+// switch there is no state in which the operator wants it gone.
+func ensureMonitorDatabase(ctx context.Context, conn *ldap.Conn, host string) error {
+	log := logf.FromContext(ctx)
+
+	dbDN, acl, err := findMonitorDB(conn)
+	if err != nil {
+		return err
+	}
+
+	plan := planMonitor(dbDN, acl)
+	if plan.addDB {
+		log.Info("creating the monitor database", "host", host)
+		// A racing pass that added it first makes this ADD fail — not with
+		// entryAlreadyExists (slapd assigns the {N}, so the DN never collides)
+		// but with 80 "only one monitor database allowed". So a failed ADD is
+		// judged by looking: if a monitor database now exists, the goal is met.
+		if err := conn.Add(monitorDBAddRequest()); err != nil {
+			if dn, _, ferr := findMonitorDB(conn); ferr != nil || dn == "" {
+				return fmt.Errorf("add monitor database at %s: %w", host, err)
+			}
+		}
+	}
+	if plan.replaceACL {
+		log.Info("aligning the monitor database ACL", "host", host, "dn", dbDN, "from", acl)
+		mod := ldap.NewModifyRequest(dbDN, nil)
+		mod.Replace("olcAccess", []string{monitorDBACL})
+		if err := conn.Modify(mod); err != nil {
+			return fmt.Errorf("set olcAccess on %s at %s: %w", dbDN, host, err)
+		}
+	}
+	return nil
+}
+
+// ensureMonitorBeforeDBAdd runs ensureMonitorDatabase on a pod immediately
+// before an mdb database is ADDed there. back-mdb attaches a database's olmMDB*
+// statistics to cn=Monitor only when the database is opened, and only if the
+// monitor database exists at that moment — and a cn=config ADD opens the
+// database there and then. So the monitor database must come first, or this
+// database's statistics wait for the pod's next restart (ADR-033 amendment
+// 2026-10-08 and its correction; measured on 2.7.1).
+//
+// Called only on the ADD path, so the steady state gains no read. Best-effort:
+// a failure costs this database its statistics until a restart, which is no
+// reason to withhold the database itself.
+func ensureMonitorBeforeDBAdd(ctx context.Context, conn *ldap.Conn, host string) {
+	if err := ensureMonitorDatabase(ctx, conn, host); err != nil {
+		logf.FromContext(ctx).Info("monitor database not ensured before a database add; "+
+			"its cn=Monitor statistics will appear after the pod's next restart",
+			"host", host, "err", err)
+	}
+}
+
+// findMonitorDB returns this pod's monitor database DN and its olcAccess
+// values, or "" when there is none. Searched by objectClass, never by a
+// remembered {N}: the index is positional and any database delete can move it
+// (ADR-026 R1).
+func findMonitorDB(conn *ldap.Conn) (string, []string, error) {
+	sr, err := conn.Search(ldap.NewSearchRequest(
+		"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
+		0, 0, false, "(objectClass=olcMonitorConfig)", []string{"olcAccess"}, nil,
+	))
+	if err != nil {
+		return "", nil, fmt.Errorf("search for the monitor database: %w", err)
+	}
+	if len(sr.Entries) == 0 {
+		return "", nil, nil
+	}
+	e := sr.Entries[0]
+	return e.DN, e.GetEqualFoldAttributeValues("olcAccess"), nil
 }

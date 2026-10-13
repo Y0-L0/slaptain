@@ -518,7 +518,7 @@ func (r *SlapdDatabaseReconciler) checkMaxSize(
 // accept: the fsync mode, the checkpoint interval and the read-transaction
 // bound.
 //
-// All four were verified modifiable against a live OpenLDAP 2.7.1 database
+// Each was verified modifiable against a live OpenLDAP 2.7.1 database
 // before being classified R1; olcDbEnvFlags was verified the same way and
 // failed, which is why it is handled by checkEnvFlags instead.
 //

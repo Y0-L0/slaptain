@@ -62,7 +62,9 @@ kubectl apply --server-side -f charts/operator/crds/
 | `leaderElection.enabled` | `true` | Enable controller-runtime leader election (needed when `replicas > 1`). |
 | `metrics.enabled` | `false` | Enable the operator's metrics endpoint. When enabled, a Service is created and `--metrics-bind-address` is set on the manager. |
 | `metrics.port` | `8080` | Metrics endpoint port. |
-| `metrics.serviceMonitor.enabled` | `false` | Create a Prometheus Operator `ServiceMonitor`. Requires `metrics.enabled=true`. |
+| `metrics.service.type` | `ClusterIP` | Type of the metrics Service. ClusterIP plus the `ServiceMonitor` is the recommended setup: each site's own Prometheus scrapes its own operator. The endpoint is plain HTTP with no authentication, so any other type widens its exposure beyond what `networkPolicy` can restrict. |
+| `metrics.service.nodePort` | `""` | Fixed node port, honoured only when `metrics.service.type` is `NodePort`. Empty lets Kubernetes allocate one. |
+| `metrics.serviceMonitor.enabled` | `false` | Create a Prometheus Operator `ServiceMonitor`. Requires `metrics.enabled=true` and the Prometheus Operator CRDs. Sets `honorLabels: true`, because the operator's series carry their own `namespace` and `pod` labels; without it Prometheus renames them `exported_*` and every query written against them comes back empty. |
 | `metrics.serviceMonitor.interval` | `30s` | Scrape interval. |
 | `metrics.serviceMonitor.scrapeTimeout` | `10s` | Scrape timeout. |
 | `metrics.serviceMonitor.labels` | `{}` | Extra labels on the `ServiceMonitor` (e.g. to match a Prometheus Operator `serviceMonitorSelector`). |

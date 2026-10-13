@@ -8,8 +8,10 @@
 #   helm install ksm prometheus-community/kube-state-metrics \
 #     -n monitoring --create-namespace -f monitoring/kube-state-metrics-values.yaml
 #
-# Scraped from the one Prometheus at the observing site over NodePort 30090 —
-# see monitoring/kube-prometheus-stack-values.yaml.
+# Scraped by this site's own Prometheus over ClusterIP, through the
+# ServiceMonitor at the bottom of this file — install kube-prometheus-stack
+# first, it brings the CRD. Monitoring is site-local (ADR-033 amendment
+# 2026-10-09); nothing here names a site.
 
 # Only slaptain's CRs. The built-in collectors for core kinds are left off:
 # this deployment exists to export SlapdCluster/SlapdDatabase state, and a
@@ -202,13 +204,26 @@ rbac:
         - slapdrestores
       verbs: ["list", "watch"]
 
-# Reached from the observing site's Prometheus across the lab's node network.
+# This site's Prometheus scrapes it in-cluster; nothing outside needs to reach it.
 service:
-  type: NodePort
-  nodePort: 30090
+  type: ClusterIP
 
-# No ServiceMonitor: the Prometheus Operator CRDs exist only at the observing
-# site, and this same values file is applied at all three.
 prometheus:
   monitor:
-    enabled: false
+    enabled: true
+    # The custom-resource series carry their own `namespace` (the CR's, from
+    # labelsFromPath above). Without honorLabels Prometheus renames it
+    # exported_namespace and stamps kube-state-metrics' own namespace over it,
+    # which silently empties every rule and dashboard query joining on it.
+    honorLabels: true
+    # No custom-resource series carries a `pod` of its own, so every one would
+    # otherwise get the kube-state-metrics pod's name attached. Drop the
+    # target's pod; a series keeps its own or has none.
+    relabelings:
+      - action: labeldrop
+        regex: pod
+    metricRelabelings:
+      # kube-state-metrics stamps every custom-resource series with the GVK it
+      # came from. True, and uniform across every series here.
+      - action: labeldrop
+        regex: customresource_(group|kind|version)

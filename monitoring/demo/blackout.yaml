@@ -7,7 +7,13 @@
 # VERIFIED on a three-site lab, 2026-10-06, 2.5 minutes. What it produces:
 #
 #   - the OTHER sites report this one Unreachable, with the verdict filled in.
-#     They dialled and failed. This is the signal working.
+#     They dialled and failed. This is the signal working — and with
+#     monitoring site-local, it is the OTHER sites' Grafanas that show it: a
+#     dark site is seen through its peers' operator judgments.
+#   - this site's own Prometheus loses its slapd exporter targets (Surface 3):
+#     scraping the sidecar is inbound to the slapd pod too, so expect
+#     job="slapd-exporter" up == 0 here for the duration. (Expected from the
+#     policy's shape; the 2026-10-06 run predates the PodMonitor.)
 #   - this site reports PodsResponsive=False/PodsNotAnswering and
 #     ReplicationConverged=Unknown/CSNQueriesIncomplete. Also working — and
 #     note its pods stay Ready throughout, because the probes are exec probes

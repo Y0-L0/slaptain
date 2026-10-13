@@ -1,4 +1,41 @@
-# Alert rules over Surface 1 (ADR-033).
+# Alert rules over Surfaces 1, 2 and 3 (ADR-033).
+#
+# Surface 1 is CR status via kube-state-metrics; Surface 2 is what the operator
+# observed on its own pass and never wrote to status; Surface 3 is slapd's own
+# cn=Monitor, read by the exporter sidecar in every slapd pod.
+#
+# Monitoring is SITE-LOCAL (ADR-033 amendment 2026-10-09): the Prometheus that
+# evaluates these rules scrapes only its own site's targets, so there is no
+# `site` label anywhere and none is needed — the Prometheus IS the site. Alert
+# text says "this site" for the same reason.
+#
+# Surfaces 1 and 2 are joined by label, and the JOIN KEY DIFFERS BY SCOPE —
+# measured against live data, not reasoned, because a rule built on a join that
+# matches nothing never fires and looks exactly like a rule watching a healthy
+# system:
+#
+#   cluster scope                namespace, cluster, mesh
+#   peer scope                   namespace, cluster, mesh, peer
+#   database, Surface 1 <-> 2    namespace, cluster, database   (NO mesh)
+#   database, Surface 2 <-> 2    namespace, cluster, mesh, database
+#   slapd pod, Surface 3 <-> 3   namespace, pod
+#
+# `mesh` must be OMITTED where a Surface 1 database series is on one side:
+# SlapdDatabase has no meshRef field at all, so kube-state-metrics structurally
+# cannot put a mesh on a database series, while Surface 2 always has one
+# (the operator resolves the owning cluster during the pass). (namespace,
+# cluster, database) is already unique.
+#
+# The peer key needs ALL FOUR. Two clusters at one site can declare a peer of
+# the same name — a second mesh, or a second cluster in another namespace — and
+# a narrower key lets one cluster's fresh check vouch for another cluster's
+# verdict.
+#
+# A plain `*` or a bare `and` with no `on (...)` matches on ALL labels and
+# returns NOTHING at every scope, because `job`, `instance`, `service`,
+# `container` and `endpoint` always differ between two scrape targets. That is
+# the broadest trap here. (Within ONE Surface 3 target the labels do agree, so
+# the arithmetic over a pod's own metrics below needs no `on (...)`.)
 #
 # Fuses differ per condition REASON on purpose: docs/MULTI-SITE.md gives
 # DataMissingOnReadOnlyPods a longer fuse than its siblings because an RO
@@ -34,17 +71,23 @@ spec:
         # one database — so the gate is no longer load-bearing for that case.
         # It stays because it is the correct precondition for the claim this
         # alert makes, and because the zero-database case below still exists.
+        #
+        # Joined on the peer's full identity at this site, (namespace, cluster,
+        # mesh, peer), here and in SlaptainPeerUnverified: two clusters can
+        # declare a peer of the same name, and a key without namespace or
+        # cluster lets one cluster's fresh check vouch for another's stale
+        # verdict (see the file header).
         - alert: SlaptainPeerLinkDown
           expr: >-
             slaptain_cluster_peer_connected == 0
-            and on (site, peer) (time() - slaptain_cluster_peer_last_checked_seconds < 180)
+            and on (namespace, cluster, mesh, peer) (time() - slaptain_cluster_peer_last_checked_seconds < 180)
           for: 2m
           labels:
             severity: critical
           annotations:
-            summary: "{{ $labels.site }}: no connection to peer {{ $labels.peer }}"
+            summary: "no connection to peer {{ $labels.peer }}"
             description: >-
-              The operator at {{ $labels.site }} dialled peer
+              The operator at this site dialled peer
               {{ $labels.peer }} and failed. Cross-site replication for every
               database on that link has stopped.
 
@@ -67,16 +110,16 @@ spec:
         - alert: SlaptainPeerUnverified
           expr: >-
             slaptain_cluster_peer_connected == 0
-            unless on (site, peer) slaptain_cluster_peer_last_checked_seconds
+            unless on (namespace, cluster, mesh, peer) slaptain_cluster_peer_last_checked_seconds
           for: 2m
           labels:
             severity: critical
           annotations:
-            summary: "{{ $labels.site }}: peer {{ $labels.peer }} reported down but never contacted"
+            summary: "peer {{ $labels.peer }} reported down but never contacted"
             description: >-
-              {{ $labels.site }} published connected=false for
+              This site published connected=false for
               {{ $labels.peer }} without recording a check, so treat this peer
-              verdict as unfounded and look at {{ $labels.site }}. Since the
+              verdict as unfounded and look at this site. Since the
               2026-10-06 fix the operator only skips the check when the cluster
               has no SlapdDatabase — so start by checking whether its databases
               exist at all; the peer status field carries a lastError saying
@@ -89,7 +132,7 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: "{{ $labels.site }}: peer {{ $labels.peer }} is {{ $labels.replication_state }}"
+            summary: "peer {{ $labels.peer }} is {{ $labels.replication_state }}"
             description: >-
               The peer answers but its CSN verdict is
               {{ $labels.replication_state }}. PartiallyVerified means at least
@@ -113,7 +156,7 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: "{{ $labels.site }}: peer status for {{ $labels.peer }} is stale"
+            summary: "peer status for {{ $labels.peer }} is stale"
             description: >-
               No CSN check has run against this peer for over 5 minutes. The
               operator is not observing; treat every other peer series at this
@@ -127,7 +170,7 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: "{{ $labels.site }}: {{ $labels.cluster }} contextCSNs diverged"
+            summary: "{{ $labels.cluster }} contextCSNs diverged"
             description: >-
               Pods disagree on contextCSN for at least one database. Lag is
               only observable while writes flow, so a divergence that persists
@@ -139,7 +182,7 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: "{{ $labels.site }}: contextCSN unreadable for some pod/database pair"
+            summary: "contextCSN unreadable for some pod/database pair"
             description: >-
               A pod x database pair could not be read, so convergence is
               unproven rather than broken. Unreadable evidence never counts
@@ -151,7 +194,7 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: "{{ $labels.site }}: a read-write pod answers no LDAP"
+            summary: "a read-write pod answers no LDAP"
             description: >-
               How long it has been silent is the transition age of this
               condition — slaptain_cluster_condition_last_transition_seconds
@@ -165,7 +208,7 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: "{{ $labels.site }}: {{ $labels.cluster }} has {{ $value }} ready read-write replicas short of desired"
+            summary: "{{ $labels.cluster }} has {{ $value }} ready read-write replicas short of desired"
 
         - alert: SlaptainTLSSecretMissing
           expr: slaptain_cluster_condition{condition="TLSReady"} == 0
@@ -173,7 +216,7 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: "{{ $labels.site }}: TLS is on but the certificate Secret is not usable"
+            summary: "TLS is on but the certificate Secret is not usable"
             description: >-
               The cluster controller withholds the StatefulSet until the Secret
               carries tls.crt and tls.key (ADR-029). A running cluster is not
@@ -189,7 +232,7 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: "{{ $labels.site }}: {{ $labels.database }} has a GLUE suffix entry"
+            summary: "{{ $labels.database }} has a GLUE suffix entry"
             description: >-
               A multi-site seed race demoted the suffix entry to a permanent
               hidden glue entry. There is no auto-heal; follow the ADR-025
@@ -201,7 +244,7 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: "{{ $labels.site }}: {{ $labels.database }} is empty on at least one pod"
+            summary: "{{ $labels.database }} is empty on at least one pod"
 
         - alert: SlaptainDataMissingOnReadOnlyPods
           # Longer fuse than its siblings: an RO initial sync legitimately
@@ -211,7 +254,7 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: "{{ $labels.site }}: {{ $labels.database }} is empty on a read-only pod"
+            summary: "{{ $labels.database }} is empty on a read-only pod"
 
         - alert: SlaptainSyncreplStanzasWithheld
           expr: slaptain_database_condition{condition="SyncreplStanzasReady"} == 0
@@ -219,7 +262,7 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: "{{ $labels.site }}: {{ $labels.database }} syncrepl convergence withheld ({{ $labels.reason }})"
+            summary: "{{ $labels.database }} syncrepl convergence withheld ({{ $labels.reason }})"
             description: >-
               The operator refused to write syncrepl stanzas rather than
               converge to a set missing a peer. Replication is paused, not
@@ -231,4 +274,554 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: "{{ $labels.site }}: {{ $labels.database }} is in phase {{ $labels.phase }}"
+            summary: "{{ $labels.database }} is in phase {{ $labels.phase }}"
+
+    # ── Surface 2: is the operator still observing at all? ──────────────────
+    #
+    # Surface 2 records at exactly ONE point per controller, and every partial
+    # pass — a restore, a failed mesh resolution, spec.suspend, a terminating
+    # database, a cluster that never reaches the end of its pass — deliberately
+    # records nothing and leaves the previous observation standing. That design
+    # is only safe because the observation TIMESTAMPS age and these two rules
+    # fire on it. Every other Surface 2 series holds its last value and reads
+    # healthy, which is exactly the shape of silence ADR-033 decision 5 exists
+    # to prevent, so without this group the whole surface can go quietly wrong.
+    #
+    # THE THRESHOLDS ARE NOT THE SAME NUMBER, and `> 300` — the number the
+    # obsmetrics package comment still suggests for both — is wrong for both:
+    #
+    #   * the database anchor's only GUARANTEED cadence is the 5-minute resync
+    #     floor (databaseResyncInterval, database_resync.go), so a rule at 300s
+    #     sits exactly on the floor and flaps every pass;
+    #   * the cluster anchor has NO cadence at all on a cluster with
+    #     replication disabled — slapdcluster_controller.go requeues on the 60s
+    #     csnCheckInterval only when spec.replication.enabled, and returns a
+    #     bare ctrl.Result{} otherwise (ADR-002's 2026-08-26 amendment: a
+    #     non-replicated cluster has no periodic resync). Its anchor is
+    #     recorded once and then ages without bound on a perfectly healthy
+    #     standalone — observed on a throwaway cluster, 10 minutes stale while
+    #     its database anchor advanced normally.
+    #
+    # So the cluster rule is GATED on the cluster being one that ticks, and the
+    # database rule is not gated but is given a threshold well clear of its
+    # floor.
+    - name: slaptain.observation
+      rules:
+        - alert: SlaptainClusterObservationStale
+          # Threshold from csnCheckInterval = 60s (slapdcluster_controller.go):
+          # five missed ticks. Measured on a healthy three-site mesh the anchor
+          # ages to 68s at worst over three hours, so 300s is five times the
+          # observed ceiling and `for: 2m` rides out a scrape gap on top.
+          #
+          # The gate is `csn_pairs_expected` and it is deliberately a SURFACE 2
+          # series, not the Surface 1 condition that would also express it: a
+          # cross-surface gate stops matching when kube-state-metrics goes
+          # down, which would silently disarm this rule at the one site whose
+          # monitoring is already degraded. Both sides come from the same
+          # scrape target, so the gate can only disappear with the thing it
+          # gates. It persists while stale because the store holds the last
+          # observation — which is the whole point.
+          #
+          # Scope of the gate, stated so nobody widens it by accident: it says
+          # "this cluster's last recorded pass measured CSN for at least one
+          # database", which is the population that has the 60s tick. A
+          # replication-enabled cluster with fewer than two ready pods takes no
+          # CSN measurement and is therefore NOT covered — a deliberate
+          # under-alert, since such a cluster has no convergence to observe and
+          # its StatefulSet shortfall is already SlaptainClusterNotReady.
+          expr: >-
+            (time() - slaptain_cluster_observation_timestamp_seconds > 300)
+            and on (namespace, cluster, mesh)
+            count by (namespace, cluster, mesh) (slaptain_csn_pairs_expected)
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.cluster }} has not completed an observation pass for {{ $value | humanizeDuration }}"
+            description: >-
+              The cluster controller's pass is not reaching its single
+              recording point. Every other Surface 2 series for this cluster —
+              CSN evidence counts, spread, discovered providers — is a frozen
+              reading from before that, and reads healthy whatever has since
+              happened. Look for the pass returning early: spec.suspend, an
+              unresolvable meshRef, or a restore in progress
+              (status.phase=Restoring). Surface 1's own conditions are frozen
+              with it.
+
+        - alert: SlaptainDatabaseObservationStale
+          # Threshold from databaseResyncInterval = 5m (database_resync.go):
+          # three missed floors. The floor is the only cadence guaranteed in
+          # every configuration — on a cluster with external peers the database
+          # anchor actually tracks the 60s cluster tick, because the controller
+          # watches SlapdCluster and its lastChecked status churn re-triggers
+          # it (measured: 68s at worst over three hours on a three-site mesh).
+          # Picking the threshold from the measured cadence rather than the
+          # guaranteed one would leave a single-site cluster, which has no such
+          # churn, permanently just under the line.
+          #
+          # WHY NOT `> 300`, which is what the obsmetrics package comment still
+          # prescribes — stated as arithmetic, because the obvious objection to
+          # 900 is that 300 is one floor and that sounds right:
+          #
+          #   An anchor observed every C seconds sawtooths between 0 and C. It
+          #   is above a threshold T for C-T of each cycle, so with a fuse F
+          #   and an evaluation interval E it fires only when C > T + F + E.
+          #   At T=300, F=120, E=60 that is C > 480s. The GUARANTEED floor is
+          #   300s and the pass's own duration rides on top of it — a per-pod
+          #   LDAP sweep over every RW and RO pod with 5-10s dial timeouts — so
+          #   three minutes of slow pass is the entire margin. At T=900 the
+          #   margin is seventeen minutes and does not come out of the fuse.
+          #
+          # So `> 300` does not flap on a healthy database, which is the easy
+          # thing to assume and is wrong; it fires on a SLOW one. The failure
+          # is a false positive on a site that is merely struggling, which is
+          # exactly when a spurious critical is most expensive.
+          #
+          # Ungated, unlike its cluster sibling: databaseRequeueAfter always
+          # returns a duration — 10s unhealthy, 5m healthy — so every
+          # SlapdDatabase has a cadence regardless of replication.
+          expr: time() - slaptain_database_observation_timestamp_seconds > 900
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.database }} has not completed an observation pass for {{ $value | humanizeDuration }}"
+            description: >-
+              The SlapdDatabase controller's pass is not reaching its recording
+              point, so this database's per-pod suffix probes are a frozen
+              reading. spec.suspend on the database or on its SlapdCluster is
+              the designed way to produce this; a database stuck Terminating
+              under ADR-005 is the accidental one.
+
+    # ── Surface 2: the quantities behind the Surface 1 booleans ─────────────
+    #
+    # Each rule here either watches something Surface 1 cannot express at all,
+    # or adds the MAGNITUDE or the EVIDENCE COUNT behind a boolean Surface 1
+    # already alerts on. None of them restates a condition.
+    - name: slaptain.evidence
+      rules:
+        - alert: SlaptainCSNEvidenceNone
+          # The 2026-10-06 incident, as a number: the operator attempted every
+          # (pod, database) pair for this database and read NOT ONE. Until
+          # Surface 2 existed this was English inside a condition message.
+          #
+          # Not a duplicate of SlaptainCSNEvidenceIncomplete, which fires on
+          # the CSNQueriesIncomplete reason for ANY unreadable pair. This is
+          # the total case — no evidence whatsoever — and it is a different and
+          # more urgent claim, so it is critical where that one is a warning.
+          #
+          # `pairs_read == 0` is a PRESENT zero and that is deliberate: the
+          # attempt is the observation (ADR-033 decision 5). A database the
+          # pass never looked at is absent from both series and matches
+          # nothing here.
+          #
+          # Fuse: three missed 60s ticks. Every pod being unreadable at once is
+          # not a blip — one pass could be a restart window, three in a row is
+          # a fault.
+          expr: >-
+            slaptain_csn_pairs_read == 0
+            and on (namespace, cluster, mesh, database)
+            (slaptain_csn_pairs_expected > 0)
+          for: 3m
+          labels:
+            severity: critical
+          annotations:
+            summary: "no readable contextCSN for {{ $labels.database }} on any pod"
+            description: >-
+              Convergence for this database is unproven at this site, not
+              broken — unreadable evidence never counts toward healthy
+              (ADR-008). The fault is most likely local: the pods answer
+              nothing, or the replication identity cannot bind. Check
+              PodsResponsive for this cluster before suspecting a peer.
+
+        - alert: SlaptainCSNEvidencePartial
+          # Some pods answered and some did not. Surface 1 says
+          # CSNQueriesIncomplete; this says HOW MANY of how many, which is the
+          # difference between one pod rebooting and a site coming apart.
+          #
+          # Fuse: 10m, and the number comes from ADR-030. The startupProbe
+          # budget is 300s so a pod can legitimately be unreadable for five
+          # minutes while LMDB opens, and a pod being replaced takes that plus
+          # its own scheduling. 10m is the first fuse comfortably clear of a
+          # routine pod restart, and anything shorter alerts on every rollout.
+          expr: >-
+            slaptain_csn_pairs_read > 0
+            and on (namespace, cluster, mesh, database)
+            (slaptain_csn_pairs_read < slaptain_csn_pairs_expected)
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "contextCSN readable on only {{ $value }} of the pods holding {{ $labels.database }}"
+            description: >-
+              Convergence for this database is being judged on partial
+              evidence. The pods that did not answer are not named here —
+              slaptain_suffix_probe_ok for the same database is absent for
+              exactly those pods, and `slctl inspect` names them outright.
+
+        - alert: SlaptainCSNSpreadHigh
+          # The magnitude behind SlaptainReplicationDiverged. Local convergence
+          # is an EXACT set comparison (csnConverged, csn_convergence.go), so
+          # that alert fires identically for a half-second of propagation and
+          # for a pod frozen since yesterday. This is the number that tells
+          # them apart: newest minus oldest contextCSN timestamp across the
+          # pods that answered, in seconds.
+          #
+          # Absent below two readable pods, never 0 — a spread of 0 is a
+          # measurement that two or more pods agree, and the pointer that
+          # carries that distinction is the one correctness fix this surface
+          # exists around. So this rule cannot fire on a reading nobody took.
+          #
+          # Threshold: 300s. In-cluster delta-syncrepl propagates sub-second,
+          # so five minutes of CSN distance is not propagation under any load.
+          # Fuse: 5m, and it is doing real work rather than padding — a pod
+          # rejoining after a ten-minute absence shows a ten-minute spread the
+          # instant it answers and then catches up in seconds. The fuse is what
+          # separates "behind" from "catching up".
+          expr: slaptain_csn_spread_seconds > 300
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.database }} contextCSNs are {{ $value | humanizeDuration }} apart across pods"
+            description: >-
+              One pod of this cluster is not receiving the others' writes, and
+              has not been for long enough that propagation delay cannot
+              explain it. Surface 1's ReplicationConverged says the same thing
+              as a boolean; this is how far apart they actually are.
+
+        - alert: SlaptainPeerProvidersGone
+          # Discovery RAN against the remote cluster's API and found no pods at
+          # all. The link has no provider to consume from — ADR-031/ADR-032's
+          # "a link that resolved to nothing is how a cross-site outage
+          # begins", as a condition rather than a sentence.
+          #
+          # A 0 here is always a statement about the REMOTE site, never about
+          # this one: discovery that could not be ASKED (a rotated kubeconfig
+          # Secret, an unparseable one, an unreachable remote API) renders the
+          # series ABSENT, deliberately, and that case belongs to Surface 1's
+          # peer_connected{replication_state="Unreachable"} and
+          # SlaptainPeerLinkDown. If this rule is ever rewritten to fire on
+          # absence, those two alerts start double-firing and a local fault
+          # starts pointing at a remote site that is fine.
+          #
+          # Fuse: 3m, three discovery passes on the 60s tick. Note what this
+          # correctly fires on: a peer site running an ADR-014 restore scales
+          # its StatefulSet to 0 and will trip this for the duration. That is
+          # not a false positive — cross-site replication on that link really
+          # has stopped — but it is the first thing to check before escalating.
+          expr: slaptain_peer_providers_discovered == 0
+          for: 3m
+          labels:
+            severity: critical
+          annotations:
+            summary: "peer {{ $labels.peer }} has no discoverable providers"
+            description: >-
+              The remote cluster's API answered and reported no running slapd
+              pods. Cross-site replication from {{ $labels.peer }} into
+              this site has no provider to consume from. Check whether
+              that site is scaled to zero, mid-restore, or in a namespace being
+              torn down.
+
+        - alert: SlaptainGlueSuffixOnPod
+          # Which POD carries the glue. Surface 1's SlaptainGlueSuffix is the
+          # aggregate verdict over pods and is all CR status can say; the
+          # identity of the pod appears nowhere in status, so this is Surface
+          # 2's and not a restatement.
+          #
+          # PRESENCE is the signal — the series is emitted only for a pod whose
+          # suffix entry IS a glue entry, so there is nothing to compare
+          # against. No `for`, for the same reason its Surface 1 sibling has
+          # none: ADR-025's glue never heals, never self-repairs, and reads
+          # clean on every CSN signal while it does so.
+          #
+          # The actionable part is the pod name: every backup taken from that
+          # pod is unrestorable, so it is the pod to exclude from
+          # SlapdBackup.status.sourcePod until the ADR-025 runbook has been
+          # followed.
+          expr: slaptain_suffix_glue
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.pod }} ({{ $labels.role }}) carries a GLUE suffix entry for {{ $labels.database }}"
+            description: >-
+              A multi-site seed race demoted this pod's suffix entry to a
+              permanent hidden glue entry (ADR-025). It is invisible to
+              ordinary searches, frozen at the winner's entryCSN so every CSN
+              health reading comes back clean, and every backup taken from this
+              pod cannot be restored. There is no auto-heal; follow the ADR-025
+              runbook.
+
+        # The two rules below are split by `role` ON PURPOSE. An RO pod
+        # mid-initial-sync and an RW pod with a permanent corruption both
+        # render suffix_probe_ok 0, and ADR-025's 2026-09-14 amendment gave the
+        # read-only case its own condition reason precisely because it is
+        # legitimately transient. A single rule over both roles is the mistake
+        # the label exists to prevent.
+        #
+        # Both are GATED on the Surface 1 DataPresent verdict, which does two
+        # things. It keeps this from restating a boolean — Surface 1 says the
+        # database is empty somewhere, Surface 2 names the pod — and it borrows
+        # the one piece of state a raw per-pod gauge does not have: the
+        # dataObserved latch. A database that has never held data reports
+        # DataPresent Unknown, kube-state-metrics omits an Unknown condition
+        # entirely (never 0, ADR-033 decision 5), so a brand-new or
+        # never-seeded database matches nothing here even though every one of
+        # its pods renders probe 0.
+        - alert: SlaptainSuffixMissingOnReadWritePod
+          # Join key has NO mesh — see the file header. A Surface 1 database
+          # series structurally cannot carry one.
+          expr: >-
+            slaptain_suffix_probe_ok{role="readwrite"} == 0
+            and on (namespace, cluster, database)
+            slaptain_database_condition{condition="DataPresent",reason="DataMissingOnPods"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.pod }} has no suffix entry for {{ $labels.database }}"
+            description: >-
+              A read-write pod is missing the database's suffix entry while the
+              database is known to hold data elsewhere. Writes accepted by this
+              pod go into a tree that is not the others'. Same fuse as Surface
+              1's SlaptainDataMissingOnPods so the two land together: that one
+              tells you a pod is empty, this one tells you which.
+
+        - alert: SlaptainSuffixMissingOnReadOnlyPod
+          # 20m, matching SlaptainDataMissingOnReadOnlyPods, and for its
+          # reason: an RO consumer's initial sync legitimately looks exactly
+          # like this. Deliberately long enough that the thing most likely to
+          # produce this state — a fresh read-only replica, or one that lost
+          # its PVC — resolves itself before the fuse burns.
+          expr: >-
+            slaptain_suffix_probe_ok{role="readonly"} == 0
+            and on (namespace, cluster, database)
+            slaptain_database_condition{condition="DataPresent",reason="DataMissingOnReadOnlyPods"} == 0
+          for: 20m
+          labels:
+            severity: warning
+          annotations:
+            summary: "read-only pod {{ $labels.pod }} has no suffix entry for {{ $labels.database }}"
+            description: >-
+              A read-only consumer has not completed its initial sync, or has
+              lost it. Clients reading through the <cluster>-readonly Service
+              may hit this pod and see an empty tree. The read-write fleet is
+              unaffected.
+
+    # ── Surface 3: slapd's own cn=Monitor, via the exporter sidecar ──────────
+    #
+    # Scraped by the opt-in PodMonitor in charts/operator, which fixes
+    # job="slapd-exporter" and relabels `cluster` and `role` from the pod's
+    # app.kubernetes.io/instance. Every series carries the slapd pod's own
+    # namespace and pod, so a Surface 3 <-> 3 join is on (namespace, pod).
+    #
+    # Absent is never 0 (ADR-033 decision 5): a reading the exporter could not
+    # take is MISSING from the scrape, and no rule here defaults a missing
+    # series to anything — not a missing pages_free, not a missing
+    # readers_max. A ratio with a missing side is unknown and matches nothing.
+    # Nor does any rule fire on a value reading 0: a fail counter at 0 is a
+    # healthy present reading.
+    #
+    # No thread-saturation rule. cn=Pending,cn=Threads > 0 sustained was the
+    # proposed signal, and live it read Pending > 0 with only 2-9 of 16
+    # threads active: Pending counts queued operations, not exhausted workers,
+    # so it cannot say "every thread is busy". The dashboard still graphs it.
+    - name: slaptain.slapd
+      rules:
+        - alert: SlaptainSlapdExporterDown
+          # The sidecar has no legitimate reason to refuse a scrape. 5m rides
+          # out a container restart plus its first CrashLoop backoffs (10s,
+          # 20s, 40s, 80s = 150s) and two scrape intervals on top. Warning, not
+          # critical: this is Surface 3 going blind on one pod, not slapd
+          # failing — Surface 1's SlaptainPodSilent covers service impact.
+          expr: up{job="slapd-exporter"} == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.pod }}: the slapd exporter sidecar is not answering scrapes"
+            description: >-
+              Prometheus cannot scrape the exporter container, so this pod's
+              Surface 3 readings are absent and every rule over them is silent.
+              slapd itself may be fine: this is the sidecar, not the server.
+
+        - alert: SlaptainSlapdMonitorUnreadable
+          # The exporter answers and says it could not read cn=Monitor:
+          # openldap_up is its own reading of this scrape's attempt, 1 or 0 on
+          # every scrape it answers (ADR-033 decision 4 — 0 is a reading, not
+          # missing evidence). A target that does not answer has no
+          # openldap_up at all; it goes stale, never 0, so this rule cannot
+          # double SlaptainSlapdExporterDown and needs no up == 1 gate. A
+          # missing openldap_up is never read as 0 (decision 5).
+          #
+          # 5m from ADR-030's startupProbe budget of 300s: a slow LMDB open
+          # legitimately leaves slapd unreadable that long while the sidecar
+          # is already up. Warning: for a read-write pod SlaptainPodSilent is
+          # the service-impact alert; this one is the only signal that also
+          # sees a read-only pod freeze.
+          expr: openldap_up == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.pod }}: the exporter answers but cannot read cn=Monitor"
+            description: >-
+              Every scrape for 5 minutes reported openldap_up 0: the exporter
+              answered but could not read cn=Monitor. Either slapd is not
+              answering the exporter — a frozen slapd accepts the connection
+              and never replies (ADR-030) — or the monitor database is missing.
+              The exporter's openldap_exporter_dials_total and
+              openldap_exporter_binds_total fail counters say which step failed.
+
+        # The two rules below catch INTERMITTENT failure, which
+        # SlaptainSlapdMonitorUnreadable cannot: it needs every scrape to fail
+        # for 5m. Window and fuse, as arithmetic: a failure burst confined to
+        # one pod restart lasts at most 300s (the ADR-030 startup budget) and
+        # keeps a [10m] increase above 0 for at most 5m + 10m = 15m, so a 20m
+        # fuse is clear of any single restart by 5m. Failing at least once in
+        # every 10m window for 20m is not a restart. A fail counter at 0, or
+        # one that was never created, is silent — `> 0` on a present increase.
+        - alert: SlaptainSlapdDialFailing
+          expr: increase(openldap_exporter_dials_total{result="fail"}[10m]) > 0
+          for: 20m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.pod }}: the exporter's connections to slapd keep failing"
+            description: >-
+              The exporter has failed to connect to slapd at least once in
+              every 10-minute window for 20 minutes, longer than any single pod
+              restart. Scrapes in between succeed, so
+              SlaptainSlapdMonitorUnreadable can stay silent while this pod's
+              Surface 3 readings have holes.
+
+        - alert: SlaptainSlapdBindFailing
+          # Same window and fuse as SlaptainSlapdDialFailing, above. Separate
+          # from it because the step that fails is the diagnosis: a dial that
+          # succeeds and a bind that times out is ADR-030's freeze.
+          expr: increase(openldap_exporter_binds_total{result="fail"}[10m]) > 0
+          for: 20m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.pod }}: the exporter's binds to slapd keep failing"
+            description: >-
+              The exporter connects but its bind fails or times out, at least
+              once in every 10-minute window for 20 minutes. A frozen slapd
+              (ADR-030) reads as exactly this once the exporter's timeout
+              expires.
+
+        # LMDB map fill, for the four rules below:
+        #
+        #   fill = (openldap_mdb_pages_used - openldap_mdb_pages_free)
+        #          / openldap_mdb_pages_max
+        #
+        # NET OF THE FREE LIST, deliberately not pages_used / pages_max.
+        # back-mdb reports olmMDBPagesUsed as me_last_pgno+1 (back-mdb/
+        # monitor.c) — the HIGH-WATER mark, which LMDB never lowers — and
+        # olmMDBPagesFree as the free-list pages the next writes reuse before
+        # extending the file. The naive ratio never comes down: a database
+        # once 95% full and then purged reads 95% forever, which is every
+        # accesslog after its first purge cycle.
+        #
+        # The three series come from one target and differ only in __name__,
+        # so the arithmetic matches on all remaining labels with no `on (...)`
+        # and a missing side yields no result, never a default. The suffix
+        # class is selected on pages_used; the match carries it to the rest.
+        - alert: SlaptainMDBMapFilling
+          # A data database grows with the directory (weeks), and its only
+          # remedy is the backup-delete-restore recreate: olcDbMaxSize cannot
+          # be modified live (ADR-024; docs/TUNING.md). 20% of the 32Gi default
+          # map is ~6.4Gi of runway to plan that outage in. 30m fuse: map fill
+          # has no legitimate transient beyond one large write transaction.
+          expr: >-
+            (openldap_mdb_pages_used{suffix!~"cn=accesslog-.*"} - openldap_mdb_pages_free)
+            / openldap_mdb_pages_max > 0.80
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.pod }}: LMDB map for {{ $labels.suffix }} is {{ $value | humanizePercentage }} full"
+            description: >-
+              Pages in use, net of the free list, against the map size
+              (olcDbMaxSize). A database that fills its map stops accepting
+              writes with MDB_MAP_FULL, and the map can only be enlarged by
+              recreating the database (ADR-024; docs/TUNING.md). Plan that now.
+
+        - alert: SlaptainMDBMapNearlyFull
+          # 10% of the map left (~3.2Gi of the 32Gi default) is where the
+          # recreate stops being plannable. Shorter fuse than the warning:
+          # the cost of being late is a database that refuses writes.
+          expr: >-
+            (openldap_mdb_pages_used{suffix!~"cn=accesslog-.*"} - openldap_mdb_pages_free)
+            / openldap_mdb_pages_max > 0.90
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.pod }}: LMDB map for {{ $labels.suffix }} is {{ $value | humanizePercentage }} full"
+            description: >-
+              At 100% this database stops accepting writes with MDB_MAP_FULL.
+              The map cannot be enlarged on a running database (slapd segfaults
+              — ADR-024); the remedy is the backup-delete-restore recreate in
+              docs/TUNING.md.
+
+        # Accesslog journals get their own, LOWER thresholds. A journal fills
+        # on write RATE, not data volume (docs/TUNING.md), and its 8Gi map is
+        # fixed. Under the default purge "7+00:00 1+00:00" its steady-state
+        # peak holds 8 days of writes, so one day of writes is 1/8 of that
+        # peak. At fill f, a purge that stops leaves (1-f)/f x 8 days:
+        #   0.70 -> 3.4 days to act,  0.85 -> 1.4 days.
+        # And a full journal is worse than it looks: the accesslog overlay sits
+        # in the DATA database's write path, so it stops data writes too.
+        - alert: SlaptainAccesslogMapFilling
+          expr: >-
+            (openldap_mdb_pages_used{suffix=~"cn=accesslog-.*"} - openldap_mdb_pages_free)
+            / openldap_mdb_pages_max > 0.70
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.pod }}: accesslog journal {{ $labels.suffix }} is {{ $value | humanizePercentage }} full"
+            description: >-
+              The journal fills on write rate, not data volume, and its map is
+              a fixed 8Gi. The accesslog overlay sits in the data database's
+              write path, so when the journal cannot take a write neither can
+              the data. Check that the purge runs, or shorten
+              spec.replication.accesslogPurge (docs/TUNING.md).
+
+        - alert: SlaptainAccesslogMapNearlyFull
+          expr: >-
+            (openldap_mdb_pages_used{suffix=~"cn=accesslog-.*"} - openldap_mdb_pages_free)
+            / openldap_mdb_pages_max > 0.85
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.pod }}: accesslog journal {{ $labels.suffix }} is {{ $value | humanizePercentage }} full"
+            description: >-
+              Under a day or two of writes from full at the default purge
+              window. When the journal cannot take a write, the data database
+              cannot either — the accesslog overlay is in its write path. Check
+              that the purge runs, or shorten spec.replication.accesslogPurge
+              (docs/TUNING.md).
+
+        - alert: SlaptainMDBReaderSlotsHigh
+          # olmMDBReadersUsed is me_numreaders, a high-water mark of slots
+          # ever claimed; its steady state is slapd's thread count — 16 by
+          # default against 126 slots, ~13%. 0.80 (101 slots) is unreachable
+          # by a healthy pod at default threads, so it means slots are leaking,
+          # and it leaves 25 slots before MDB_READERS_FULL fails every read.
+          # A missing readers_max is unknown, not a division by 0.
+          expr: openldap_mdb_readers_used / openldap_mdb_readers_max > 0.80
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.pod }}: {{ $value | humanizePercentage }} of LMDB reader slots claimed for {{ $labels.suffix }}"
+            description: >-
+              The count is a high-water mark, and slapd's thread count sets its
+              steady state (16 threads against 126 slots by default). This many
+              means slots are leaking, typically to readers that died without
+              releasing them. When the table is full every read fails with
+              MDB_READERS_FULL; a restart of the pod clears it.

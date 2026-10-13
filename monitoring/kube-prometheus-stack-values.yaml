@@ -1,20 +1,27 @@
-# kube-prometheus-stack values for the OBSERVING site only.
+# kube-prometheus-stack values — APPLIED IDENTICALLY AT EVERY SITE.
 #
-# One Prometheus holds all three sites: each site's kube-state-metrics is a
-# static scrape target carrying an explicit `site` label, so the mesh is one
-# `site` dimension on one datasource — no federation, no cross-cluster
-# datasource plumbing, no second Grafana.
+# Monitoring is site-local (ADR-033 amendment 2026-10-09): each site's
+# Prometheus scrapes only what runs at that site — its own kube-state-metrics
+# (Surface 1), its own operator (Surface 2) and its own slapd exporter
+# sidecars (Surface 3), all over ClusterIP via ServiceMonitor/PodMonitor.
+# Nothing here reaches across a site boundary, and nothing here names a site:
+# the Prometheus is the site. The only cross-site view is the one the operator
+# already holds and exports locally (peer status, discovered providers).
 #
 #   helm install monitoring prometheus-community/kube-prometheus-stack \
 #     -n monitoring --create-namespace -f monitoring/kube-prometheus-stack-values.yaml
 #
+# Install this FIRST at a site: it brings the Prometheus Operator CRDs the
+# ServiceMonitors and the PodMonitor of the later releases need.
+#
 # Grafana: kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80
-# The lab's node network is not reachable from a workstation, so port-forward
-# is the access path rather than a NodePort.
+# (or monitoring/gateway.yaml).
 
-# We run kube-state-metrics ourselves, once per site, from
-# monitoring/kube-state-metrics-values.yaml. The bundled one would export core
-# kinds from the observing site only and claim the same series names.
+# We run kube-state-metrics ourselves, as its own release, from
+# monitoring/kube-state-metrics-values.yaml: that release carries the
+# custom-resource-state config that turns SlapdCluster/SlapdDatabase status
+# into series, with its core collectors off. The bundled one would export core
+# kinds and know nothing of slaptain's CRs.
 kube-state-metrics:
   enabled: false
 kubeStateMetrics:
@@ -53,9 +60,12 @@ prometheus:
   prometheusSpec:
     scrapeInterval: 15s
     retention: 7d
-    # Pick up PrometheusRules in this namespace regardless of release labels.
+    # Pick up PrometheusRules, ServiceMonitors and PodMonitors regardless of
+    # release labels: the ksm ServiceMonitor and the operator chart's
+    # ServiceMonitor and slapd PodMonitor belong to other releases.
     ruleSelectorNilUsesHelmValues: false
     serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
     storageSpec:
       volumeClaimTemplate:
         spec:
@@ -63,50 +73,6 @@ prometheus:
           resources:
             requests:
               storage: 10Gi
-
-    additionalScrapeConfigs:
-      # One job per site. The address is a node of that site and the port is
-      # kube-state-metrics' NodePort; `site` is attached here because it is a
-      # fact about the scrape target, not about the CR — the CRs are
-      # byte-identical at every site by ADR-028, so nothing in them says which
-      # site they came from.
-      #
-      # THE ADDRESSES BELOW ARE PLACEHOLDERS (RFC 5737) AND MUST BE REPLACED.
-      # They are each site's node address on its CROSS-SITE interface. There is
-      # no discovery path for them: on a dual-homed node the NIC a workstation
-      # reaches is a different one and is not registered with Kubernetes — the
-      # same reason E2E_NODE_ACCESS_IP exists. Keep your real values in a
-      # gitignored copy and point the Makefile at it:
-      #
-      #   cp monitoring/kube-prometheus-stack-values.yaml \
-      #      monitoring/kube-prometheus-stack-values.local.yaml
-      #   make monitoring-stack-install CONTEXT=<site> \
-      #      MONITORING_STACK_VALUES=monitoring/kube-prometheus-stack-values.local.yaml
-      - job_name: slaptain-site-1
-        scrape_interval: 15s
-        static_configs:
-          - targets: ["192.0.2.11:30090"]
-            labels:
-              site: site-1
-        metric_relabel_configs: &drop_crs_labels
-          # kube-state-metrics stamps every custom-resource series with the
-          # GVK it came from. True, and uniform across every series here.
-          - action: labeldrop
-            regex: customresource_(group|kind|version)
-      - job_name: slaptain-site-2
-        scrape_interval: 15s
-        static_configs:
-          - targets: ["198.51.100.11:30090"]
-            labels:
-              site: site-2
-        metric_relabel_configs: *drop_crs_labels
-      - job_name: slaptain-site-3
-        scrape_interval: 15s
-        static_configs:
-          - targets: ["203.0.113.11:30090"]
-            labels:
-              site: site-3
-        metric_relabel_configs: *drop_crs_labels
 
 grafana:
   enabled: true

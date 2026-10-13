@@ -1,8 +1,10 @@
-# Gateway API front door for the observing site, so the dashboard has a URL
-# instead of a port-forward.
+# Gateway API front door for one site's Grafana and Prometheus, so the
+# dashboard has a URL instead of a port-forward. Optional, and per site:
+# monitoring is site-local (ADR-033 amendment 2026-10-09), so every site that
+# runs the stack has its own Grafana to front.
 #
-#   kubectl --context <observing-site> apply -f monitoring/gateway.yaml
-#   kubectl --context <observing-site> -n monitoring get gateway
+#   kubectl --context <site> apply -f monitoring/gateway.yaml
+#   kubectl --context <site> -n monitoring get gateway
 #
 # ONE GATEWAY PER APP, deliberately. The obvious shape — one Gateway with two
 # listeners and a `sectionName` on each HTTPRoute — does not work here: both

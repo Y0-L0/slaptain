@@ -1,7 +1,7 @@
 {
   "uid": "slaptain-mesh",
   "title": "slaptain \u2014 mesh state",
-  "description": "Surface 1 of ADR-033: one mesh's SlapdCluster and SlapdDatabase state across every site, from CR status via kube-state-metrics. Scoped namespace \u2192 mesh \u2192 cluster \u2192 site, the order the refs resolve in.",
+  "description": "ADR-033, this site: one mesh's SlapdCluster and SlapdDatabase state from CR status via kube-state-metrics (Surface 1), the operator's own cross-pod and cross-site observations (Surface 2), and slapd's own cn=Monitor via the exporter sidecar (Surface 3). Monitoring is site-local: this dashboard shows whatever site its data source scrapes. Scoped data source \u2192 namespace \u2192 mesh \u2192 cluster.",
   "tags": [
     "slaptain",
     "openldap",
@@ -20,12 +20,25 @@
   "templating": {
     "list": [
       {
+        "name": "datasource",
+        "label": "Data source (site)",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "regex": "",
+        "options": []
+      },
+      {
         "name": "namespace",
         "label": "Namespace",
         "type": "query",
         "datasource": {
           "type": "prometheus",
-          "uid": "prometheus"
+          "uid": "${datasource}"
         },
         "definition": "label_values(slaptain_cluster_info, namespace)",
         "query": {
@@ -43,7 +56,7 @@
         "type": "query",
         "datasource": {
           "type": "prometheus",
-          "uid": "prometheus"
+          "uid": "${datasource}"
         },
         "definition": "label_values(slaptain_cluster_info{namespace=\"$namespace\"}, mesh)",
         "query": {
@@ -61,7 +74,7 @@
         "type": "query",
         "datasource": {
           "type": "prometheus",
-          "uid": "prometheus"
+          "uid": "${datasource}"
         },
         "definition": "label_values(slaptain_cluster_info{namespace=\"$namespace\",mesh=\"$mesh\"}, cluster)",
         "query": {
@@ -72,35 +85,6 @@
         "includeAll": true,
         "refresh": 2,
         "sort": 1,
-        "allValue": ".*",
-        "current": {
-          "selected": true,
-          "text": [
-            "All"
-          ],
-          "value": [
-            "$__all"
-          ]
-        }
-      },
-      {
-        "name": "site",
-        "label": "Site",
-        "type": "query",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "prometheus"
-        },
-        "definition": "label_values(slaptain_cluster_info{namespace=\"$namespace\",mesh=\"$mesh\"}, site)",
-        "query": {
-          "query": "label_values(slaptain_cluster_info{namespace=\"$namespace\",mesh=\"$mesh\"}, site)",
-          "refId": "StandardVariableQuery"
-        },
-        "multi": true,
-        "includeAll": true,
-        "refresh": 2,
-        "sort": 1,
-        "allValue": ".*",
         "current": {
           "selected": true,
           "text": [
@@ -115,37 +99,51 @@
   },
   "panels": [
     {
-      "type": "text",
-      "title": "",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
+      "type": "row",
+      "title": "Surface 1 \u2014 CR state (kube-state-metrics)",
+      "collapsed": false,
+      "panels": [],
       "gridPos": {
-        "h": 5,
+        "h": 1,
         "w": 24,
         "x": 0,
         "y": 0
       },
+      "id": 1
+    },
+    {
+      "type": "text",
+      "title": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 1
+      },
       "options": {
         "mode": "markdown",
-        "content": "**Surface 1 of ADR-033** \u2014 slaptain's own recorded state, exported by kube-state-metrics' `custom-resource-state` from what the operator already wrote to CR status. No slaptain code, no operator release, no agent on the data plane. One Prometheus holds every site; `site` is a label on the scrape target, because the CRs are byte-identical at every site by ADR-028 and nothing in them says where they came from.\n\n**Scope follows the data model, which is namespace-local at every hop:** a namespace holds one or more meshes; a mesh is referenced by 0..n SlapdClusters; a cluster by 0..n SlapdDatabases and SlapdSchemas. So a mesh is identified by *(namespace, name)* \u2014 the name alone is not unique \u2014 and the selectors are chained in that order. `mesh` is single-select because a headline like *links synced* is a ratio over one mesh's links and an \"All\" would merge two meshes into one meaningless number. `cluster` is multi-select because a mesh may hold several at a site, and every row label names its cluster for that reason.\n\nDatabase series carry no mesh of their own \u2014 only `cluster` \u2014 so they are scoped through the chosen mesh's cluster set rather than by label. A cluster with no `meshRef` carries no `mesh` label and does not appear here at all.\n\n_Per-pod slapd internals \u2014 connections, operations, LMDB fill \u2014 are Surface 3 and are not here: `cn=monitor` is not yet safe to converge._"
+        "content": "**Surface 1 of ADR-033** \u2014 slaptain's own recorded state, exported by kube-state-metrics' `custom-resource-state` from what the operator already wrote to CR status. No slaptain code, no operator release, no agent on the data plane.\n\n**Monitoring is site-local** (ADR-033 amendment 2026-10-09): this site's Prometheus scrapes only this site, so everything here is this site \u2014 there is no `site` label and no site selector. Other sites appear only where this site's operator reports on them, as `peer`. To look at another site, pick its data source above.\n\n**Scope follows the data model, which is namespace-local at every hop:** a namespace holds one or more meshes; a mesh is referenced by 0..n SlapdClusters; a cluster by 0..n SlapdDatabases and SlapdSchemas. So a mesh is identified by *(namespace, name)* \u2014 the name alone is not unique \u2014 and the selectors are chained in that order. `mesh` is single-select because a headline like *links synced* is a ratio over one mesh's links and an \"All\" would merge two meshes into one meaningless number. `cluster` is multi-select because a site may run several clusters of one mesh, and every row label names its cluster for that reason.\n\nDatabase series carry no mesh of their own \u2014 only `cluster` \u2014 so they are scoped through the chosen mesh's cluster set rather than by label. A cluster with no `meshRef` carries no `mesh` label and does not appear here at all."
       },
-      "transparent": true
+      "transparent": true,
+      "id": 2
     },
     {
       "type": "stat",
       "title": "Cross-site links synced",
-      "description": "Share of the selected mesh's observed cross-site links whose per-database CSN verdict is Synced, over every selected cluster. Topology-independent: a site or cluster added or removed moves the denominator, not the threshold.",
+      "description": "Share of this site's outbound cross-site links in the selected mesh whose per-database CSN verdict is Synced, over every selected cluster. It is this site's consumer view only; the reverse direction is on each peer's own dashboard. Topology-independent: a peer or cluster added or removed moves the denominator, not the threshold.",
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 5
+        "y": 7
       },
       "fieldConfig": {
         "defaults": {
@@ -191,29 +189,30 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count(slaptain_cluster_peer_connected{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\",site=~\"$site\",replication_state=\"Synced\"}) / count(slaptain_cluster_peer_connected{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\",site=~\"$site\"})",
+          "expr": "count(slaptain_cluster_peer_connected{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\",replication_state=\"Synced\"}) / count(slaptain_cluster_peer_connected{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\"})",
           "legendFormat": "",
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "id": 3
     },
     {
       "type": "stat",
-      "title": "Sites \u00d7 clusters",
-      "description": "Distinct (site, cluster) pairs of this mesh answering this scrape \u2014 not a site count, because a mesh may hold more than one cluster per site. A pair that stops answering drops out; it does not read healthy.",
+      "title": "Clusters",
+      "description": "SlapdClusters of this mesh at this site answering this scrape. A cluster that stops answering drops out; it does not read healthy.",
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 4,
         "w": 6,
         "x": 6,
-        "y": 5
+        "y": 7
       },
       "fieldConfig": {
         "defaults": {
@@ -251,29 +250,30 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count(count by (site, cluster) (slaptain_cluster_info{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\",site=~\"$site\"}))",
+          "expr": "count(slaptain_cluster_info{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\"})",
           "legendFormat": "",
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "id": 4
     },
     {
       "type": "stat",
       "title": "Read-write pods ready",
-      "description": "Ready over desired, summed across the selected clusters and sites.",
+      "description": "Ready over desired, summed across the selected clusters.",
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 4,
         "w": 6,
         "x": 12,
-        "y": 5
+        "y": 7
       },
       "fieldConfig": {
         "defaults": {
@@ -319,15 +319,16 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(slaptain_cluster_replicas_ready{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\",site=~\"$site\"}) / sum(slaptain_cluster_replicas_desired{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\",site=~\"$site\"})",
+          "expr": "sum(slaptain_cluster_replicas_ready{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\"}) / sum(slaptain_cluster_replicas_desired{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\"})",
           "legendFormat": "",
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "id": 5
     },
     {
       "type": "stat",
@@ -335,13 +336,13 @@
       "description": "Age of the least recent CSN check. The operator's pass runs on a 60s tick; if this climbs it has stopped observing, and every other panel is holding a last-known value rather than reporting health. If the series disappears entirely the operator skipped the check \u2014 see SlaptainPeerUnverified.",
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 4,
         "w": 6,
         "x": 18,
-        "y": 5
+        "y": 7
       },
       "fieldConfig": {
         "defaults": {
@@ -387,29 +388,30 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(time() - slaptain_cluster_peer_last_checked_seconds{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\",site=~\"$site\"})",
+          "expr": "max(time() - slaptain_cluster_peer_last_checked_seconds{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\"})",
           "legendFormat": "",
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "id": 6
     },
     {
       "type": "state-timeline",
-      "title": "Cross-site links \u2014 every ordered site pair",
-      "description": "One row per cluster per ordered site pair, from the consuming side. The verdict word rides in the row label: Synced, Lagging, PartiallyVerified or Unreachable. PartiallyVerified means at least one database yielded no readable contextCSN \u2014 unproven, not healthy (ADR-008). Peer status is consumer-side and one-directional, so A\u2192B and B\u2192A are separate rows and may legitimately disagree.\n\nA row reading 'no connection' with an EMPTY verdict is the operator skipping the check because it cannot read its own databases \u2014 the fault is at the consuming site, not the peer (docs/BACKLOG.md).",
+      "title": "Cross-site links \u2014 outbound from this site",
+      "description": "One row per cluster per peer, from this site's consuming side. The verdict word rides in the row label: Synced, Lagging, PartiallyVerified or Unreachable. PartiallyVerified means at least one database yielded no readable contextCSN \u2014 unproven, not healthy (ADR-008). Peer status is consumer-side and one-directional, so the peer's view of this site is a row on the PEER's dashboard, and the two may legitimately disagree.\n\nA row reading 'no connection' with an EMPTY verdict is a peer the operator never checked \u2014 since the 2026-10-06 fix only a cluster with no databases does that (SlaptainPeerUnverified).",
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 9
+        "y": 11
       },
       "fieldConfig": {
         "defaults": {
@@ -468,15 +470,16 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "slaptain_cluster_peer_connected{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\",site=~\"$site\"}",
-          "legendFormat": "{{cluster}}  {{site}} \u2192 {{peer}}  ({{replication_state}})",
+          "expr": "slaptain_cluster_peer_connected{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\"}",
+          "legendFormat": "{{cluster}} \u2192 {{peer}}  ({{replication_state}})",
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "id": 7
     },
     {
       "type": "state-timeline",
@@ -484,13 +487,13 @@
       "description": "The reason is part of the row label because the reasons carry different meaning and different alert fuses. The two ReplicationMode*WiringRequired conditions are deliberately NOT shown: their semantics are inverted (True means a human still owes the cluster some wiring), so a healthy peer-mode cluster reports one True and one False and a red/green reading of them would be wrong.",
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 18
+        "y": 20
       },
       "fieldConfig": {
         "defaults": {
@@ -549,15 +552,16 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "slaptain_cluster_condition{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\",site=~\"$site\",condition=~\"Ready|ReplicationConverged|PodsResponsive|TLSReady|MeshResolved\"}",
-          "legendFormat": "{{cluster}}  {{site}}  {{condition}}  ({{reason}})",
+          "expr": "slaptain_cluster_condition{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\",condition=~\"Ready|ReplicationConverged|PodsResponsive|TLSReady|MeshResolved\"}",
+          "legendFormat": "{{cluster}}  {{condition}}  ({{reason}})",
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "id": 8
     },
     {
       "type": "state-timeline",
@@ -565,13 +569,13 @@
       "description": "Scoped through the mesh's cluster set, since a SlapdDatabase knows only its clusterRef and both refs resolve within one namespace.\n\nDataPresent with reason GlueSuffix is the ADR-025 failure: one pod's suffix entry demoted to a hidden glue entry, every CSN signal reading clean, backups from that pod unrestorable. It never heals itself, so its alert carries no `for` at all.",
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 18
+        "y": 20
       },
       "fieldConfig": {
         "defaults": {
@@ -630,15 +634,16 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "slaptain_database_condition{namespace=\"$namespace\",cluster=~\"$cluster\",site=~\"$site\"}",
-          "legendFormat": "{{cluster}}/{{database}}  {{site}}  {{condition}}  ({{reason}})",
+          "expr": "slaptain_database_condition{namespace=\"$namespace\",cluster=~\"$cluster\"}",
+          "legendFormat": "{{cluster}}/{{database}}  {{condition}}  ({{reason}})",
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "id": 9
     },
     {
       "type": "timeseries",
@@ -646,13 +651,13 @@
       "description": "Absent on a healthy link, by design \u2014 the operator only sets lagSeconds while the verdict is Lagging, and this panel shows the absence rather than a zero (ADR-033 decision 5). Also absent on an idle-but-broken link: lag is only observable while writes flow, which is why link state above is the primary signal and this is the magnitude behind it.",
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 27
+        "y": 29
       },
       "fieldConfig": {
         "defaults": {
@@ -701,15 +706,16 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "slaptain_cluster_peer_lag_seconds{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\",site=~\"$site\"}",
-          "legendFormat": "{{cluster}}  {{site}} \u2192 {{peer}}",
+          "expr": "slaptain_cluster_peer_lag_seconds{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\"}",
+          "legendFormat": "{{cluster}} \u2192 {{peer}}",
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "id": 10
     },
     {
       "type": "timeseries",
@@ -717,13 +723,13 @@
       "description": "Per-link version of the headline stat. A sawtooth between 0 and ~60s is the operator's CSN tick working. A monotonic climb past the line is an operator that stopped observing; a row vanishing is one that never ran the check at all.",
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 27
+        "y": 29
       },
       "fieldConfig": {
         "defaults": {
@@ -771,15 +777,1081 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus"
+            "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "time() - slaptain_cluster_peer_last_checked_seconds{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\",site=~\"$site\"}",
-          "legendFormat": "{{cluster}}  {{site}} \u2192 {{peer}}",
+          "expr": "time() - slaptain_cluster_peer_last_checked_seconds{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\"}",
+          "legendFormat": "{{cluster}} \u2192 {{peer}}",
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "id": 11
+    },
+    {
+      "type": "row",
+      "title": "Surface 2 \u2014 what the operator observed",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 37
+      },
+      "id": 12
+    },
+    {
+      "type": "text",
+      "title": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Surface 2 of ADR-033** \u2014 what the operator observed on its own pass and never wrote to CR status: the per-database CSN evidence counts behind the `ReplicationConverged` boolean above, the measured spread, the providers each cross-site link resolved to, and the ADR-025 suffix probe **per pod**. Scraped from this site's own operator through its ServiceMonitor.\n\n**Absence is a reading here, and it is never zero.** A panel below that is blank, or a line with a gap in it, means the operator could not take that measurement \u2014 not that the measurement came back clean. Each panel says what its own absence means. Nothing on this surface is fresher than the operator's 60s tick, and the two *observation age* stats are what tell you whether the rest of it is a current reading or a frozen one."
+      },
+      "transparent": true,
+      "id": 13
+    },
+    {
+      "type": "stat",
+      "title": "Oldest cluster observation",
+      "description": "Age of the least recent completed cluster pass, over the selected scope. The cluster controller requeues on a 60s tick while replication is enabled, so this should sawtooth under a minute. A monotonic climb means the pass is returning early \u2014 spec.suspend, an unresolvable meshRef, or a restore in progress \u2014 and every other Surface 2 panel is then showing a frozen reading that still looks healthy. A cluster with replication DISABLED has no periodic requeue at all (ADR-002 amendment) and will climb here for ever while being perfectly fine; that is why the alert rule is gated and this stat is not.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 42
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 120
+              },
+              {
+                "color": "red",
+                "value": 300
+              }
+            ]
+          },
+          "noValue": "no cluster observation recorded \u2014 the operator is not exporting Surface 2, or has never completed a pass"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max(time() - slaptain_cluster_observation_timestamp_seconds{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\"})",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "id": 14
+    },
+    {
+      "type": "stat",
+      "title": "Oldest database observation",
+      "description": "Same question for the SlapdDatabase pass, which carries the per-pod suffix probes. Its guaranteed floor is the 5-minute resync interval, so up to ~300s here is normal even on a healthy database; on a cluster with external peers it tracks the 60s cluster tick instead, because the controller watches SlapdCluster and its lastChecked churn re-triggers it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 42
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 360
+              },
+              {
+                "color": "red",
+                "value": 900
+              }
+            ]
+          },
+          "noValue": "no database observation recorded \u2014 no SlapdDatabase has completed a pass in this scope"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max(time() - slaptain_database_observation_timestamp_seconds{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\"})",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "id": 15
+    },
+    {
+      "type": "stat",
+      "title": "CSN evidence gathered",
+      "description": "(pod, database) pairs that yielded a readable contextCSN, over the pairs the pass set out to read. Anything under 1 means the convergence verdict above is being judged on partial evidence, and unreadable evidence never counts toward healthy (ADR-008). A present 0 is the 2026-10-06 incident shape: attempted every pair, read not one.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 42
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.999
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "noValue": "no CSN measurement attempted \u2014 replication is off, or fewer than two pods are ready"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(slaptain_csn_pairs_read{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\"}) / sum(slaptain_csn_pairs_expected{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\"})",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "id": 16
+    },
+    {
+      "type": "stat",
+      "title": "Pods carrying a GLUE suffix",
+      "description": "ADR-025: a multi-site seed race demoted a pod's suffix entry to a permanent hidden glue entry. It never heals, it reads clean on every CSN signal, and every backup taken from that pod is unrestorable. The series is emitted only for an affected pod, so a healthy mesh shows the no-value text rather than a zero \u2014 which is the point: there is nothing here to mistake for a measurement.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 42
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "none \u2014 no pod reports a glue suffix entry"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "count(slaptain_suffix_glue{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\"})",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "id": 17
+    },
+    {
+      "type": "timeseries",
+      "title": "contextCSN spread across pods",
+      "description": "Newest minus oldest contextCSN timestamp across the read-write pods that answered, per database. This is the MAGNITUDE behind ReplicationConverged, which is an exact set comparison and so reads the same for half a second of propagation and for a pod frozen since yesterday.\n\n**A gap in a line is not a zero.** The series is ABSENT below two readable pods, because a 0 there would read as perfect convergence for a measurement nobody took (ADR-033 decision 5). A measured 0 \u2014 two or more pods that agree \u2014 is drawn as a point on the zero line; an absent one leaves a hole, because spanNulls is off. If a line stops, read the CSN evidence stat, not this panel.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 46
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 6,
+            "spanNulls": false,
+            "insertNulls": false,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 300
+              }
+            ]
+          },
+          "noValue": "no spread measured anywhere in scope \u2014 fewer than two pods answered for every database, which is an absence of evidence and not a clean reading"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "slaptain_csn_spread_seconds{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\"}",
+          "legendFormat": "{{cluster}}/{{database}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "id": 18
+    },
+    {
+      "type": "timeseries",
+      "title": "CSN evidence per database \u2014 pairs read of expected",
+      "description": "The two absolute counts behind the ratio, per database. They are two counts rather than one ratio because a ratio has to divide by a count that can be 0. `read` dropping below `expected` while `expected` holds steady is pods going unreadable; both dropping together is a database leaving the pass.\n\nA present 0 on `read` means every pair was attempted and every one failed \u2014 the attempt is the observation. An absent series means the pass never looked at that database at all.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 46
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 6,
+            "spanNulls": false,
+            "insertNulls": false,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "no CSN pass recorded in scope"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "slaptain_csn_pairs_read{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\"}",
+          "legendFormat": "read  {{cluster}}/{{database}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "slaptain_csn_pairs_expected{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\"}",
+          "legendFormat": "expected  {{cluster}}/{{database}}",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "id": 19
+    },
+    {
+      "type": "state-timeline",
+      "title": "Suffix entry per pod (ADR-025)",
+      "description": "The per-pod suffix probe, which exists nowhere in CR status \u2014 the DataPresent condition above is the aggregate verdict over pods, and this is which pod.\n\nA row that STOPS is a pod that could not be probed, and that is not the same as a pod that probed badly: suffixprobe reports positive evidence only, so no sample is emitted for a pod the pass could not reach. `role` is on the row because an RO consumer mid-initial-sync and an RW pod with a corruption both read 'missing' and only one of them is transient (ADR-025, 2026-09-14 amendment).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 54
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 85,
+            "lineWidth": 0,
+            "spanNulls": false,
+            "insertNulls": false
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "missing",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "present",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "no pod was probed in this scope \u2014 absence of a probe is not a clean probe"
+        },
+        "overrides": []
+      },
+      "options": {
+        "alignValue": "center",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "mergeValues": true,
+        "rowHeight": 0.9,
+        "showValue": "never",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "slaptain_suffix_probe_ok{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\"}",
+          "legendFormat": "{{cluster}}/{{database}}  {{pod}} ({{role}})",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "id": 20
+    },
+    {
+      "type": "timeseries",
+      "title": "Discovered providers per cross-site link",
+      "description": "How many remote pods each external peer's discovery resolved to. A link that resolved to nothing is how a cross-site outage begins (ADR-031, ADR-032), so a present 0 is alertable on its own.\n\nThe 0 and the gap mean different things and point at different sites. A present 0 says discovery RAN against the remote API and it reported no running slapd pods \u2014 look at the PEER. A gap says discovery could not be asked at all (a rotated or unparseable kubeconfig Secret, an unreachable remote API) \u2014 look at THIS site, and at the 'Cross-site links' panel above, which carries that case as Unreachable.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 54
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 6,
+            "spanNulls": false,
+            "insertNulls": false,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "noValue": "no discovery result in scope \u2014 either no cluster here declares an external peer, or discovery could not be asked at any of them"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "slaptain_peer_providers_discovered{namespace=\"$namespace\",mesh=\"$mesh\",cluster=~\"$cluster\"}",
+          "legendFormat": "{{cluster}} \u2192 {{peer}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "id": 21
+    },
+    {
+      "type": "row",
+      "title": "Surface 3 \u2014 slapd itself, per pod (exporter sidecar) \u00b7 full detail: \u201cslaptain \u2014 slapd\u201d dashboard",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 63
+      },
+      "id": 22
+    },
+    {
+      "type": "text",
+      "title": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 64
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Surface 3 of ADR-033** \u2014 slapd's own `cn=Monitor`, read by the exporter sidecar on every slapd pod and scraped through the operator chart's `slapdPodMonitor`. Empty unless the SlapdCluster has `spec.monitoring.enabled` **and** this site's operator chart has `slapdPodMonitor.enabled`. Series carry `namespace`, `pod`, `cluster` and `role` from the scrape target and `suffix`, `op` or `direction` from the exporter's curated families (ADR-033 decision 4); there is no `mesh`, so they are scoped through the mesh's cluster set. **A missing line is not a zero**: a database opened before `cn=Monitor` has no LMDB statistics until its pod restarts, and a failed read drops the whole scrape's `cn=Monitor` families.\n\n**Per-pod detail** \u2014 threads, waiters, traffic, every operation type, uptime and restarts, and a table of every database \u2014 is on the **slaptain \u2014 slapd** dashboard (link at the top; clicking a line in the panels below opens it on that pod)."
+      },
+      "id": 23
+    },
+    {
+      "type": "timeseries",
+      "title": "LMDB map fill per pod \u00d7 database",
+      "description": "(pages_used \u2212 pages_free) / pages_max per database (suffix) per pod \u2014 the share of the map actually in use, against olcDbMaxSize, which can only be raised by recreate (ADR-024). pages_used alone is a high-water mark: it never shrinks after deletes, and pages_free is what LMDB will reuse. The cn=accesslog-* journals are here too; they fill with write rate and purge age, not with directory size. A full map refuses every write to that database. Same expression as the alert rules. Thresholds follow the rules: 80%/90% for data databases, 70%/85% for the cn=accesslog-* journals \u2014 the lines drawn are the data-database ones; the slaptain \u2014 slapd dashboard draws the journals on their own panel with their own.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 68
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "spanNulls": false,
+            "insertNulls": false,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.8
+              },
+              {
+                "color": "red",
+                "value": 0.9
+              }
+            ]
+          },
+          "noValue": "no LMDB statistics in scope \u2014 exporter off, not scraped, or every database opened before cn=Monitor",
+          "links": [
+            {
+              "title": "Open ${__field.labels.pod} / ${__field.labels.suffix} in slaptain \u2014 slapd",
+              "url": "/d/slaptain-slapd/slaptain-slapd?${datasource:queryparam}&${namespace:queryparam}&var-cluster=${__field.labels.cluster}&var-pod=${__field.labels.pod}&${__url_time_range}&var-suffix=${__field.labels.suffix}",
+              "targetBlank": false
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "(openldap_mdb_pages_used{namespace=\"$namespace\",cluster=~\"$cluster\"} - openldap_mdb_pages_free{namespace=\"$namespace\",cluster=~\"$cluster\"}) / openldap_mdb_pages_max{namespace=\"$namespace\",cluster=~\"$cluster\"}",
+          "legendFormat": "{{cluster}}  {{pod}}  {{suffix}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "id": 24
+    },
+    {
+      "type": "timeseries",
+      "title": "Current connections per pod",
+      "description": "openldap_connections_current, from cn=Current,cn=Connections,cn=Monitor. Steady growth over hours with no matching client load is the missing-olcIdleTimeout symptom: connections that are never reaped until the descriptor limit is hit.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 68
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "spanNulls": false,
+            "insertNulls": false,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "no connection count in scope \u2014 exporter off, not scraped, or cn=Monitor unreadable",
+          "links": [
+            {
+              "title": "Open ${__field.labels.pod} in slaptain \u2014 slapd",
+              "url": "/d/slaptain-slapd/slaptain-slapd?${datasource:queryparam}&${namespace:queryparam}&var-cluster=${__field.labels.cluster}&var-pod=${__field.labels.pod}&${__url_time_range}",
+              "targetBlank": false
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "openldap_connections_current{namespace=\"$namespace\",cluster=~\"$cluster\"}",
+          "legendFormat": "{{cluster}}  {{pod}} ({{role}})",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "id": 25
+    },
+    {
+      "type": "timeseries",
+      "title": "Queued operations per pod",
+      "description": "openldap_threads_pending, from cn=Pending,cn=Threads,cn=Monitor: operations accepted and waiting to be handed to a worker thread. It is NOT a saturation signal: live it read above zero with only 2\u20139 of 16 threads active, so a non-zero value does not mean every worker is busy, and no alert rule watches it. Read it as queue depth next to the operation rate below.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 76
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "spanNulls": false,
+            "insertNulls": false,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "no queue readings in scope \u2014 exporter off, not scraped, or cn=Monitor unreadable",
+          "links": [
+            {
+              "title": "Open ${__field.labels.pod} in slaptain \u2014 slapd",
+              "url": "/d/slaptain-slapd/slaptain-slapd?${datasource:queryparam}&${namespace:queryparam}&var-cluster=${__field.labels.cluster}&var-pod=${__field.labels.pod}&${__url_time_range}",
+              "targetBlank": false
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "openldap_threads_pending{namespace=\"$namespace\",cluster=~\"$cluster\"}",
+          "legendFormat": "{{cluster}}  {{pod}} ({{role}})",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "id": 26
+    },
+    {
+      "type": "state-timeline",
+      "title": "Exporter target per pod",
+      "description": "Prometheus' own up for each exporter sidecar (job slapd-exporter). Down means the scrape failed \u2014 pod gone, port blocked, sidecar crashed. Up says only that the sidecar answered: if slapd itself could not be read, the scrape still succeeds and carries no cn=Monitor families, which the panels to the left show as missing lines.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 76
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 85,
+            "lineWidth": 0,
+            "spanNulls": false,
+            "insertNulls": false
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "down",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "up",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "no exporter target in scope \u2014 spec.monitoring.enabled or slapdPodMonitor.enabled is off",
+          "links": [
+            {
+              "title": "Open ${__field.labels.pod} in slaptain \u2014 slapd",
+              "url": "/d/slaptain-slapd/slaptain-slapd?${datasource:queryparam}&${namespace:queryparam}&var-cluster=${__field.labels.cluster}&var-pod=${__field.labels.pod}&${__url_time_range}",
+              "targetBlank": false
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "alignValue": "center",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "mergeValues": true,
+        "rowHeight": 0.9,
+        "showValue": "never",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "up{job=\"slapd-exporter\",namespace=\"$namespace\",cluster=~\"$cluster\"}",
+          "legendFormat": "{{cluster}}  {{pod}} ({{role}})",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "id": 27
+    },
+    {
+      "type": "timeseries",
+      "title": "Operations per second per pod",
+      "description": "Completed LDAP operations per second (rate of openldap_operations_completed_total, slapd's monitorOpCompleted, over every operation type), per pod. The view that shows a replication storm: a stale-cookie full-refresh loop reads as hundreds of binds and searches per second on the affected pods while their peers stay flat, and nothing in Surfaces 1 or 2 moves. No alert rule \u2014 there is no load level that is wrong in itself.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 84
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "spanNulls": false,
+            "insertNulls": false,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "no operation counters in scope \u2014 exporter off, not scraped, or cn=Monitor unreadable",
+          "links": [
+            {
+              "title": "Open ${__field.labels.pod} in slaptain \u2014 slapd",
+              "url": "/d/slaptain-slapd/slaptain-slapd?${datasource:queryparam}&${namespace:queryparam}&var-cluster=${__field.labels.cluster}&var-pod=${__field.labels.pod}&${__url_time_range}",
+              "targetBlank": false
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (cluster, pod) (rate(openldap_operations_completed_total{namespace=\"$namespace\",cluster=~\"$cluster\"}[5m]))",
+          "legendFormat": "{{cluster}}  {{pod}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "id": 28
+    }
+  ],
+  "links": [
+    {
+      "title": "slaptain \u2014 slapd",
+      "type": "link",
+      "icon": "dashboard",
+      "url": "/d/slaptain-slapd/slaptain-slapd",
+      "includeVars": true,
+      "keepTime": true,
+      "targetBlank": false,
+      "asDropdown": false,
+      "tags": [],
+      "tooltip": "Per-pod slapd detail from the exporter sidecar (Surface 3), this site"
     }
   ]
 }

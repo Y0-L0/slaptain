@@ -282,6 +282,16 @@ Then `slctl inspect -n slaptain slapd` at each site. `MeshResolved=True` means t
 operator found its mesh and derived its wiring; `ReplicationConverged=True` means
 the databases agree.
 
+**Optional, 8. Monitoring.** Everything above is readable through `slctl` and CR
+status alone. For Prometheus and Grafana, follow
+[MONITORING.md](MONITORING.md#install) at **every** site, from a checkout whose
+`monitoring/` matches the operator release you run. Monitoring is
+site-local, so each site runs its own stack and scrapes only itself, and
+nothing in it crosses a site boundary. It adds the operator chart's
+`metrics.*` / `slapdPodMonitor.enabled` per site, and — for slapd's own load and
+LMDB fill — `cluster.monitoring.enabled: true` in the shared mesh values, which
+rolls every site's pods once.
+
 ### The chart is packaging, not mechanism
 
 Worth being precise about, because it is easy to assume the Helm chart is what
@@ -845,4 +855,4 @@ Two mesh-specific notes:
 - [ADR-008](adrs/adr-008-csn-monitoring-credentials.md) — what CSN monitoring can and cannot see
 - [ADR-019](adrs/adr-019-per-database-accesslog.md) — why a missing database halts replication
 - [`charts/slapd-mesh/README.md`](../charts/slapd-mesh/README.md) — chart reference
-- [Backup & Restore](BACKUP.md), [Tuning & Sizing](TUNING.md)
+- [Backup & Restore](BACKUP.md), [Tuning & Sizing](TUNING.md), [Monitoring](MONITORING.md)

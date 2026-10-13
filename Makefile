@@ -35,6 +35,15 @@ IS_VERSION_TAG := $(shell echo '$(GIT_TAG)' | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]
 #             `0.2.0` is a release, `sha-09ecf10` is a build of a commit.
 IMAGE_TAG := $(if $(IS_VERSION_TAG),$(GIT_TAG:v%=%),sha-$(GIT_TAG))
 
+# The slapd exporter is its own version line (ADR-033 decision 4,
+# docs/VERSIONING.md): git tags exporter/vX.Y.Z, image tag the bare X.Y.Z, and
+# off-tag the same sha-<hash>[-dirty-<state8>] addressing as above. Same script,
+# its own stream — each stream matches only its own tag pattern, so a commit
+# carrying both kinds of tag resolves unambiguously in either.
+EXPORTER_GIT_TAG := $(shell scripts/image-tag.sh exporter)
+IS_EXPORTER_VERSION_TAG := $(shell echo '$(EXPORTER_GIT_TAG)' | grep -qE '^exporter/v[0-9]+\.[0-9]+\.[0-9]+' && echo true)
+EXPORTER_IMAGE_TAG := $(if $(IS_EXPORTER_VERSION_TAG),$(EXPORTER_GIT_TAG:exporter/v%=%),sha-$(EXPORTER_GIT_TAG))
+
 # Image delivery: "push" = registry, "import" = direct to k8s node CRI via SSH
 DELIVERY ?= push
 
@@ -68,6 +77,7 @@ INIT_IMAGE       = $(REGISTRY)/$(PROJECT)/slapd-init:$(IMAGE_TAG)
 SLAPD_IMAGE      = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)
 TOOLKIT_IMAGE    = $(REGISTRY)/$(PROJECT)/slapd-toolkit:$(IMAGE_TAG)
 OPERATOR_IMAGE   = $(REGISTRY)/$(PROJECT)/operator:$(IMAGE_TAG)
+EXPORTER_IMAGE   = $(REGISTRY)/$(PROJECT)/slapd-exporter:$(EXPORTER_IMAGE_TAG)
 
 # Legacy OpenLDAP 2.6 variants of the slapd pair (ADR-021). The plain tags above
 # are OpenLDAP 2.7.1; these keep the previous Debian-package build reachable for
@@ -128,6 +138,7 @@ SLAPD_SRCS       := images/slapd/Containerfile
 SLAPD_OL26_SRCS  := images/slapd/Containerfile.ol26
 TOOLKIT_SRCS := $(shell find images/slapd-toolkit -type f)
 OPERATOR_SRCS := $(shell find images/operator -type f) $(shell find operator -type f -name '*.go') operator/go.mod operator/go.sum
+EXPORTER_SRCS := $(shell find images/slapd-exporter -type f) $(shell find exporter -type f -name '*.go') exporter/go.mod exporter/go.sum
 
 # Import a container image to all k8s nodes via SSH (unconditional).
 # No leading @ — called from within import-if-needed which handles suppression.
@@ -159,11 +170,11 @@ define import-if-needed
 	fi
 endef
 
-.PHONY: all build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-toolkit build-operator build-slctl install-slctl push gencert helm-deploy cluster-helm-install cluster-helm-uninstall mesh-helm-install mesh-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag helm-lint verify-generated
+.PHONY: all build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-toolkit build-operator build-exporter build-slctl install-slctl push gencert helm-deploy cluster-helm-install cluster-helm-uninstall mesh-helm-install mesh-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-exporter import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag helm-lint verify-generated
 
-## all: the six pushable images plus slctl. build-ol26 is included so a
+## all: the seven pushable images plus slctl. build-ol26 is included so a
 ## release build carries the legacy OpenLDAP 2.6 pair too (ADR-021).
-all: build-init build-slapd build-ol26 build-toolkit build-operator build-slctl
+all: build-init build-slapd build-ol26 build-toolkit build-operator build-exporter build-slctl
 
 ## Stamp-file backed build targets (incremental)
 
@@ -178,6 +189,12 @@ $(STAMPS)/tag: FORCE | $(STAMPS)
 		echo "$(IMAGE_TAG)" > $@; \
 	fi
 .PHONY: FORCE
+
+# The exporter's own tag stamp: its stream moves independently of IMAGE_TAG.
+$(STAMPS)/exporter-tag: FORCE | $(STAMPS)
+	@if [ "$$(cat $@ 2>/dev/null)" != "$(EXPORTER_IMAGE_TAG)" ]; then \
+		echo "$(EXPORTER_IMAGE_TAG)" > $@; \
+	fi
 
 # OpenLDAP 2.7.1 packages, built once and consumed by both 2.7 images below.
 $(STAMPS)/openldap-deb: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
@@ -216,6 +233,10 @@ $(STAMPS)/operator: $(OPERATOR_SRCS) $(STAMPS)/tag | $(STAMPS)
 	$(CONTAINER_ENGINE) build -f images/operator/Containerfile -t $(OPERATOR_IMAGE) .
 	@touch $@
 
+$(STAMPS)/exporter: $(EXPORTER_SRCS) $(STAMPS)/exporter-tag | $(STAMPS)
+	$(CONTAINER_ENGINE) build -f images/slapd-exporter/Containerfile -t $(EXPORTER_IMAGE) .
+	@touch $@
+
 ## Phony aliases so `make build-operator` etc. still work
 build-openldap-deb: $(STAMPS)/openldap-deb
 build-init: $(STAMPS)/init
@@ -225,6 +246,7 @@ build-slapd-ol26: $(STAMPS)/slapd-ol26
 build-ol26: build-init-ol26 build-slapd-ol26
 build-toolkit: $(STAMPS)/toolkit
 build-operator: $(STAMPS)/operator
+build-exporter: $(STAMPS)/exporter
 
 build-slctl:
 	cd operator && go build -o ../bin/slctl ./cmd/slctl/
@@ -232,16 +254,18 @@ build-slctl:
 install-slctl: build-slctl
 	sudo install -m 0755 bin/slctl /usr/local/bin/slctl
 
-## Push to container registry. Six images: the 2.7 slapd pair (plain tags), the
-## 2.6 pair (-ol26), toolkit and operator. The openldap-deb build artifact
-## carrier is local-only and deliberately not pushed.
-push: build-init build-slapd build-ol26 build-toolkit build-operator
+## Push to container registry. Seven images: the 2.7 slapd pair (plain tags), the
+## 2.6 pair (-ol26), toolkit, operator, and the slapd exporter at its own
+## EXPORTER_IMAGE_TAG. The openldap-deb build artifact carrier is local-only and
+## deliberately not pushed.
+push: build-init build-slapd build-ol26 build-toolkit build-operator build-exporter
 	$(CONTAINER_ENGINE) push $(INIT_IMAGE)
 	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE)
 	$(CONTAINER_ENGINE) push $(INIT_IMAGE_OL26)
 	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE_OL26)
 	$(CONTAINER_ENGINE) push $(TOOLKIT_IMAGE)
 	$(CONTAINER_ENGINE) push $(OPERATOR_IMAGE)
+	$(CONTAINER_ENGINE) push $(EXPORTER_IMAGE)
 
 ## Import images into k8s node CRI via SSH.
 ## Checks kubectl node image list first — skips import if the tag is already present.
@@ -259,7 +283,10 @@ import-toolkit: build-toolkit
 import-operator: build-operator
 	$(call import-if-needed,$(OPERATOR_IMAGE))
 
-import: import-init import-slapd import-toolkit import-operator
+import-exporter: build-exporter
+	$(call import-if-needed,$(EXPORTER_IMAGE))
+
+import: import-init import-slapd import-toolkit import-operator import-exporter
 
 ## Legacy 2.6 pair — separate aggregate so the normal loop doesn't pay for it.
 ## Use it to run an e2e cycle against -ol26 images (ADR-021).
@@ -640,10 +667,12 @@ monitoring-prometheus: ## Port-forward Prometheus to http://localhost:9090
 	@echo "Prometheus → http://localhost:9090"
 	$(KUBECTL) --namespace $(MONITORING_NS) port-forward svc/$(MONITORING_STACK_RELEASE)-kube-prometheus-prometheus 9090:9090
 
-show-tag: ## Print the git tag and the image/chart tag derived from it
+show-tag: ## Print the git tags and the image/chart tags derived from them
 	@echo "git:    $(GIT_TAG)"
 	@echo "image:  $(IMAGE_TAG)"
 	@echo "chart:  $(CHART_VERSION)"
+	@echo "exporter git:    $(EXPORTER_GIT_TAG)"
+	@echo "exporter image:  $(EXPORTER_IMAGE_TAG)"
 
 clean:
 	rm -rf .stamps .charts bin/ *.tar

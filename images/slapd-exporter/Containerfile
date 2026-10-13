@@ -1,0 +1,17 @@
+# slapd-exporter: ADR-033 Surface 3, its own module (exporter/), image and
+# version line (git tags exporter/vX.Y.Z, image tag X.Y.Z — docs/VERSIONING.md).
+# Build context is the repo root, like the operator image.
+FROM golang:1.25 AS builder
+WORKDIR /workspace
+COPY exporter/go.mod exporter/go.sum ./
+RUN go mod download
+COPY exporter/ .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -trimpath -o /slapd-exporter ./cmd/slapd-exporter
+
+FROM gcr.io/distroless/static-debian13:nonroot
+COPY --from=builder /slapd-exporter /slapd-exporter
+USER 65532:65532
+# The entrypoint and the exporter's flag defaults (ldapi socket in
+# /run/openldap, SASL EXTERNAL, :9330/metrics) are the whole contract with the
+# operator, which passes no command and no arguments.
+ENTRYPOINT ["/slapd-exporter"]

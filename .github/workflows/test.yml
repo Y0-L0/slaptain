@@ -18,22 +18,24 @@ jobs:
       - name: Clone the code
         uses: actions/checkout@v7
 
-      # The repo root has no go.mod: the operator (operator/) and the Ginkgo
-      # e2e suite (tests/e2e/) are separate modules.
+      # The repo root has no go.mod: the operator (operator/), the slapd
+      # exporter (exporter/) and the Ginkgo e2e suite (tests/e2e/) are separate
+      # modules. They declare the same Go version; the operator's is used here.
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
           go-version-file: operator/go.mod
           cache-dependency-path: |
             operator/go.sum
+            exporter/go.sum
             tests/e2e/go.sum
 
       - name: Check tidy
         run: |
-          for m in operator tests/e2e; do
+          for m in operator exporter tests/e2e; do
             (cd "$m" && go mod tidy)
           done
-          git diff --exit-code -- operator/go.mod operator/go.sum tests/e2e/go.mod tests/e2e/go.sum
+          git diff --exit-code -- operator/go.mod operator/go.sum exporter/go.mod exporter/go.sum tests/e2e/go.mod tests/e2e/go.sum
 
       # Same class of check as `go mod tidy` above: the repo carries generated
       # files (CRDs, the RBAC role, zz_generated.deepcopy.go and the operator
@@ -47,6 +49,11 @@ jobs:
       # the Kubernetes minor that operator/go.mod pins.
       - name: Run unit tests
         run: make -C operator test
+
+      # The exporter is its own module and image (ADR-033 decision 4); its
+      # tests need no cluster and no envtest.
+      - name: Vet and test the exporter
+        run: cd exporter && go vet ./... && go test ./...
 
       # The e2e suite only runs against a lab cluster with NodePort access
       # (tests/README.md), which CI does not have — but CI can refuse a suite

@@ -1,9 +1,7 @@
 name: Lint
 
 # push is limited to main: a PR branch is covered by the pull_request event,
-# and running both doubles every check. It also matters for only-new-issues
-# below — the first push of a new branch has no previous commit to diff
-# against, so that run reported the whole pre-existing debt as "new".
+# and running both doubles every check.
 on:
   push:
     branches: [main]
@@ -14,41 +12,40 @@ permissions:
 
 jobs:
   lint:
-    name: golangci-lint
+    name: golangci-lint (${{ matrix.module }})
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      # only-new-issues reads the PR diff through the API.
-      pull-requests: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # The Go modules that ship code; each carries its own .golangci.yml
+        # (identical today). tests/e2e is compiled by the test workflow.
+        module: [operator, exporter]
     steps:
       - name: Clone the code
         uses: actions/checkout@v7
-        with:
-          # only-new-issues below diffs against the PR base, or on a push
-          # against the previous commit — both must be in the clone.
-          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version-file: operator/go.mod
-          cache-dependency-path: operator/go.sum
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache-dependency-path: ${{ matrix.module }}/go.sum
 
       # `version` is the same pin as GOLANGCI_LINT_VERSION in operator/Makefile;
       # move them together, so `make -C operator lint` and CI judge by the same
-      # rules. (It has to be a release whose Go is at least operator/go.mod's,
+      # rules. (It has to be a release whose Go is at least the module's go.mod,
       # or it dies on the export-data version before any linter runs — the
       # failure docs/BACKLOG.md records for v2.7.2 under Go 1.27.)
       #
-      # The operator carries a few hundred pre-existing findings — the "lint
-      # debt" entry in docs/BACKLOG.md. Until that sweep lands, the gate is
-      # "add none", not "have none": only findings a change introduces fail it.
+      # The gate is "have none": every finding in the module fails it, not only
+      # the ones a change introduces. Both modules are at zero (the lint-debt
+      # entry in docs/BACKLOG.md). The earlier only-new-issues mode read the PR
+      # diff through the API, which refuses diffs over 20,000 lines, and then
+      # fell back to linting everything anyway.
       - name: Run linter
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
-          working-directory: operator
-          only-new-issues: true
+          working-directory: ${{ matrix.module }}
 
   chart:
     name: Helm charts

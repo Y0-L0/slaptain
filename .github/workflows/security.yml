@@ -19,8 +19,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The two Go modules in the repo; the root has none.
-        module: [operator, tests/e2e]
+        # The Go modules in the repo; the root has none.
+        module: [operator, exporter, tests/e2e]
     steps:
       - name: Checkout
         uses: actions/checkout@v7

@@ -730,6 +730,10 @@ is lower than the targeted Go version"); `make -C operator lint` installs it
 under the module's toolchain, so delete a stale `operator/bin/golangci-lint-*`
 after a toolchain bump.
 
+The sweep landed on 2026-10-17 (#17), and the exporter module followed with
+ADR-033: both are at zero, so CI's gate is now "have none" (`only-new-issues`
+is off) and lints `operator/` and `exporter/` alike.
+
 
 **What:** the pinned `golangci-lint` v2.7.2 cannot read Go 1.27's export data
 (`export data version 4 is greater than maximum supported version 2`). It fails

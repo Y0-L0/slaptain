@@ -38,8 +38,8 @@ import (
 // matters, since a store keyed on something derived from the value rather than
 // on the Key argument would collapse them.
 var (
-	keyA = Key{Namespace: "slaptain-testing", Name: "slapd"}
-	keyB = Key{Namespace: "slaptain-testing", Name: "ldap-b"}
+	keyA = Key{Namespace: testNamespace, Name: testCluster}
+	keyB = Key{Namespace: testNamespace, Name: testControlCluster}
 )
 
 // clusterStore is a store with one observation already in it, plus the key it
@@ -101,7 +101,7 @@ func TestStoreRecordReplacesWholesale(t *testing.T) {
 	// first pass's databases would still produce a struct, and this says which
 	// property the equality above was protecting.
 	for _, db := range got[0].Databases {
-		if db.Database == "default" || db.Database == "db2" {
+		if db.Database == testDB || db.Database == testDB2 {
 			t.Errorf("database %q from the REPLACED observation survived the replacement", db.Database)
 		}
 	}
@@ -161,7 +161,7 @@ func TestStoreKeepsDistinctKeysApart(t *testing.T) {
 	s := &Store[DatabaseObservation]{}
 	first := healthyDatabase()  // cluster "slapd", database "default"
 	second := healthyDatabase() // same cluster, a second database
-	second.Database = "db2"
+	second.Database = testDB2
 
 	s.Record(Key{Namespace: first.Namespace, Name: first.Database}, first)
 	s.Record(Key{Namespace: second.Namespace, Name: second.Database}, second)
@@ -196,16 +196,17 @@ func TestStoreKeyFieldsDoNotCollideThroughConcatenation(t *testing.T) {
 // reason RenderCluster promises an order.
 func TestStoreSnapshotIsOrderedByKey(t *testing.T) {
 	s := &Store[ClusterObservation]{}
+	const nsA = "ns-a"
 	// Recorded in an order that is neither the wanted one nor its reverse, so a
 	// store returning insertion order fails too.
-	s.Record(Key{Namespace: "ns-b", Name: "alpha"}, healthyCluster())
-	s.Record(Key{Namespace: "ns-a", Name: "zulu"}, controlCluster())
-	s.Record(Key{Namespace: "ns-a", Name: "alpha"}, healthyCluster())
+	s.Record(Key{Namespace: "ns-b", Name: testNameFirst}, healthyCluster())
+	s.Record(Key{Namespace: nsA, Name: testNameLast}, controlCluster())
+	s.Record(Key{Namespace: nsA, Name: testNameFirst}, healthyCluster())
 
 	want := []Key{
-		{Namespace: "ns-a", Name: "alpha"},
-		{Namespace: "ns-a", Name: "zulu"},
-		{Namespace: "ns-b", Name: "alpha"},
+		{Namespace: nsA, Name: testNameFirst},
+		{Namespace: nsA, Name: testNameLast},
+		{Namespace: "ns-b", Name: testNameFirst},
 	}
 
 	// The observations do not carry their key, so order is checked through the
@@ -214,7 +215,7 @@ func TestStoreSnapshotIsOrderedByKey(t *testing.T) {
 	if len(got) != len(want) {
 		t.Fatalf("Snapshot() = %d observations, want %d", len(got), len(want))
 	}
-	wantMesh := []string{"ldap", "mesh-b", "ldap"}
+	wantMesh := []string{testMesh, testControlMesh, testMesh}
 	for i, mesh := range wantMesh {
 		if got[i].Mesh != mesh {
 			t.Errorf("Snapshot()[%d] is the observation for mesh %q, want the one for %q "+
@@ -344,12 +345,12 @@ func TestStoreIsSafeForConcurrentUse(t *testing.T) {
 
 	// keySurvivor is recorded by every worker and never evicted, so the final
 	// state is deterministic however the goroutines interleave.
-	keySurvivor := Key{Namespace: "slaptain-testing", Name: "survivor"}
+	keySurvivor := Key{Namespace: testNamespace, Name: "survivor"}
 
 	var wg sync.WaitGroup
 	for range workers {
 		wg.Go(func() {
-			churn := Key{Namespace: "slaptain-testing", Name: "churn"}
+			churn := Key{Namespace: testNamespace, Name: "churn"}
 			for range iterations {
 				s.Record(keySurvivor, healthyCluster())
 				s.Record(churn, controlCluster())

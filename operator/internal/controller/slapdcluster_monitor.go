@@ -78,7 +78,7 @@ func monitorDBAddRequest() *ldap.AddRequest {
 	req := ldap.NewAddRequest("olcDatabase=monitor,cn=config", nil)
 	req.Attribute("objectClass", []string{"olcDatabaseConfig", "olcMonitorConfig"})
 	req.Attribute("olcDatabase", []string{"monitor"})
-	req.Attribute("olcRootDN", []string{"cn=admin,cn=config"})
+	req.Attribute("olcRootDN", []string{configAdminDN})
 	req.Attribute("olcAccess", []string{"{0}" + monitorDBACL})
 	return req
 }

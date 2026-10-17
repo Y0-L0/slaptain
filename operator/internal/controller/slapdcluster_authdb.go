@@ -98,7 +98,7 @@ func (r *SlapdClusterReconciler) ensureAuthDB(
 		// a credential it already holds, and it is deliberately NOT a data
 		// database's rootDN — ADR-027 rejected binding as the data rootDN
 		// precisely because that identity bypasses every ACL on the data tree.
-		addReq.Attribute("olcRootDN", []string{"cn=admin,cn=config"})
+		addReq.Attribute("olcRootDN", []string{configAdminDN})
 		// back-mdb does not create olcDbDirectory; bootstrap.sh provisions it
 		// unconditionally at pod start (ADR-027 decision 3).
 		addReq.Attribute("olcDbDirectory", []string{ldapv1alpha1.AuthDir})

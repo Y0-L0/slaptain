@@ -432,7 +432,7 @@ func TestExternalPeersForSite(t *testing.T) {
 		{
 			name:     "selector names a site the mesh does not have",
 			sites:    threeSiteMesh(),
-			selector: []string{testSite1, "site-9"},
+			selector: []string{testSite1, testSite9},
 			self:     testSite1,
 			wantErr:  errSiteUnknown,
 		},

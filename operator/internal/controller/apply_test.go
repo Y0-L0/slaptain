@@ -30,8 +30,6 @@ import (
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
-const applyTestNamespace = "slaptain-testing"
-
 // TestApplyConfigurationBodyIsUnchanged pins the one thing the migration off the
 // deprecated client.Apply patch type must not change: the bytes on the wire.
 //
@@ -49,7 +47,7 @@ func TestApplyConfigurationBodyIsUnchanged(t *testing.T) {
 			TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        testHeadlessSvc,
-				Namespace:   applyTestNamespace,
+				Namespace:   testE2ENamespace,
 				Annotations: map[string]string{"a": "b"},
 			},
 			Spec: corev1.ServiceSpec{
@@ -67,7 +65,7 @@ func TestApplyConfigurationBodyIsUnchanged(t *testing.T) {
 			TypeMeta: metav1.TypeMeta{APIVersion: apiVersionAppsV1, Kind: "StatefulSet"},
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      testClusterName,
-				Namespace: applyTestNamespace,
+				Namespace: testE2ENamespace,
 			},
 			Spec: appsv1.StatefulSetSpec{
 				Replicas:    &replicas,
@@ -91,7 +89,7 @@ func TestApplyConfigurationBodyIsUnchanged(t *testing.T) {
 					APIVersion: "ldap.chuck-chuck-chuck.net/v1alpha1",
 					Kind:       "SlapdCluster",
 				},
-				ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: applyTestNamespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: testE2ENamespace},
 			}
 			sc.Status.Phase = ldapv1alpha1.PhaseRunning
 			sc.Status.ReadyReplicas = 3
@@ -111,7 +109,7 @@ func TestApplyConfigurationBodyIsUnchanged(t *testing.T) {
 					APIVersion: "ldap.chuck-chuck-chuck.net/v1alpha1",
 					Kind:       kindSlapdDatabase,
 				},
-				ObjectMeta: metav1.ObjectMeta{Name: testDefaultDB, Namespace: applyTestNamespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testDefaultDB, Namespace: testE2ENamespace},
 			}
 			sd.Status.RestoreApplied = true
 			return sd

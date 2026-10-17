@@ -57,7 +57,7 @@ func exporterSidecar(sc *ldapv1alpha1.SlapdCluster, image string) corev1.Contain
 		Ports: []corev1.ContainerPort{
 			{Name: exporterPortName, ContainerPort: exporterPort, Protocol: corev1.ProtocolTCP},
 		},
-		VolumeMounts: []corev1.VolumeMount{{Name: "run", MountPath: "/run/openldap", ReadOnly: true}},
+		VolumeMounts: []corev1.VolumeMount{{Name: volumeRun, MountPath: runMountPath, ReadOnly: true}},
 		// Mirrors the slapd container's securityContext (pinned equal by
 		// TestExporterSidecarShape, so the two cannot drift silently). No
 		// RunAsUser/RunAsGroup: the pod securityContext decides the identity.

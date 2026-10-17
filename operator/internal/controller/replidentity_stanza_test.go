@@ -26,7 +26,7 @@ func TestSyncReplStanzasBindAsNodeLocalIdentity(t *testing.T) {
 	const (
 		cluster  = "slapd"
 		headless = "slapd-headless"
-		ns       = "slaptain-testing"
+		ns       = testE2ENamespace
 		domain   = "cluster.local"
 		suffix   = "dc=example,dc=org"
 		dbName   = "example-db"

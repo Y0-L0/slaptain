@@ -48,26 +48,34 @@ import (
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
+// The read-only pods and the duplicated peer name these fixtures use.
+const (
+	obsROPod0 = "slapd-ro-0"
+	obsROPod1 = "slapd-ro-1"
+	// dupPeer names two externalPeers entries at once, which a spec can do.
+	dupPeer = "dup"
+)
+
 // obsRecordCluster is a meshed three-pod site with two external peers: one in
 // discovery mode that resolved two providers, one static `uri` peer that has no
 // discovery result at all.
 func obsRecordCluster() *ldapv1alpha1.SlapdCluster {
 	return &ldapv1alpha1.SlapdCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "slapd", Namespace: "slaptain-testing"},
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: testE2ENamespace},
 		Spec: ldapv1alpha1.SlapdClusterSpec{
-			MeshRef: "ldap",
+			MeshRef: testMeshName,
 			Replication: ldapv1alpha1.SlapdReplicationConfig{
 				Enabled: true,
 				ExternalPeers: []ldapv1alpha1.ExternalPeer{
-					{Name: "site-2", Discovery: &ldapv1alpha1.ExternalPeerDiscovery{}},
-					{Name: "site-3", URI: "ldaps://peer.example:636"},
+					{Name: testSite2, Discovery: &ldapv1alpha1.ExternalPeerDiscovery{}},
+					{Name: testSite3, URI: "ldaps://peer.example:636"},
 				},
 			},
 		},
 		Status: ldapv1alpha1.SlapdClusterStatus{
 			ExternalPeerStatuses: []ldapv1alpha1.ExternalPeerStatus{
 				{
-					Name: "site-2",
+					Name: testSite2,
 					DiscoveredProviders: []ldapv1alpha1.DiscoveredProvider{
 						{Ordinal: 0, Address: "203.0.113.1"},
 						{Ordinal: 1, Address: "203.0.113.2"},
@@ -76,7 +84,7 @@ func obsRecordCluster() *ldapv1alpha1.SlapdCluster {
 				},
 				// A static peer. No DiscoveredProviders, and none is expected:
 				// the absence here is configuration, not an outage.
-				{Name: "site-3", ReplicationState: ldapv1alpha1.ReplicationSynced},
+				{Name: testSite3, ReplicationState: ldapv1alpha1.ReplicationSynced},
 			},
 		},
 	}
@@ -94,13 +102,13 @@ func obsRecordControlCluster() *ldapv1alpha1.SlapdCluster {
 			Replication: ldapv1alpha1.SlapdReplicationConfig{
 				Enabled: true,
 				ExternalPeers: []ldapv1alpha1.ExternalPeer{
-					{Name: "site-9", Discovery: &ldapv1alpha1.ExternalPeerDiscovery{}},
+					{Name: testSite9, Discovery: &ldapv1alpha1.ExternalPeerDiscovery{}},
 				},
 			},
 		},
 		Status: ldapv1alpha1.SlapdClusterStatus{
 			ExternalPeerStatuses: []ldapv1alpha1.ExternalPeerStatus{
-				{Name: "site-9", ReplicationState: ldapv1alpha1.ReplicationUnreachable},
+				{Name: testSite9, ReplicationState: ldapv1alpha1.ReplicationUnreachable},
 			},
 		},
 	}
@@ -119,14 +127,14 @@ func obsRecordReadouts() map[string]dbCSNReadout {
 // obsRecordNames is the suffix → SlapdDatabase name translation the `database`
 // label needs: the label is what a reader takes back to `kubectl get sd`.
 func obsRecordNames() map[string]string {
-	return map[string]string{sfxA: "default", sfxB: "db2"}
+	return map[string]string{sfxA: testDefaultDB, sfxB: testDB2}
 }
 
 func obsRecordDatabase() *ldapv1alpha1.SlapdDatabase {
 	return &ldapv1alpha1.SlapdDatabase{
-		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "slaptain-testing"},
+		ObjectMeta: metav1.ObjectMeta{Name: testDefaultDB, Namespace: testE2ENamespace},
 		Spec: ldapv1alpha1.SlapdDatabaseSpec{
-			ClusterRef: "slapd",
+			ClusterRef: testClusterName,
 			Suffix:     sfxA,
 		},
 	}
@@ -205,7 +213,7 @@ func TestClusterObservationCarriesEveryAttemptedDatabase(t *testing.T) {
 	obs := clusterObservation(obsRecordCluster(), obsRecordObserved,
 		obsRecordReadouts(), obsRecordNames(), nil)
 
-	if obs.Namespace != "slaptain-testing" || obs.Cluster != "slapd" || obs.Mesh != "ldap" {
+	if obs.Namespace != testE2ENamespace || obs.Cluster != testClusterName || obs.Mesh != testMeshName {
 		t.Errorf("Identity = %+v, want namespace/cluster/mesh slaptain-testing/slapd/ldap",
 			obs.Identity)
 	}
@@ -215,8 +223,8 @@ func TestClusterObservationCarriesEveryAttemptedDatabase(t *testing.T) {
 	}
 
 	want := map[string]obsmetrics.DatabaseCSN{
-		"default": {Database: "default", PairsExpected: 3, PairsRead: 3},
-		"db2":     {Database: "db2", PairsExpected: 3, PairsRead: 1},
+		testDefaultDB: {Database: testDefaultDB, PairsExpected: 3, PairsRead: 3},
+		testDB2:       {Database: testDB2, PairsExpected: 3, PairsRead: 1},
 	}
 	if len(obs.Databases) != len(want) {
 		t.Fatalf("Databases = %+v, want one entry per attempted database (%d)",
@@ -249,7 +257,7 @@ func TestClusterObservationCarriesEveryAttemptedDatabase(t *testing.T) {
 // transition and strictly better than a silent hole.
 func TestClusterObservationLabelsAnUnnamedDatabaseByItsSuffix(t *testing.T) {
 	obs := clusterObservation(obsRecordCluster(), obsRecordObserved,
-		obsRecordReadouts(), map[string]string{sfxA: "default"}, nil) // sfxB unnamed
+		obsRecordReadouts(), map[string]string{sfxA: testDefaultDB}, nil) // sfxB unnamed
 
 	labels := make([]string, 0, len(obs.Databases))
 	for _, db := range obs.Databases {
@@ -338,7 +346,7 @@ func TestClusterObservationSpreadAbsenceSurvivesTheRender(t *testing.T) {
 			sc := obsRecordCluster()
 			obs := clusterObservation(sc, obsRecordObserved,
 				map[string]dbCSNReadout{sfxA: tc.readout},
-				map[string]string{sfxA: "default"}, nil)
+				map[string]string{sfxA: testDefaultDB}, nil)
 
 			// Fail here rather than render a stub's zero value: the equivalence
 			// below only means something once the reading reached the
@@ -350,7 +358,7 @@ func TestClusterObservationSpreadAbsenceSurvivesTheRender(t *testing.T) {
 
 			samples := renderedCluster(t, obs)
 			got, present := obsSampleFor(samples,
-				obsmetrics.MetricCSNSpread, obsmetrics.LabelDatabase, "default")
+				obsmetrics.MetricCSNSpread, obsmetrics.LabelDatabase, testDefaultDB)
 			wantPresent := tc.readout.Spread != nil
 
 			if present != wantPresent {
@@ -361,7 +369,7 @@ func TestClusterObservationSpreadAbsenceSurvivesTheRender(t *testing.T) {
 					"databaseCSNReadouts through this mapping to obsmetrics.RenderCluster, "+
 					"which gates on it alone. Nothing in that path may invent, drop or "+
 					"re-derive it%s",
-					obsmetrics.MetricCSNSpread, "default", present, wantPresent,
+					obsmetrics.MetricCSNSpread, testDefaultDB, present, wantPresent,
 					tc.readout.PodsRead, tc.readout.PodsExpected, formatSpread(tc.readout.Spread),
 					obsmetrics.MetricCSNSpread, obsDatabaseLabels(samples, obsmetrics.MetricCSNSpread),
 					becauseTail(tc.because))
@@ -374,7 +382,7 @@ func TestClusterObservationSpreadAbsenceSurvivesTheRender(t *testing.T) {
 			// The pair counts render unconditionally — including 0 read — because
 			// presence in the observation is what means "attempted".
 			for _, fam := range []string{obsmetrics.MetricCSNPairsRead, obsmetrics.MetricCSNPairsExpected} {
-				if _, ok := obsSampleFor(samples, fam, obsmetrics.LabelDatabase, "default"); !ok {
+				if _, ok := obsSampleFor(samples, fam, obsmetrics.LabelDatabase, testDefaultDB); !ok {
 					t.Errorf("%s missing for an attempted database; the attempt is the "+
 						"observation%s", fam, becauseTail(tc.because))
 				}
@@ -393,7 +401,7 @@ func TestClusterObservationSpreadAbsenceSurvivesTheRender(t *testing.T) {
 // that never ran.
 func TestEmptyPassMapsToAnObservationThatRendersNothing(t *testing.T) {
 	sc := &ldapv1alpha1.SlapdCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "slapd", Namespace: "slaptain-testing"},
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: testE2ENamespace},
 	}
 	obs := clusterObservation(sc, time.Time{}, nil, nil, nil)
 
@@ -406,8 +414,8 @@ func TestEmptyPassMapsToAnObservationThatRendersNothing(t *testing.T) {
 	}
 
 	dbObs := databaseObservation(&ldapv1alpha1.SlapdDatabase{
-		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "slaptain-testing"},
-		Spec:       ldapv1alpha1.SlapdDatabaseSpec{ClusterRef: "slapd", Suffix: sfxA},
+		ObjectMeta: metav1.ObjectMeta{Name: testDefaultDB, Namespace: testE2ENamespace},
+		Spec:       ldapv1alpha1.SlapdDatabaseSpec{ClusterRef: testClusterName, Suffix: sfxA},
 	}, "", time.Time{}, nil)
 	if samples := renderedDatabase(t, dbObs); len(samples) != 0 {
 		t.Errorf("RenderDatabase = %v, want no samples at all for a pass that observed "+
@@ -490,7 +498,7 @@ func TestPeerProviderCountsAppearOnlyForDiscoveryPeers(t *testing.T) {
 		for _, p := range obs.Peers {
 			peers[p.Peer] = p
 		}
-		got, ok := peers["site-2"]
+		got, ok := peers[testSite2]
 		if !ok {
 			t.Fatalf("Peers = %+v, want an entry for the discovery peer site-2", obs.Peers)
 		}
@@ -498,7 +506,7 @@ func TestPeerProviderCountsAppearOnlyForDiscoveryPeers(t *testing.T) {
 			t.Errorf("site-2 = %+v, want UsesDiscovery and DiscoveryRan true with 2 "+
 				"providers", got)
 		}
-		static, ok := peers["site-3"]
+		static, ok := peers[testSite3]
 		if !ok {
 			t.Fatalf("Peers = %+v, want an entry for the static peer site-3 too — it is a "+
 				"configured peer, it simply has no discovery result", obs.Peers)
@@ -523,7 +531,7 @@ func TestPeerProviderCountsAppearOnlyForDiscoveryPeers(t *testing.T) {
 		}
 
 		s, ok := obsSampleFor(renderedCluster(t, obs),
-			obsmetrics.MetricPeerProvidersDiscovered, obsmetrics.LabelPeer, "site-9")
+			obsmetrics.MetricPeerProvidersDiscovered, obsmetrics.LabelPeer, testSite9)
 		if !ok || s.Value != 0 {
 			t.Errorf("%s{peer=\"site-9\"} present=%v value=%v, want present with 0: with no "+
 				"companion `expected` family, `providers_discovered == 0` IS the alert",
@@ -538,7 +546,7 @@ func TestPeerProviderCountsAppearOnlyForDiscoveryPeers(t *testing.T) {
 			t.Fatalf("Peers = %+v, want both configured peers", obs.Peers)
 		}
 		if _, ok := obsSampleFor(renderedCluster(t, obs),
-			obsmetrics.MetricPeerProvidersDiscovered, obsmetrics.LabelPeer, "site-3"); ok {
+			obsmetrics.MetricPeerProvidersDiscovered, obsmetrics.LabelPeer, testSite3); ok {
 			t.Errorf("%s was rendered for the static peer site-3; there is no discovery "+
 				"result to report, which is not a result of zero",
 				obsmetrics.MetricPeerProvidersDiscovered)
@@ -555,24 +563,24 @@ func TestPeerProviderCountsAppearOnlyForDiscoveryPeers(t *testing.T) {
 // would fire on every transport blip if they did.
 func TestDatabaseObservationMapsProbeOutcomesHonestly(t *testing.T) {
 	probes := []podPresence{
-		{pod: "slapd-0", assessed: true, present: true},
-		{pod: "slapd-1", assessed: true, present: false, glued: true},
-		{pod: "slapd-2", assessed: false},
-		{pod: "slapd-ro-0", readOnly: true, assessed: true, present: true},
+		{pod: testPod0, assessed: true, present: true},
+		{pod: testPod1, assessed: true, present: false, glued: true},
+		{pod: testPod2, assessed: false},
+		{pod: obsROPod0, readOnly: true, assessed: true, present: true},
 	}
-	obs := databaseObservation(obsRecordDatabase(), "ldap", obsRecordObserved, probes)
+	obs := databaseObservation(obsRecordDatabase(), testMeshName, obsRecordObserved, probes)
 
-	if obs.Namespace != "slaptain-testing" || obs.Cluster != "slapd" ||
-		obs.Mesh != "ldap" || obs.Database != "default" {
+	if obs.Namespace != testE2ENamespace || obs.Cluster != testClusterName ||
+		obs.Mesh != testMeshName || obs.Database != testDefaultDB {
 		t.Errorf("identity = %+v database %q, want slaptain-testing/slapd/ldap and "+
 			"database default", obs.Identity, obs.Database)
 	}
 
 	want := map[string]obsmetrics.SuffixProbe{
-		"slapd-0":    {Pod: "slapd-0", Probed: true, Healthy: true},
-		"slapd-1":    {Pod: "slapd-1", Probed: true, Healthy: false},
-		"slapd-2":    {Pod: "slapd-2", Probed: false},
-		"slapd-ro-0": {Pod: "slapd-ro-0", Probed: true, Healthy: true},
+		testPod0:  {Pod: testPod0, Probed: true, Healthy: true},
+		testPod1:  {Pod: testPod1, Probed: true, Healthy: false},
+		testPod2:  {Pod: testPod2, Probed: false},
+		obsROPod0: {Pod: obsROPod0, Probed: true, Healthy: true},
 	}
 	if len(obs.Pods) != len(want) {
 		t.Fatalf("Pods = %+v, want one entry per probed pod, read-only pods included (%d)",
@@ -607,23 +615,23 @@ func TestDatabaseObservationMapsProbeOutcomesHonestly(t *testing.T) {
 // This is the mapping half; obsmetrics pins the render half.
 func TestDatabaseObservationCarriesEachPodsRoleAndGlueVerdict(t *testing.T) {
 	probes := []podPresence{
-		{pod: "slapd-0", assessed: true, present: true},
-		{pod: "slapd-1", assessed: true, present: false, glued: true},
-		{pod: "slapd-2", assessed: true, present: false},
-		{pod: "slapd-ro-0", readOnly: true, assessed: true, present: false},
-		{pod: "slapd-ro-1", readOnly: true, assessed: false, glued: true},
+		{pod: testPod0, assessed: true, present: true},
+		{pod: testPod1, assessed: true, present: false, glued: true},
+		{pod: testPod2, assessed: true, present: false},
+		{pod: obsROPod0, readOnly: true, assessed: true, present: false},
+		{pod: obsROPod1, readOnly: true, assessed: false, glued: true},
 	}
-	obs := databaseObservation(obsRecordDatabase(), "ldap", obsRecordObserved, probes)
+	obs := databaseObservation(obsRecordDatabase(), testMeshName, obsRecordObserved, probes)
 
 	want := map[string]obsmetrics.SuffixProbe{
-		"slapd-0":    {Pod: "slapd-0", Probed: true, Healthy: true},
-		"slapd-1":    {Pod: "slapd-1", Probed: true, Healthy: false, Glue: true},
-		"slapd-2":    {Pod: "slapd-2", Probed: true, Healthy: false},
-		"slapd-ro-0": {Pod: "slapd-ro-0", ReadOnly: true, Probed: true, Healthy: false},
+		testPod0:  {Pod: testPod0, Probed: true, Healthy: true},
+		testPod1:  {Pod: testPod1, Probed: true, Healthy: false, Glue: true},
+		testPod2:  {Pod: testPod2, Probed: true, Healthy: false},
+		obsROPod0: {Pod: obsROPod0, ReadOnly: true, Probed: true, Healthy: false},
 		// Unassessed: the verdict fields are never read, so a `glued` the probe
 		// never established must not cross. "We could not look" becoming "this
 		// pod is glued" would send a human to a runbook over a dial timeout.
-		"slapd-ro-1": {Pod: "slapd-ro-1", ReadOnly: true, Probed: false},
+		obsROPod1: {Pod: obsROPod1, ReadOnly: true, Probed: false},
 	}
 	if len(obs.Pods) != len(want) {
 		t.Fatalf("Pods = %+v, want one entry per probed pod (%d)", obs.Pods, len(want))
@@ -647,18 +655,18 @@ func TestDatabaseObservationCarriesEachPodsRoleAndGlueVerdict(t *testing.T) {
 // and the render together, which is where a crossed wire shows up: each layer
 // can be green on its own fixtures while the controller feeds the wrong field.
 func TestDatabaseObservationRendersTheRoleAndGlueThroughTheRender(t *testing.T) {
-	obs := databaseObservation(obsRecordDatabase(), "ldap", obsRecordObserved, []podPresence{
-		{pod: "slapd-0", assessed: true, present: true},
-		{pod: "slapd-1", assessed: true, present: false, glued: true},
-		{pod: "slapd-ro-0", readOnly: true, assessed: true, present: false},
+	obs := databaseObservation(obsRecordDatabase(), testMeshName, obsRecordObserved, []podPresence{
+		{pod: testPod0, assessed: true, present: true},
+		{pod: testPod1, assessed: true, present: false, glued: true},
+		{pod: obsROPod0, readOnly: true, assessed: true, present: false},
 	})
 	if len(obs.Pods) != 3 {
 		t.Fatalf("Pods = %+v, want three probed pods", obs.Pods)
 	}
 
 	samples := renderedDatabase(t, obs)
-	roles := map[string]string{"slapd-0": obsmetrics.RoleReadWrite,
-		"slapd-1": obsmetrics.RoleReadWrite, "slapd-ro-0": obsmetrics.RoleReadOnly}
+	roles := map[string]string{testPod0: obsmetrics.RoleReadWrite,
+		testPod1: obsmetrics.RoleReadWrite, obsROPod0: obsmetrics.RoleReadOnly}
 	for pod, role := range roles {
 		s, ok := obsSampleFor(samples, obsmetrics.MetricSuffixProbeOK, obsmetrics.LabelPod, pod)
 		if !ok {
@@ -673,7 +681,7 @@ func TestDatabaseObservationRendersTheRoleAndGlueThroughTheRender(t *testing.T) 
 		}
 	}
 
-	glue, ok := obsSampleFor(samples, obsmetrics.MetricSuffixGlue, obsmetrics.LabelPod, "slapd-1")
+	glue, ok := obsSampleFor(samples, obsmetrics.MetricSuffixGlue, obsmetrics.LabelPod, testPod1)
 	if !ok || glue.Value != 1 {
 		t.Errorf("%s{pod=\"slapd-1\"} present=%v value=%v, want present with 1: glue is its "+
 			"own family because its alert needs no `for:` — it never heals",
@@ -686,7 +694,7 @@ func TestDatabaseObservationRendersTheRoleAndGlueThroughTheRender(t *testing.T) 
 		t.Errorf("%s{pod=\"slapd-1\"} rendered role %q, want %q",
 			obsmetrics.MetricSuffixGlue, got, obsmetrics.RoleReadWrite)
 	}
-	for _, pod := range []string{"slapd-0", "slapd-ro-0"} {
+	for _, pod := range []string{testPod0, obsROPod0} {
 		if _, present := obsSampleFor(samples, obsmetrics.MetricSuffixGlue, obsmetrics.LabelPod, pod); present {
 			t.Errorf("%s rendered for pod %q, which is not glued; presence is the signal",
 				obsmetrics.MetricSuffixGlue, pod)
@@ -771,10 +779,10 @@ func TestClusterObservationMarksAPeerWhoseDiscoveryCouldNotBeAsked(t *testing.T)
 	// the status alone cannot tell them apart.
 	for i := range sc.Status.ExternalPeerStatuses {
 		sc.Status.ExternalPeerStatuses[i].DiscoveredProviders = nil
-		sc.Status.ExternalPeerStatuses[i].LastError = "no remote addresses available"
+		sc.Status.ExternalPeerStatuses[i].LastError = noRemoteAddressesMsg
 	}
 	discoveryFailed := map[string]string{
-		"site-2": `kubeconfig secret "peer-site-2" not found`,
+		testSite2: `kubeconfig secret "peer-site-2" not found`,
 	}
 
 	obs := clusterObservation(sc, obsRecordObserved, obsRecordReadouts(), obsRecordNames(),
@@ -784,7 +792,7 @@ func TestClusterObservationMarksAPeerWhoseDiscoveryCouldNotBeAsked(t *testing.T)
 	for _, p := range obs.Peers {
 		peers[p.Peer] = p
 	}
-	failed, ok := peers["site-2"]
+	failed, ok := peers[testSite2]
 	if !ok {
 		t.Fatalf("Peers = %+v, want an entry for site-2", obs.Peers)
 	}
@@ -794,7 +802,7 @@ func TestClusterObservationMarksAPeerWhoseDiscoveryCouldNotBeAsked(t *testing.T)
 			"that is entirely local", failed)
 	}
 	if _, present := obsSampleFor(renderedCluster(t, obs),
-		obsmetrics.MetricPeerProvidersDiscovered, obsmetrics.LabelPeer, "site-2"); present {
+		obsmetrics.MetricPeerProvidersDiscovered, obsmetrics.LabelPeer, testSite2); present {
 		t.Errorf("%s was rendered for site-2; Surface 1 already reports that peer Unreachable "+
 			"(slaptain_cluster_peer_connected), and this surface must not invent a count to "+
 			"say it again", obsmetrics.MetricPeerProvidersDiscovered)
@@ -811,14 +819,14 @@ func TestClusterObservationKeepsDiscoveryThatRanApartFromDiscoveryThatFailed(t *
 	sc := obsRecordCluster()
 	for i := range sc.Status.ExternalPeerStatuses {
 		sc.Status.ExternalPeerStatuses[i].DiscoveredProviders = nil
-		sc.Status.ExternalPeerStatuses[i].LastError = "no remote addresses available"
+		sc.Status.ExternalPeerStatuses[i].LastError = noRemoteAddressesMsg
 	}
 
 	obs := clusterObservation(sc, obsRecordObserved, obsRecordReadouts(), obsRecordNames(), nil)
 
 	var ran obsmetrics.PeerObservation
 	for _, p := range obs.Peers {
-		if p.Peer == "site-2" {
+		if p.Peer == testSite2 {
 			ran = p
 		}
 	}
@@ -827,7 +835,7 @@ func TestClusterObservationKeepsDiscoveryThatRanApartFromDiscoveryThatFailed(t *
 			"a discovery failure, so discovery ran and resolved to nothing", ran)
 	}
 	s, present := obsSampleFor(renderedCluster(t, obs),
-		obsmetrics.MetricPeerProvidersDiscovered, obsmetrics.LabelPeer, "site-2")
+		obsmetrics.MetricPeerProvidersDiscovered, obsmetrics.LabelPeer, testSite2)
 	if !present || s.Value != 0 {
 		t.Errorf("%s{peer=\"site-2\"} present=%v value=%v, want present with 0: `== 0` is "+
 			"this family's whole alert", obsmetrics.MetricPeerProvidersDiscovered, present, s.Value)
@@ -854,16 +862,16 @@ func TestClusterObservationKeepsDiscoveryThatRanApartFromDiscoveryThatFailed(t *
 func duplicateNamePeers() *ldapv1alpha1.SlapdCluster {
 	sc := obsRecordCluster()
 	sc.Spec.Replication.ExternalPeers = []ldapv1alpha1.ExternalPeer{
-		{Name: "dup", Discovery: &ldapv1alpha1.ExternalPeerDiscovery{}},
-		{Name: "dup", Discovery: &ldapv1alpha1.ExternalPeerDiscovery{}},
+		{Name: dupPeer, Discovery: &ldapv1alpha1.ExternalPeerDiscovery{}},
+		{Name: dupPeer, Discovery: &ldapv1alpha1.ExternalPeerDiscovery{}},
 	}
 	sc.Status.ExternalPeerStatuses = []ldapv1alpha1.ExternalPeerStatus{
-		{Name: "dup", DiscoveredProviders: []ldapv1alpha1.DiscoveredProvider{
+		{Name: dupPeer, DiscoveredProviders: []ldapv1alpha1.DiscoveredProvider{
 			{Ordinal: 0, Address: "203.0.113.1"},
 			{Ordinal: 1, Address: "203.0.113.2"},
 			{Ordinal: 2, Address: "203.0.113.3"},
 		}},
-		{Name: "dup"},
+		{Name: dupPeer},
 	}
 	return sc
 }
@@ -885,8 +893,8 @@ func TestClusterObservationJoinsPeersByIndexNotByName(t *testing.T) {
 	}
 	for i, want := range []int{3, 0} {
 		got := obs.Peers[i]
-		if got.Peer != "dup" {
-			t.Errorf("Peers[%d].Peer = %q, want %q verbatim from the spec", i, got.Peer, "dup")
+		if got.Peer != dupPeer {
+			t.Errorf("Peers[%d].Peer = %q, want %q verbatim from the spec", i, got.Peer, dupPeer)
 		}
 		if !got.UsesDiscovery || !got.DiscoveryRan {
 			t.Errorf("Peers[%d] = %+v, want a discovery peer whose discovery ran", i, got)
@@ -934,7 +942,7 @@ func TestClusterObservationJoinsPeersByIndexNotByName(t *testing.T) {
 func TestDuplicateNamesMakeOneDiscoveryFailureSilenceBothPeers(t *testing.T) {
 	obs := clusterObservation(duplicateNamePeers(), obsRecordObserved,
 		obsRecordReadouts(), obsRecordNames(),
-		map[string]string{"dup": `kubeconfig secret "peer-dup" not found`})
+		map[string]string{dupPeer: `kubeconfig secret "peer-dup" not found`})
 
 	if len(obs.Peers) != 2 {
 		t.Fatalf("Peers = %+v, want one observation per spec peer (2)", obs.Peers)

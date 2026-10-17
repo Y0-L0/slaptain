@@ -46,7 +46,11 @@ var updatePodTemplateGolden = flag.Bool("update-pod-template-golden", false,
 	"rewrite testdata/podtemplate-*.golden.json from the current builder (rolls every existing cluster's pods — say so in the commit)")
 
 const (
-	goldenOperatorImage = "registry.example/slaptain/operator:1.2.3"
+	// testOperatorVersion is the fixture operator's release, the tag its
+	// image and the defaulted data-plane images share.
+	testOperatorVersion = "1.2.3"
+
+	goldenOperatorImage = "registry.example/slaptain/operator:" + testOperatorVersion
 	// goldenExporterImage is what goldenReconciler defaults the sidecar to:
 	// the operator's repository with its last segment swapped, at the
 	// compiled-in exporter release — not the operator's tag.
@@ -61,7 +65,7 @@ const (
 func goldenReconciler() *SlapdClusterReconciler {
 	return &SlapdClusterReconciler{
 		ClusterDomain:   "cluster.local",
-		DefaultImageTag: "1.2.3",
+		DefaultImageTag: testOperatorVersion,
 		OperatorImage:   goldenOperatorImage,
 	}
 }
@@ -445,48 +449,48 @@ func TestExporterImageResolution(t *testing.T) {
 		{
 			name:          "unset: the operator's repository, segment swapped, at the compiled-in version",
 			operatorImage: "registry.example:5000/slaptain/operator:1.2.3",
-			defaultTag:    "1.2.3",
+			defaultTag:    testOperatorVersion,
 			wantImage:     "registry.example:5000/slaptain/slapd-exporter:" + exporterDefaultVersion,
 		},
 		{
 			name:          "unset: a digest-pinned operator image contributes its repository only",
 			operatorImage: "registry.example/slaptain/operator@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-			defaultTag:    "1.2.3",
+			defaultTag:    testOperatorVersion,
 			wantImage:     "registry.example/slaptain/slapd-exporter:" + exporterDefaultVersion,
 		},
 		{
 			name:          "tag only: the derived repository with that tag",
 			operatorImage: "registry.example:5000/slaptain/operator:1.2.3",
-			defaultTag:    "1.2.3",
+			defaultTag:    testOperatorVersion,
 			exporter:      ldapv1alpha1.SlapdImageConfig{Tag: "9.9.9"},
 			wantImage:     "registry.example:5000/slaptain/slapd-exporter:9.9.9",
 		},
 		{
 			name:          "repository and tag: exactly those",
-			operatorImage: "registry.example/slaptain/operator:1.2.3",
-			defaultTag:    "1.2.3",
+			operatorImage: goldenOperatorImage,
+			defaultTag:    testOperatorVersion,
 			exporter:      ldapv1alpha1.SlapdImageConfig{Repository: "mirror.example/team/slapd-exporter", Tag: "1.0.0"},
 			wantImage:     "mirror.example/team/slapd-exporter:1.0.0",
 		},
 		{
 			// Unlike slapd and init, an unpinned tag is NOT the operator's tag.
 			name:          "repository only: that repository at the compiled-in version",
-			operatorImage: "registry.example/slaptain/operator:1.2.3",
-			defaultTag:    "1.2.3",
+			operatorImage: goldenOperatorImage,
+			defaultTag:    testOperatorVersion,
 			exporter:      ldapv1alpha1.SlapdImageConfig{Repository: "mirror.example/team/slapd-exporter"},
 			wantImage:     "mirror.example/team/slapd-exporter:" + exporterDefaultVersion,
 		},
 		{
 			name:          "pullPolicy set: used",
-			operatorImage: "registry.example/slaptain/operator:1.2.3",
-			defaultTag:    "1.2.3",
+			operatorImage: goldenOperatorImage,
+			defaultTag:    testOperatorVersion,
 			exporter:      ldapv1alpha1.SlapdImageConfig{PullPolicy: corev1.PullAlways},
 			wantImage:     "registry.example/slaptain/slapd-exporter:" + exporterDefaultVersion,
 			wantPolicy:    corev1.PullAlways,
 		},
 		{
 			name:       "no operator image (make run): canonical repository, compiled-in version",
-			defaultTag: "1.2.3",
+			defaultTag: testOperatorVersion,
 			wantImage:  canonicalExporter + ":" + exporterDefaultVersion,
 		},
 		{
@@ -495,7 +499,7 @@ func TestExporterImageResolution(t *testing.T) {
 		},
 		{
 			name:       "no operator image, tag only: canonical repository with that tag",
-			defaultTag: "1.2.3",
+			defaultTag: testOperatorVersion,
 			exporter:   ldapv1alpha1.SlapdImageConfig{Tag: "9.9.9"},
 			wantImage:  canonicalExporter + ":9.9.9",
 		},
@@ -533,15 +537,15 @@ func TestExporterTemplateUnderOperatorUpgrade(t *testing.T) {
 		if pinAll {
 			// slapd and init pinned, so no operator-derived image is left
 			// except the exporter's.
-			sc.Spec.Images.Slapd = ldapv1alpha1.SlapdImageConfig{Repository: "registry.example/slaptain/slapd", Tag: "1.2.3"}
-			sc.Spec.Images.Init = ldapv1alpha1.SlapdImageConfig{Repository: "registry.example/slaptain/slapd-init", Tag: "1.2.3"}
+			sc.Spec.Images.Slapd = ldapv1alpha1.SlapdImageConfig{Repository: "registry.example/slaptain/slapd", Tag: testOperatorVersion}
+			sc.Spec.Images.Init = ldapv1alpha1.SlapdImageConfig{Repository: "registry.example/slaptain/slapd-init", Tag: testOperatorVersion}
 		}
 		return r.buildStatefulSetSpec(sc, false).Template
 	}
-	const before, after = "registry.example/slaptain/operator:1.2.3", "registry.example/slaptain/operator:1.3.0"
+	const before, after = goldenOperatorImage, "registry.example/slaptain/operator:1.3.0"
 
 	t.Run("exporter unset: the sidecar container is identical across the upgrade", func(t *testing.T) {
-		a := findExporter(t, render(before, "1.2.3", false), "before")
+		a := findExporter(t, render(before, testOperatorVersion, false), "before")
 		b := findExporter(t, render(after, "1.3.0", false), "after")
 		if !reflect.DeepEqual(a, b) {
 			t.Errorf("an operator upgrade changed the exporter sidecar — every pod of a monitoring-enabled "+
@@ -550,7 +554,7 @@ func TestExporterTemplateUnderOperatorUpgrade(t *testing.T) {
 	})
 
 	t.Run("slapd and init pinned, exporter unset: byte-identical pod template across the upgrade", func(t *testing.T) {
-		a := marshalTemplate(t, render(before, "1.2.3", true))
+		a := marshalTemplate(t, render(before, testOperatorVersion, true))
 		b := marshalTemplate(t, render(after, "1.3.0", true))
 		if !bytes.Equal(a, b) {
 			t.Errorf("an operator upgrade changed the pod template although slapd and init are pinned — "+

@@ -280,7 +280,7 @@ func TestDeriveClusterWiring(t *testing.T) {
 			name:       "identity absent from the mesh",
 			mesh:       meshSpec(),
 			spec:       ldapv1alpha1.SlapdClusterSpec{MeshRef: testMesh},
-			self:       "site-9",
+			self:       testSite9,
 			wantReason: reasonSiteNotInMesh,
 		},
 		{

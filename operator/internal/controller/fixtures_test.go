@@ -14,14 +14,18 @@ package controller
 // matters is that one cluster, pod, site or address has one spelling across
 // the fixtures that refer to it.
 const (
-	testClusterName   = "slapd"
-	testNamespace     = "slaptain"
+	testClusterName = "slapd"
+	testNamespace   = "slaptain"
+	// testE2ENamespace is the namespace the e2e suite deploys into, for
+	// fixtures that mirror what it produces.
+	testE2ENamespace  = "slaptain-testing"
 	testTLSSecretName = "slapd-tls"
 	testHeadlessSvc   = "slapd-headless"
 	testClusterDomain = "cluster.local"
 
 	testDBName    = "example-db"
 	testDefaultDB = "default"
+	testDB2       = "db2"
 	testSuffix    = "dc=example,dc=org"
 
 	testPod0   = "slapd-0"
@@ -43,6 +47,8 @@ const (
 	testSiteA = "site-a"
 	testSiteB = "site-b"
 	testSiteC = "site-c"
+	// testSite9 is a site name no fixture mesh declares.
+	testSite9 = "site-9"
 
 	// testPeerBindSecret is the bind-password Secret of the external peer
 	// testSite2 in the RID peer-resolution fixtures.

@@ -1031,7 +1031,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	// ── Volumes (non-PVC) ─────────────────────────────────────────────────────
 	volumes := []corev1.Volume{
 		{
-			Name:         "run",
+			Name:         volumeRun,
 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 		},
 		{
@@ -1260,7 +1260,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	mainMounts := []corev1.VolumeMount{
 		{Name: volumeConfig, MountPath: configMountPath},
 		{Name: volumeData, MountPath: dataMountPath},
-		{Name: "run", MountPath: "/run/openldap"},
+		{Name: volumeRun, MountPath: runMountPath},
 	}
 	if accesslogMountNeeded && !readOnly {
 		mainMounts = append(mainMounts, corev1.VolumeMount{
@@ -1506,6 +1506,10 @@ func (r *SlapdClusterReconciler) checkLocalCSNConvergence(
 	return verdict
 }
 
+// noRemoteAddressesMsg is a peer's LastError when it has no address to dial:
+// discovery pending, discovery that found nothing, or empty podAddresses.
+const noRemoteAddressesMsg = "no remote addresses available"
+
 // csnSyncThreshold is the maximum CSN lag considered "Synced".
 // Cross-site delta-syncrepl has inherent propagation delay.
 const csnSyncThreshold = 5 * time.Second
@@ -1566,7 +1570,7 @@ func (r *SlapdClusterReconciler) checkPeerCSNConvergence(
 	if len(addrs) == 0 {
 		// No addresses available (discovery pending or empty podAddresses).
 		status.ReplicationState = ldapv1alpha1.ReplicationUnreachable
-		status.LastError = "no remote addresses available"
+		status.LastError = noRemoteAddressesMsg
 		return
 	}
 

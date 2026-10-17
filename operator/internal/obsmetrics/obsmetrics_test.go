@@ -38,15 +38,15 @@ import (
 // for the rest cannot pass.
 func healthyCluster() ClusterObservation {
 	return ClusterObservation{
-		Identity: Identity{Namespace: "slaptain-testing", Cluster: "slapd", Mesh: "ldap"},
+		Identity: Identity{Namespace: testNamespace, Cluster: testCluster, Mesh: testMesh},
 		Observed: time.Unix(1700000000, 0),
 		Databases: []DatabaseCSN{
-			{Database: "default", PairsExpected: 3, PairsRead: 3, Spread: new(time.Duration(0))},
-			{Database: "db2", PairsExpected: 3, PairsRead: 3, Spread: new(500 * time.Millisecond)},
+			{Database: testDB, PairsExpected: 3, PairsRead: 3, Spread: new(time.Duration(0))},
+			{Database: testDB2, PairsExpected: 3, PairsRead: 3, Spread: new(500 * time.Millisecond)},
 		},
 		Peers: []PeerObservation{
-			{Peer: "site-2", UsesDiscovery: true, DiscoveryRan: true, ProvidersDiscovered: 3},
-			{Peer: "site-3", UsesDiscovery: true, DiscoveryRan: true, ProvidersDiscovered: 2},
+			{Peer: testPeerSite2, UsesDiscovery: true, DiscoveryRan: true, ProvidersDiscovered: 3},
+			{Peer: testPeerSite3, UsesDiscovery: true, DiscoveryRan: true, ProvidersDiscovered: 2},
 		},
 	}
 }
@@ -78,7 +78,7 @@ var wantHealthyCluster = []string{
 // the render reads its input rather than its own defaults.
 func controlCluster() ClusterObservation {
 	return ClusterObservation{
-		Identity: Identity{Namespace: "other-ns", Cluster: "ldap-b", Mesh: "mesh-b"},
+		Identity: Identity{Namespace: "other-ns", Cluster: testControlCluster, Mesh: testControlMesh},
 		Observed: time.Unix(1200000000, 0),
 		Databases: []DatabaseCSN{
 			{Database: "people", PairsExpected: 5, PairsRead: 4, Spread: new(7 * time.Second)},
@@ -103,12 +103,12 @@ var wantControlCluster = []string{
 // only when something is wrong.
 func healthyDatabase() DatabaseObservation {
 	return DatabaseObservation{
-		Identity: Identity{Namespace: "slaptain-testing", Cluster: "slapd", Mesh: "ldap"},
-		Database: "default",
+		Identity: Identity{Namespace: testNamespace, Cluster: testCluster, Mesh: testMesh},
+		Database: testDB,
 		Observed: time.Unix(1700000000, 0),
 		Pods: []SuffixProbe{
-			{Pod: "slapd-0", Probed: true, Healthy: true},
-			{Pod: "slapd-1", Probed: true, Healthy: true},
+			{Pod: testPod0, Probed: true, Healthy: true},
+			{Pod: testPod1, Probed: true, Healthy: true},
 			{Pod: "slapd-ro-0", ReadOnly: true, Probed: true, Healthy: true},
 		},
 	}
@@ -130,7 +130,7 @@ var wantHealthyDatabase = []string{
 // both exist.
 func controlDatabase() DatabaseObservation {
 	return DatabaseObservation{
-		Identity: Identity{Namespace: "other-ns", Cluster: "ldap-b", Mesh: "mesh-b"},
+		Identity: Identity{Namespace: "other-ns", Cluster: testControlCluster, Mesh: testControlMesh},
 		Database: "people",
 		Observed: time.Unix(1200000000, 0),
 		Pods: []SuffixProbe{
@@ -304,13 +304,13 @@ func TestTimestampAbsentWhenThePassRecordedNoTime(t *testing.T) {
 // render acts on — see TestCSNSpreadGatesOnThePointerAndNothingElse.
 func TestCSNSpreadAbsentWhenOnlyOnePodAnswered(t *testing.T) {
 	obs := healthyCluster()
-	obs.Databases = []DatabaseCSN{{Database: "default", PairsExpected: 3, PairsRead: 1, Spread: nil}}
+	obs.Databases = []DatabaseCSN{{Database: testDB, PairsExpected: 3, PairsRead: 1, Spread: nil}}
 	got := RenderCluster(obs)
 
-	if s, ok := has(got, MetricCSNSpread, map[string]string{LabelDatabase: "default"}); ok {
+	if s, ok := has(got, MetricCSNSpread, map[string]string{LabelDatabase: testDB}); ok {
 		t.Errorf("rendered %s with one readable pod; a spread needs two readings and 0 reads as perfect convergence", s)
 	}
-	if _, ok := has(got, MetricCSNPairsRead, map[string]string{LabelDatabase: "default"}); !ok {
+	if _, ok := has(got, MetricCSNPairsRead, map[string]string{LabelDatabase: testDB}); !ok {
 		t.Error("csn_pairs_read is missing; the database WAS attempted, so the count is the observation")
 	}
 }
@@ -320,10 +320,10 @@ func TestCSNSpreadAbsentWhenOnlyOnePodAnswered(t *testing.T) {
 // databases. Spread must be silent and the pair counts must say 0 of N.
 func TestCSNSpreadAbsentWhenNoPodAnswered(t *testing.T) {
 	obs := healthyCluster()
-	obs.Databases = []DatabaseCSN{{Database: "default", PairsExpected: 3, PairsRead: 0, Spread: nil}}
+	obs.Databases = []DatabaseCSN{{Database: testDB, PairsExpected: 3, PairsRead: 0, Spread: nil}}
 	got := RenderCluster(obs)
 
-	if s, ok := has(got, MetricCSNSpread, map[string]string{LabelDatabase: "default"}); ok {
+	if s, ok := has(got, MetricCSNSpread, map[string]string{LabelDatabase: testDB}); ok {
 		t.Errorf("rendered %s with no readable pod; unreadable evidence is absent, never 0 (ADR-033 decision 5)", s)
 	}
 }
@@ -334,10 +334,10 @@ func TestCSNSpreadAbsentWhenNoPodAnswered(t *testing.T) {
 // on the surface. Zero is absent only when it was never measured.
 func TestCSNSpreadOfZeroIsRenderedWhenTwoPodsAgree(t *testing.T) {
 	obs := healthyCluster()
-	obs.Databases = []DatabaseCSN{{Database: "default", PairsExpected: 2, PairsRead: 2, Spread: new(time.Duration(0))}}
+	obs.Databases = []DatabaseCSN{{Database: testDB, PairsExpected: 2, PairsRead: 2, Spread: new(time.Duration(0))}}
 	got := RenderCluster(obs)
 
-	s, ok := has(got, MetricCSNSpread, map[string]string{LabelDatabase: "default"})
+	s, ok := has(got, MetricCSNSpread, map[string]string{LabelDatabase: testDB})
 	if !ok {
 		t.Fatalf("no %s sample for a database two pods agreed on; a measured 0 is a measurement", MetricCSNSpread)
 	}
@@ -354,12 +354,12 @@ func TestCSNSpreadOfZeroIsRenderedWhenTwoPodsAgree(t *testing.T) {
 func TestCSNPairsReadIsZeroAndPresentWhenEveryReadFailed(t *testing.T) {
 	obs := healthyCluster()
 	obs.Databases = []DatabaseCSN{
-		{Database: "default", PairsExpected: 3, PairsRead: 0},
-		{Database: "db2", PairsExpected: 3, PairsRead: 0},
+		{Database: testDB, PairsExpected: 3, PairsRead: 0},
+		{Database: testDB2, PairsExpected: 3, PairsRead: 0},
 	}
 	got := RenderCluster(obs)
 
-	for _, db := range []string{"default", "db2"} {
+	for _, db := range []string{testDB, testDB2} {
 		read, ok := has(got, MetricCSNPairsRead, map[string]string{LabelDatabase: db})
 		if !ok {
 			t.Errorf("no %s for database %q; dropping it loses the whole incident — 6 of 6 unreadable looks identical to never attempted",
@@ -386,15 +386,15 @@ func TestCSNPairsReadIsZeroAndPresentWhenEveryReadFailed(t *testing.T) {
 // claim the operator looked.
 func TestCSNSamplesAbsentForADatabaseNeverAttempted(t *testing.T) {
 	obs := healthyCluster()
-	obs.Databases = []DatabaseCSN{{Database: "default", PairsExpected: 3, PairsRead: 3}}
+	obs.Databases = []DatabaseCSN{{Database: testDB, PairsExpected: 3, PairsRead: 3}}
 	got := RenderCluster(obs)
 
 	for _, name := range []string{MetricCSNPairsRead, MetricCSNPairsExpected, MetricCSNSpread} {
-		if s, ok := has(got, name, map[string]string{LabelDatabase: "db2"}); ok {
+		if s, ok := has(got, name, map[string]string{LabelDatabase: testDB2}); ok {
 			t.Errorf("rendered %s for a database the pass never attempted", s)
 		}
 	}
-	if _, ok := has(got, MetricCSNPairsExpected, map[string]string{LabelDatabase: "default"}); !ok {
+	if _, ok := has(got, MetricCSNPairsExpected, map[string]string{LabelDatabase: testDB}); !ok {
 		t.Error("the attempted database lost its counts too")
 	}
 }
@@ -410,15 +410,15 @@ func TestCSNSamplesAbsentForADatabaseNeverAttempted(t *testing.T) {
 func TestPeerProviderCountsAbsentWithoutDiscovery(t *testing.T) {
 	obs := healthyCluster()
 	obs.Peers = []PeerObservation{
-		{Peer: "static-site", UsesDiscovery: false},
-		{Peer: "site-2", UsesDiscovery: true, DiscoveryRan: true, ProvidersDiscovered: 3},
+		{Peer: testStaticPeer, UsesDiscovery: false},
+		{Peer: testPeerSite2, UsesDiscovery: true, DiscoveryRan: true, ProvidersDiscovered: 3},
 	}
 	got := RenderCluster(obs)
 
-	if s, ok := has(got, MetricPeerProvidersDiscovered, map[string]string{LabelPeer: "static-site"}); ok {
+	if s, ok := has(got, MetricPeerProvidersDiscovered, map[string]string{LabelPeer: testStaticPeer}); ok {
 		t.Errorf("rendered %s for a non-discovery peer; there is no discovery result, not a result of zero", s)
 	}
-	if _, ok := has(got, MetricPeerProvidersDiscovered, map[string]string{LabelPeer: "site-2"}); !ok {
+	if _, ok := has(got, MetricPeerProvidersDiscovered, map[string]string{LabelPeer: testPeerSite2}); !ok {
 		t.Errorf("no %s for the discovery peer alongside it", MetricPeerProvidersDiscovered)
 	}
 }
@@ -443,10 +443,10 @@ func TestPeerProviderCountsAbsentWithoutDiscovery(t *testing.T) {
 // it unwritable.
 func TestPeerProvidersDiscoveredIsZeroAndPresentWhenDiscoveryFoundNothing(t *testing.T) {
 	obs := healthyCluster()
-	obs.Peers = []PeerObservation{{Peer: "site-2", UsesDiscovery: true, DiscoveryRan: true, ProvidersDiscovered: 0}}
+	obs.Peers = []PeerObservation{{Peer: testPeerSite2, UsesDiscovery: true, DiscoveryRan: true, ProvidersDiscovered: 0}}
 	got := RenderCluster(obs)
 
-	found, ok := has(got, MetricPeerProvidersDiscovered, map[string]string{LabelPeer: "site-2"})
+	found, ok := has(got, MetricPeerProvidersDiscovered, map[string]string{LabelPeer: testPeerSite2})
 	if !ok {
 		t.Fatalf("no %s for a peer whose discovery returned nothing; a link that resolved to nothing is the signal", MetricPeerProvidersDiscovered)
 	}
@@ -473,18 +473,18 @@ func TestPeerProvidersDiscoveredIsZeroAndPresentWhenDiscoveryFoundNothing(t *tes
 func TestPeerProvidersDiscoveredAbsentWhenDiscoveryCouldNotBeAsked(t *testing.T) {
 	obs := healthyCluster()
 	obs.Peers = []PeerObservation{
-		{Peer: "site-2", UsesDiscovery: true, DiscoveryRan: false},
+		{Peer: testPeerSite2, UsesDiscovery: true, DiscoveryRan: false},
 		// A peer whose discovery DID run, alongside it: the suppression must be
 		// per peer, not a render that gives up on the family.
-		{Peer: "site-3", UsesDiscovery: true, DiscoveryRan: true, ProvidersDiscovered: 2},
+		{Peer: testPeerSite3, UsesDiscovery: true, DiscoveryRan: true, ProvidersDiscovered: 2},
 	}
 	got := RenderCluster(obs)
 
-	if s, ok := has(got, MetricPeerProvidersDiscovered, map[string]string{LabelPeer: "site-2"}); ok {
+	if s, ok := has(got, MetricPeerProvidersDiscovered, map[string]string{LabelPeer: testPeerSite2}); ok {
 		t.Errorf("rendered %s for a peer whose discovery could not be asked; 0 there reads "+
 			"as \"the remote site has no pods\" for a fault that is entirely local", s)
 	}
-	if _, ok := has(got, MetricPeerProvidersDiscovered, map[string]string{LabelPeer: "site-3"}); !ok {
+	if _, ok := has(got, MetricPeerProvidersDiscovered, map[string]string{LabelPeer: testPeerSite3}); !ok {
 		t.Errorf("no %s for the peer whose discovery DID run; the absence above must be "+
 			"per peer", MetricPeerProvidersDiscovered)
 	}
@@ -523,10 +523,10 @@ func TestNoPeerProvidersExpectedFamilyExists(t *testing.T) {
 // blip, and a render that dropped both would never fire it at all.
 func TestSuffixProbeZeroMeansProbedAndBad(t *testing.T) {
 	obs := healthyDatabase()
-	obs.Pods = []SuffixProbe{{Pod: "slapd-1", Probed: true, Healthy: false}}
+	obs.Pods = []SuffixProbe{{Pod: testPod1, Probed: true, Healthy: false}}
 	got := RenderDatabase(obs)
 
-	s, ok := has(got, MetricSuffixProbeOK, map[string]string{LabelPod: "slapd-1"})
+	s, ok := has(got, MetricSuffixProbeOK, map[string]string{LabelPod: testPod1})
 	if !ok {
 		t.Fatalf("no %s for a pod that WAS probed and came back unhealthy; 0 is evidence here (ADR-025 glue suffix)", MetricSuffixProbeOK)
 	}
@@ -538,21 +538,21 @@ func TestSuffixProbeZeroMeansProbedAndBad(t *testing.T) {
 func TestSuffixProbeAbsentMeansNotProbedAtAll(t *testing.T) {
 	obs := healthyDatabase()
 	obs.Pods = []SuffixProbe{
-		{Pod: "slapd-0", Probed: false, Healthy: false},
+		{Pod: testPod0, Probed: false, Healthy: false},
 		// Healthy left true on an unprobed pod on purpose: the verdict field
 		// is meaningless without Probed, and a render reading it first would
 		// publish a health claim nobody made.
-		{Pod: "slapd-1", Probed: false, Healthy: true},
-		{Pod: "slapd-2", Probed: true, Healthy: true},
+		{Pod: testPod1, Probed: false, Healthy: true},
+		{Pod: testPod2, Probed: true, Healthy: true},
 	}
 	got := RenderDatabase(obs)
 
-	for _, pod := range []string{"slapd-0", "slapd-1"} {
+	for _, pod := range []string{testPod0, testPod1} {
 		if s, ok := has(got, MetricSuffixProbeOK, map[string]string{LabelPod: pod}); ok {
 			t.Errorf("rendered %s for a pod that was not probed; unreadable evidence is absent, never 0 and never 1", s)
 		}
 	}
-	if _, ok := has(got, MetricSuffixProbeOK, map[string]string{LabelPod: "slapd-2"}); !ok {
+	if _, ok := has(got, MetricSuffixProbeOK, map[string]string{LabelPod: testPod2}); !ok {
 		t.Error("the one probed pod lost its sample too")
 	}
 }
@@ -598,14 +598,14 @@ func allRenders(t *testing.T) map[string][]Sample {
 	t.Helper()
 
 	withoutDiscovery := healthyCluster()
-	withoutDiscovery.Peers = []PeerObservation{{Peer: "static-site", UsesDiscovery: false}}
+	withoutDiscovery.Peers = []PeerObservation{{Peer: testStaticPeer, UsesDiscovery: false}}
 
 	unreadable := healthyCluster()
-	unreadable.Databases = []DatabaseCSN{{Database: "default", PairsExpected: 3, PairsRead: 0}}
+	unreadable.Databases = []DatabaseCSN{{Database: testDB, PairsExpected: 3, PairsRead: 0}}
 
 	degradedPods := healthyDatabase()
 	degradedPods.Pods = append(degradedPods.Pods,
-		SuffixProbe{Pod: "slapd-2", Probed: true, Healthy: false, Glue: true},
+		SuffixProbe{Pod: testPod2, Probed: true, Healthy: false, Glue: true},
 		SuffixProbe{Pod: "slapd-3", Probed: false},
 	)
 
@@ -758,10 +758,10 @@ func TestRenderOrderIsDeterministic(t *testing.T) {
 		Observed: time.Unix(1700000000, 0),
 		Databases: []DatabaseCSN{
 			{Database: "zeta", PairsExpected: 2, PairsRead: 2, Spread: new(time.Second)},
-			{Database: "alpha", PairsExpected: 2, PairsRead: 2, Spread: new(2 * time.Second)},
+			{Database: testNameFirst, PairsExpected: 2, PairsRead: 2, Spread: new(2 * time.Second)},
 		},
 		Peers: []PeerObservation{
-			{Peer: "zulu", UsesDiscovery: true, DiscoveryRan: true, ProvidersDiscovered: 1},
+			{Peer: testNameLast, UsesDiscovery: true, DiscoveryRan: true, ProvidersDiscovered: 1},
 			{Peer: "alfa", UsesDiscovery: true, DiscoveryRan: true, ProvidersDiscovered: 1},
 		},
 	}
@@ -892,7 +892,7 @@ func TestMetricNamesAreNamespacedAndUnique(t *testing.T) {
 func TestSampleStringIsStableAndLabelSorted(t *testing.T) {
 	s := Sample{
 		Name:   "slaptain_example",
-		Labels: map[string]string{"zulu": "9", "alfa": "1", "mike": "5"},
+		Labels: map[string]string{testNameLast: "9", "alfa": "1", "mike": "5"},
 		Value:  2.5,
 	}
 	const want = `slaptain_example{alfa="1",mike="5",zulu="9"} 2.5`
@@ -928,9 +928,9 @@ func TestCSNSpreadGatesOnThePointerAndNothingElse(t *testing.T) {
 	t.Run("no measurement renders nothing however many pairs were read", func(t *testing.T) {
 		obs := healthyCluster()
 		obs.Databases = []DatabaseCSN{
-			{Database: "default", PairsExpected: 3, PairsRead: 3, Spread: nil},
+			{Database: testDB, PairsExpected: 3, PairsRead: 3, Spread: nil},
 		}
-		if s, ok := has(RenderCluster(obs), MetricCSNSpread, map[string]string{LabelDatabase: "default"}); ok {
+		if s, ok := has(RenderCluster(obs), MetricCSNSpread, map[string]string{LabelDatabase: testDB}); ok {
 			t.Errorf("rendered %s for a database with no measurement; a 0 here is perfect "+
 				"convergence published for a reading nobody took (ADR-033 decision 5)", s)
 		}
@@ -944,9 +944,9 @@ func TestCSNSpreadGatesOnThePointerAndNothingElse(t *testing.T) {
 		// using a field that is not the one carrying the rule.
 		obs := healthyCluster()
 		obs.Databases = []DatabaseCSN{
-			{Database: "default", PairsExpected: 3, PairsRead: 1, Spread: new(3 * time.Second)},
+			{Database: testDB, PairsExpected: 3, PairsRead: 1, Spread: new(3 * time.Second)},
 		}
-		s, ok := has(RenderCluster(obs), MetricCSNSpread, map[string]string{LabelDatabase: "default"})
+		s, ok := has(RenderCluster(obs), MetricCSNSpread, map[string]string{LabelDatabase: testDB})
 		if !ok {
 			t.Fatalf("no %s sample for a database carrying a measured spread; the pointer is "+
 				"the gate, and a second gate on PairsRead drops a measurement the caller "+
@@ -1028,7 +1028,7 @@ func TestSuffixGlueIsItsOwnFamilyWithPresenceAsTheSignal(t *testing.T) {
 		Pods: []SuffixProbe{
 			{Pod: "healthy", Probed: true, Healthy: true},
 			{Pod: "missing", Probed: true, Healthy: false},
-			{Pod: "glued", Probed: true, Healthy: false, Glue: true},
+			{Pod: testPodGlued, Probed: true, Healthy: false, Glue: true},
 		},
 	}
 	got := RenderDatabase(obs)
@@ -1038,7 +1038,7 @@ func TestSuffixGlueIsItsOwnFamilyWithPresenceAsTheSignal(t *testing.T) {
 		t.Fatalf("rendered %d %s samples, want exactly one — for the glued pod and nothing "+
 			"else: %v", len(glue), MetricSuffixGlue, rendered(got))
 	}
-	if glue[0].Labels[LabelPod] != "glued" {
+	if glue[0].Labels[LabelPod] != testPodGlued {
 		t.Errorf("%s names pod %q, want the glued one", MetricSuffixGlue, glue[0].Labels[LabelPod])
 	}
 	if glue[0].Value != 1 {
@@ -1056,7 +1056,7 @@ func TestSuffixGlueIsItsOwnFamilyWithPresenceAsTheSignal(t *testing.T) {
 
 	// Both bad pods still read 0 on the probe gauge. The glue family says which
 	// of the two bad states it is; it does not replace the verdict.
-	for _, pod := range []string{"missing", "glued"} {
+	for _, pod := range []string{"missing", testPodGlued} {
 		s, ok := has(got, MetricSuffixProbeOK, map[string]string{LabelPod: pod})
 		if !ok || s.Value != 0 {
 			t.Errorf("%s for pod %q: present=%v value=%v, want present with 0",

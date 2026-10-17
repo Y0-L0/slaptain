@@ -374,8 +374,8 @@ func TestEvaluatePeerConvergence(t *testing.T) {
 			name:        "a database with no local baseline is not Synced",
 			localNewest: map[string]time.Time{sfxA: mustCSNTime(t, csnsA)},
 			readings: []csnReading{
-				{Pod: "198.51.100.1", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "198.51.100.1", Suffix: sfxB, CSNs: csnsB},
+				{Pod: testPodIP1, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPodIP1, Suffix: sfxB, CSNs: csnsB},
 			},
 			wantState:  ldapv1alpha1.ReplicationPartiallyVerified,
 			wantErrHas: []string{sfxB},
@@ -396,8 +396,8 @@ func TestEvaluatePeerConvergence(t *testing.T) {
 				sfxB: {},
 			},
 			readings: []csnReading{
-				{Pod: "198.51.100.1", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "198.51.100.1", Suffix: sfxB, CSNs: csnsB},
+				{Pod: testPodIP1, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPodIP1, Suffix: sfxB, CSNs: csnsB},
 			},
 			wantState:  ldapv1alpha1.ReplicationPartiallyVerified,
 			wantErrHas: []string{sfxB},
@@ -415,8 +415,8 @@ func TestEvaluatePeerConvergence(t *testing.T) {
 			name:        "a database empty on both sides is unverified, not Synced",
 			localNewest: map[string]time.Time{sfxA: mustCSNTime(t, csnsA)},
 			readings: []csnReading{
-				{Pod: "198.51.100.1", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "198.51.100.1", Suffix: sfxB, CSNs: nil},
+				{Pod: testPodIP1, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPodIP1, Suffix: sfxB, CSNs: nil},
 			},
 			wantState:  ldapv1alpha1.ReplicationPartiallyVerified,
 			wantErrHas: []string{sfxB},
@@ -444,8 +444,8 @@ func TestEvaluatePeerConvergence(t *testing.T) {
 			name:        "a readable local baseline against an empty peer stays Lagging",
 			localNewest: defaultLocalNewest,
 			readings: []csnReading{
-				{Pod: "198.51.100.1", Suffix: sfxA, CSNs: nil},
-				{Pod: "198.51.100.1", Suffix: sfxB, CSNs: csnsB},
+				{Pod: testPodIP1, Suffix: sfxA, CSNs: nil},
+				{Pod: testPodIP1, Suffix: sfxB, CSNs: csnsB},
 			},
 			wantState: ldapv1alpha1.ReplicationLagging,
 			because: "the zero-baseline rule is about OUR side only; a zero on " +
@@ -537,9 +537,9 @@ func TestEvaluateLocalConvergenceReadoutBySuffix(t *testing.T) {
 			// why this case is first.
 			name: "a converged database measures a spread of zero over the pods that answered",
 			readings: []csnReading{
-				{Pod: "slapd-0", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "slapd-1", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "slapd-2", Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPod0, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPod1, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPod2, Suffix: sfxA, CSNs: csnsA},
 			},
 			replicas: 3,
 			want: map[string]dbCSNReadout{
@@ -553,8 +553,8 @@ func TestEvaluateLocalConvergenceReadoutBySuffix(t *testing.T) {
 			// that answered, in the units the gauge exports.
 			name: "a diverged database measures the gap between its newest and oldest pod",
 			readings: []csnReading{
-				{Pod: "slapd-0", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "slapd-1", Suffix: sfxA, CSNs: csnsAOlder},
+				{Pod: testPod0, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPod1, Suffix: sfxA, CSNs: csnsAOlder},
 			},
 			replicas: 2,
 			want: map[string]dbCSNReadout{
@@ -570,12 +570,12 @@ func TestEvaluateLocalConvergenceReadoutBySuffix(t *testing.T) {
 			// so the two databases here deliberately differ in BOTH numbers.
 			name: "each database is measured only from its own readings",
 			readings: []csnReading{
-				{Pod: "slapd-0", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "slapd-1", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "slapd-2", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "slapd-0", Suffix: sfxB, CSNs: csnsB},
-				{Pod: "slapd-1", Suffix: sfxB, Err: "bind cn=repl-db2: LDAP Result Code 49"},
-				{Pod: "slapd-2", Suffix: sfxB, CSNs: csnsB},
+				{Pod: testPod0, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPod1, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPod2, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPod0, Suffix: sfxB, CSNs: csnsB},
+				{Pod: testPod1, Suffix: sfxB, Err: "bind cn=repl-db2: LDAP Result Code 49"},
+				{Pod: testPod2, Suffix: sfxB, CSNs: csnsB},
 			},
 			replicas: 3,
 			want: map[string]dbCSNReadout{
@@ -593,8 +593,8 @@ func TestEvaluateLocalConvergenceReadoutBySuffix(t *testing.T) {
 			// be handed a fabricated 0 either.
 			name: "one readable pod yields pair counts but no spread",
 			readings: []csnReading{
-				{Pod: "slapd-0", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "slapd-1", Suffix: sfxA, Err: "dial slapd-1: connection refused"},
+				{Pod: testPod0, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPod1, Suffix: sfxA, Err: "dial slapd-1: connection refused"},
 			},
 			replicas: 2,
 			want: map[string]dbCSNReadout{
@@ -611,8 +611,8 @@ func TestEvaluateLocalConvergenceReadoutBySuffix(t *testing.T) {
 			// `read < expected` an alertable comparison with no division.
 			name: "a database no pod could read reports zero read, expected intact, no spread",
 			readings: []csnReading{
-				{Pod: "slapd-0", Suffix: sfxA, Err: "dial: i/o timeout"},
-				{Pod: "slapd-1", Suffix: sfxA, Err: "dial: i/o timeout"},
+				{Pod: testPod0, Suffix: sfxA, Err: "dial: i/o timeout"},
+				{Pod: testPod1, Suffix: sfxA, Err: "dial: i/o timeout"},
 			},
 			replicas: 2,
 			want: map[string]dbCSNReadout{
@@ -631,8 +631,8 @@ func TestEvaluateLocalConvergenceReadoutBySuffix(t *testing.T) {
 			// hidden-glue shape (ADR-025).
 			name: "a pod answering with no contextCSN did not yield a reading",
 			readings: []csnReading{
-				{Pod: "slapd-0", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "slapd-1", Suffix: sfxA, CSNs: nil},
+				{Pod: testPod0, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPod1, Suffix: sfxA, CSNs: nil},
 			},
 			replicas: 2,
 			want: map[string]dbCSNReadout{
@@ -648,8 +648,8 @@ func TestEvaluateLocalConvergenceReadoutBySuffix(t *testing.T) {
 			// causes a time series cannot tell apart.
 			name: "pods expected counts the pairs the pass holds, not spec.replicas",
 			readings: []csnReading{
-				{Pod: "slapd-0", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "slapd-1", Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPod0, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPod1, Suffix: sfxA, CSNs: csnsA},
 			},
 			replicas: 5,
 			want: map[string]dbCSNReadout{
@@ -665,8 +665,8 @@ func TestEvaluateLocalConvergenceReadoutBySuffix(t *testing.T) {
 			// entry of zeros would claim the operator looked.
 			name: "a database absent from the readings is absent from the readout",
 			readings: []csnReading{
-				{Pod: "slapd-0", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "slapd-1", Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPod0, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPod1, Suffix: sfxA, CSNs: csnsA},
 			},
 			replicas: 2,
 			want: map[string]dbCSNReadout{
@@ -739,10 +739,10 @@ func TestEvaluateLocalConvergenceReadoutBySuffix(t *testing.T) {
 // deserves its own red-first case.
 func TestEvaluateLocalConvergenceReadoutDoesNotDisturbTheVerdict(t *testing.T) {
 	readings := []csnReading{
-		{Pod: "slapd-0", Suffix: sfxA, CSNs: csnsA},
-		{Pod: "slapd-1", Suffix: sfxA, CSNs: csnsAOlder},
-		{Pod: "slapd-0", Suffix: sfxB, CSNs: csnsB},
-		{Pod: "slapd-1", Suffix: sfxB, CSNs: csnsB},
+		{Pod: testPod0, Suffix: sfxA, CSNs: csnsA},
+		{Pod: testPod1, Suffix: sfxA, CSNs: csnsAOlder},
+		{Pod: testPod0, Suffix: sfxB, CSNs: csnsB},
+		{Pod: testPod1, Suffix: sfxB, CSNs: csnsB},
 	}
 	got := evaluateLocalConvergence(readings, 2)
 

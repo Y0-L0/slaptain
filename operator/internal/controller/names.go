@@ -39,9 +39,13 @@ const (
 	volumeAccesslog = "accesslog"
 	volumeStaging   = "staging"
 	volumeTLS       = "tls"
+	// volumeRun is the emptyDir holding slapd's ldapi socket, shared with the
+	// exporter sidecar.
+	volumeRun = "run"
 
 	configMountPath = "/config"
 	dataMountPath   = "/data"
+	runMountPath    = "/run/openldap"
 
 	// jobShell runs the inline scripts of the operator's Jobs.
 	jobShell = "bash"
@@ -77,6 +81,9 @@ const (
 // reads and writes. Spelled as slapd spells them.
 const (
 	configDN = "cn=config"
+	// configAdminDN is cn=config's rootDN, which the operator binds as and
+	// makes the rootDN of every database it creates outside the data tree.
+	configAdminDN = "cn=admin,cn=config"
 
 	backendMDB = "mdb"
 

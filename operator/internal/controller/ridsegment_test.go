@@ -34,7 +34,7 @@ import (
 
 const (
 	testRIDCluster = "slapd"
-	testRIDNS      = "slaptain-testing"
+	testRIDNS      = testE2ENamespace
 )
 
 // ridDB builds a SlapdDatabase declaring `segment` (nil for "not declared")

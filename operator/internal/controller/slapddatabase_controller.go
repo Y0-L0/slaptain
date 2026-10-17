@@ -723,7 +723,7 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 	defer closeConn(ctx, conn)
 	conn.SetTimeout(ldapRequestTimeout)
 
-	if err := conn.Bind("cn=admin,cn=config", configPW); err != nil {
+	if err := conn.Bind(configAdminDN, configPW); err != nil {
 		return fmt.Errorf("bind cn=admin,cn=config at %s: %w", host, err)
 	}
 
@@ -1831,7 +1831,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 		addReq.Attribute("objectClass", []string{ocDatabaseConfig, ocMdbConfig})
 		addReq.Attribute("olcDatabase", []string{backendMDB})
 		addReq.Attribute("olcSuffix", []string{logSuffix})
-		addReq.Attribute("olcRootDN", []string{"cn=admin,cn=config"})
+		addReq.Attribute("olcRootDN", []string{configAdminDN})
 		// back-mdb does not create olcDbDirectory; /accesslog/<db> is
 		// provisioned by the init container at pod start or by the mkdir Job
 		// above on a running pod (ADR-019 R3, ADR-013 amendment).
@@ -3316,7 +3316,7 @@ func (r *SlapdDatabaseReconciler) applySyncreplToPod(
 	defer closeConn(ctx, conn)
 	conn.SetTimeout(ldapRequestTimeout)
 
-	if err := conn.Bind("cn=admin,cn=config", configPW); err != nil {
+	if err := conn.Bind(configAdminDN, configPW); err != nil {
 		return fmt.Errorf("bind at %s: %w", host, err)
 	}
 
@@ -3527,7 +3527,7 @@ func (r *SlapdDatabaseReconciler) deleteDatabaseFromPod(
 	defer closeConn(ctx, conn)
 	conn.SetTimeout(ldapRequestTimeout)
 
-	if err := conn.Bind("cn=admin,cn=config", configPW); err != nil {
+	if err := conn.Bind(configAdminDN, configPW); err != nil {
 		return err
 	}
 

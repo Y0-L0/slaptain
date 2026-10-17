@@ -21,7 +21,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/utils/ptr"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
@@ -78,7 +77,7 @@ func goldenCluster() *ldapv1alpha1.SlapdCluster {
 	sc.Namespace = goldenNamespace
 	sc.Spec.Replicas = 3
 	sc.Spec.ReadReplicas = 2
-	sc.Spec.LogLevel = ptr.To(int32(256))
+	sc.Spec.LogLevel = new(int32(256))
 	sc.Spec.Replication.Enabled = true
 	sc.Spec.Replication.Network = &ldapv1alpha1.ReplicationNetworkConfig{
 		Mode:          "multus",
@@ -139,10 +138,10 @@ func TestPodTemplateIsUnchangedWhileMonitoringIsOff(t *testing.T) {
 	}{
 		{"monitoring unset", func(*ldapv1alpha1.SlapdCluster) {}},
 		{"monitoring.enabled=false", func(sc *ldapv1alpha1.SlapdCluster) {
-			sc.Spec.Monitoring.Enabled = ptr.To(false)
+			sc.Spec.Monitoring.Enabled = new(false)
 		}},
 		{"monitoring.enabled=false with sidecar resources set", func(sc *ldapv1alpha1.SlapdCluster) {
-			sc.Spec.Monitoring.Enabled = ptr.To(false)
+			sc.Spec.Monitoring.Enabled = new(false)
 			sc.Spec.Monitoring.Resources = &corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("10m")},
 			}
@@ -196,7 +195,7 @@ func monitoringEnabledAddsOnlyTheExporter(t *testing.T, readOnly bool) {
 	golden := goldenReconciler().buildStatefulSetSpec(goldenCluster(), readOnly).Template
 
 	sc := goldenCluster()
-	sc.Spec.Monitoring.Enabled = ptr.To(true)
+	sc.Spec.Monitoring.Enabled = new(true)
 	got := goldenReconciler().buildStatefulSetSpec(sc, readOnly).Template
 
 	if n, want := len(got.Spec.Containers), len(golden.Spec.Containers)+1; n != want {
@@ -261,9 +260,9 @@ func TestExporterSidecarShape(t *testing.T) {
 	// must inherit whatever the pod runs as, never pin 1024 itself.
 	customUID := func(sc *ldapv1alpha1.SlapdCluster) {
 		sc.Spec.SecurityContext = &corev1.PodSecurityContext{
-			RunAsUser:  ptr.To(int64(1000650000)),
-			RunAsGroup: ptr.To(int64(0)),
-			FSGroup:    ptr.To(int64(1000650000)),
+			RunAsUser:  new(int64(1000650000)),
+			RunAsGroup: new(int64(0)),
+			FSGroup:    new(int64(1000650000)),
 		}
 	}
 
@@ -299,7 +298,7 @@ func TestExporterSidecarShape(t *testing.T) {
 			}
 			t.Run(label, func(t *testing.T) {
 				sc := goldenCluster()
-				sc.Spec.Monitoring.Enabled = ptr.To(true)
+				sc.Spec.Monitoring.Enabled = new(true)
 				tc.set(sc)
 				tmpl := goldenReconciler().buildStatefulSetSpec(sc, readOnly).Template
 				c := findExporter(t, tmpl, label)
@@ -377,8 +376,8 @@ func TestDesiredMonitoringEnabled(t *testing.T) {
 		want    bool
 	}{
 		{"unset is off — the upgrade must add nothing to the pod", nil, false},
-		{"explicit false is off", ptr.To(false), false},
-		{"explicit true is on", ptr.To(true), true},
+		{"explicit false is off", new(false), false},
+		{"explicit true is on", new(true), true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -425,7 +424,7 @@ func assertExporterSecurityContext(t *testing.T, got, slapdSec *corev1.SecurityC
 // returns its exporter container.
 func exporterContainer(t *testing.T, r *SlapdClusterReconciler, sc *ldapv1alpha1.SlapdCluster) corev1.Container {
 	t.Helper()
-	sc.Spec.Monitoring.Enabled = ptr.To(true)
+	sc.Spec.Monitoring.Enabled = new(true)
 	return findExporter(t, r.buildStatefulSetSpec(sc, false).Template, "exporter image")
 }
 
@@ -530,7 +529,7 @@ func TestExporterTemplateUnderOperatorUpgrade(t *testing.T) {
 		r := goldenReconciler()
 		r.OperatorImage, r.DefaultImageTag = operatorImage, defaultTag
 		sc := goldenCluster()
-		sc.Spec.Monitoring.Enabled = ptr.To(true)
+		sc.Spec.Monitoring.Enabled = new(true)
 		if pinAll {
 			// slapd and init pinned, so no operator-derived image is left
 			// except the exporter's.

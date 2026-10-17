@@ -558,7 +558,7 @@ func TestEvaluateLocalConvergenceReadoutBySuffix(t *testing.T) {
 			},
 			replicas: 2,
 			want: map[string]dbCSNReadout{
-				sfxA: {PodsExpected: 2, PodsRead: 2, Spread: ptr.To(spreadAOlder)},
+				sfxA: {PodsExpected: 2, PodsRead: 2, Spread: new(spreadAOlder)},
 			},
 			because: "the spread is the lag the boolean verdict throws away, and it is " +
 				"what a dashboard plots between a converged and a broken site",

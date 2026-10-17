@@ -310,8 +310,8 @@ func TestStoreExposesNoExpiryOrCapacityAPI(t *testing.T) {
 
 	typ := reflect.TypeFor[*Store[ClusterObservation]]()
 	got := map[string]bool{}
-	for i := range typ.NumMethod() {
-		got[typ.Method(i).Name] = true
+	for method := range typ.Methods() {
+		got[method.Name] = true
 	}
 
 	for name := range want {

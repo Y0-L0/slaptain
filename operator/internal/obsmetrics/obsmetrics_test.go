@@ -31,11 +31,6 @@ import (
 // a timestamp — so a render that hardcoded any single number or label cannot
 // pass both. Every whole-sample-set assertion below runs over the pair.
 
-// spreadOf is a measured spread. The pointer IS the absence rule since
-// 2026-10-06 (DatabaseCSN.Spread), so a fixture has to say which of the two it
-// means, and `nil` reads as "no measurement" everywhere below.
-func spreadOf(d time.Duration) *time.Duration { return &d }
-
 // healthyCluster is a three-pod, two-database, two-peer site with nothing
 // wrong: every pair read, both spreads computable, both peers' discovery
 // resolving to remote pods. The two peers deliberately resolve to DIFFERENT
@@ -46,8 +41,8 @@ func healthyCluster() ClusterObservation {
 		Identity: Identity{Namespace: "slaptain-testing", Cluster: "slapd", Mesh: "ldap"},
 		Observed: time.Unix(1700000000, 0),
 		Databases: []DatabaseCSN{
-			{Database: "default", PairsExpected: 3, PairsRead: 3, Spread: spreadOf(0)},
-			{Database: "db2", PairsExpected: 3, PairsRead: 3, Spread: spreadOf(500 * time.Millisecond)},
+			{Database: "default", PairsExpected: 3, PairsRead: 3, Spread: new(time.Duration(0))},
+			{Database: "db2", PairsExpected: 3, PairsRead: 3, Spread: new(500 * time.Millisecond)},
 		},
 		Peers: []PeerObservation{
 			{Peer: "site-2", UsesDiscovery: true, DiscoveryRan: true, ProvidersDiscovered: 3},
@@ -86,7 +81,7 @@ func controlCluster() ClusterObservation {
 		Identity: Identity{Namespace: "other-ns", Cluster: "ldap-b", Mesh: "mesh-b"},
 		Observed: time.Unix(1200000000, 0),
 		Databases: []DatabaseCSN{
-			{Database: "people", PairsExpected: 5, PairsRead: 4, Spread: spreadOf(7 * time.Second)},
+			{Database: "people", PairsExpected: 5, PairsRead: 4, Spread: new(7 * time.Second)},
 		},
 		Peers: []PeerObservation{
 			{Peer: "site-9", UsesDiscovery: true, DiscoveryRan: true, ProvidersDiscovered: 1},
@@ -339,7 +334,7 @@ func TestCSNSpreadAbsentWhenNoPodAnswered(t *testing.T) {
 // on the surface. Zero is absent only when it was never measured.
 func TestCSNSpreadOfZeroIsRenderedWhenTwoPodsAgree(t *testing.T) {
 	obs := healthyCluster()
-	obs.Databases = []DatabaseCSN{{Database: "default", PairsExpected: 2, PairsRead: 2, Spread: spreadOf(0)}}
+	obs.Databases = []DatabaseCSN{{Database: "default", PairsExpected: 2, PairsRead: 2, Spread: new(time.Duration(0))}}
 	got := RenderCluster(obs)
 
 	s, ok := has(got, MetricCSNSpread, map[string]string{LabelDatabase: "default"})
@@ -762,8 +757,8 @@ func TestRenderOrderIsDeterministic(t *testing.T) {
 		Identity: Identity{Namespace: "ns", Cluster: "c", Mesh: "m"},
 		Observed: time.Unix(1700000000, 0),
 		Databases: []DatabaseCSN{
-			{Database: "zeta", PairsExpected: 2, PairsRead: 2, Spread: spreadOf(time.Second)},
-			{Database: "alpha", PairsExpected: 2, PairsRead: 2, Spread: spreadOf(2 * time.Second)},
+			{Database: "zeta", PairsExpected: 2, PairsRead: 2, Spread: new(time.Second)},
+			{Database: "alpha", PairsExpected: 2, PairsRead: 2, Spread: new(2 * time.Second)},
 		},
 		Peers: []PeerObservation{
 			{Peer: "zulu", UsesDiscovery: true, DiscoveryRan: true, ProvidersDiscovered: 1},
@@ -949,7 +944,7 @@ func TestCSNSpreadGatesOnThePointerAndNothingElse(t *testing.T) {
 		// using a field that is not the one carrying the rule.
 		obs := healthyCluster()
 		obs.Databases = []DatabaseCSN{
-			{Database: "default", PairsExpected: 3, PairsRead: 1, Spread: spreadOf(3 * time.Second)},
+			{Database: "default", PairsExpected: 3, PairsRead: 1, Spread: new(3 * time.Second)},
 		}
 		s, ok := has(RenderCluster(obs), MetricCSNSpread, map[string]string{LabelDatabase: "default"})
 		if !ok {

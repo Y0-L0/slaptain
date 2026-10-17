@@ -1,0 +1,183 @@
+Description: logpurge takes an optional phase, aligning the purge to a fixed grid
+ slapo-accesslog schedules its purge as a runqueue task whose next run is
+ computed as "now + interval" at the moment of dispatch. Three consequences
+ follow, and all three are unwanted where several providers replicate to each
+ other:
+ .
+   * each cycle absorbs that cycle's dispatch latency and never gives it back,
+     so the purge time walks forward without bound;
+   * a purge still running when its next run falls due is rescheduled without
+     running, re-phasing the task by a whole interval;
+   * a restart re-phases the task to the restart instant.
+ .
+ Consequently the time at which a given provider purges is neither chosen nor
+ stable, and two providers cannot be kept from purging together except by
+ repeatedly rewriting their configuration.
+ .
+ This adds an optional third value to logpurge:
+ .
+   olcAccessLogPurge: <age> <interval> [<phase>]
+ .
+ With a phase, the task fires at phase + k*interval counted from the epoch,
+ taking the first such instant strictly after now. Because the epoch is itself
+ midnight UTC, any interval that divides a day gives midnight-relative
+ scheduling; intervals that do not divide a day stay on a uniform grid with no
+ discontinuity. The next run is derived from absolute time rather than from the
+ moment of dispatch, so latency cannot accumulate, an overrun lands on the next
+ grid slot, and a restart returns to the same grid.
+ .
+ Two values behave exactly as before: without a phase the task is unaligned and
+ the arithmetic is untouched. The value is a free-form DirectoryString already
+ holding two space-separated tokens, so no schema change is required.
+ .
+ The alignment is opt-in per runqueue task: the new re_s fields default to zero
+ and only slapo-accesslog sets them, leaving syncrepl, back-mdb, back-asyncmeta,
+ back-wt, back-ldap, dds, refint, pcache and lloadd on the existing path.
+ .
+ A task is still inserted due immediately, so configuring a phase purges once
+ off-grid and every subsequent run is aligned.
+Forwarded: no
+Author: Dominik Epple <dominik.epple@gmail.com>
+Last-Update: 2026-10-18
+---
+--- a/include/ldap_rq.h
++++ b/include/ldap_rq.h
+@@ -30,6 +30,8 @@
+ 	char *tname;
+ 	char *tspec;
+ 	void *pool_cookie;
++	struct timeval phase;	/* offset from the epoch, when aligned */
++	int aligned;		/* fire at phase + k*interval, not now+interval */
+ } re_t;
+ 
+ typedef struct runqueue_s {
+--- a/libraries/libldap/rq.c
++++ b/libraries/libldap/rq.c
+@@ -170,7 +170,21 @@
+ 	LDAP_STAILQ_REMOVE( &rq->task_list, entry, re_s, tnext );
+ 
+ 	if ( !defer ) {
+-		entry->next_sched.tv_sec = time( NULL ) + entry->interval.tv_sec;
++		if ( entry->aligned && entry->interval.tv_sec > 0 ) {
++			/* Fire on an absolute grid: phase + k*interval, counted
++			 * from the epoch, choosing the first slot strictly after
++			 * now. Derived from absolute time rather than from the
++			 * moment of dispatch, so scheduling latency cannot
++			 * accumulate and a restart returns to the same grid.
++			 */
++			time_t now = time( NULL );
++			time_t iv = entry->interval.tv_sec;
++			time_t ph = entry->phase.tv_sec % iv;
++
++			entry->next_sched.tv_sec = ph + ( ( now - ph ) / iv + 1 ) * iv;
++		} else {
++			entry->next_sched.tv_sec = time( NULL ) + entry->interval.tv_sec;
++		}
+ 	} else {
+ 		entry->next_sched.tv_sec = 0;
+ 	}
+--- a/servers/slapd/overlays/accesslog.c
++++ b/servers/slapd/overlays/accesslog.c
+@@ -73,6 +73,8 @@
+ 	slap_mask_t li_ops;
+ 	int li_age;
+ 	int li_cycle;
++	int li_phase;
++	int li_phased;
+ 	struct re_s *li_task;
+ 	Filter *li_oldf;
+ 	Entry *li_old;
+@@ -121,7 +123,7 @@
+ 			"DESC 'Operation types to log' "
+ 			"EQUALITY caseIgnoreMatch "
+ 			"SYNTAX OMsDirectoryString )", NULL, NULL },
+-	{ "logpurge", "age> <interval", 3, 3, 0, ARG_MAGIC|LOG_PURGE,
++	{ "logpurge", "age> <interval> [<phase>", 3, 4, 0, ARG_MAGIC|LOG_PURGE,
+ 		log_cf_gen, "( OLcfgOvAt:4.3 NAME 'olcAccessLogPurge' "
+ 			"DESC 'Log cleanup parameters' "
+ 			"EQUALITY caseIgnoreMatch "
+@@ -806,8 +808,8 @@
+ 	struct log_info *li = on->on_bi.bi_private;
+ 	int rc = 0;
+ 	slap_mask_t tmask = 0;
+-	char agebuf[2*STRLENOF("ddddd+hh:mm:ss  ")];
+-	struct berval agebv, cyclebv;
++	char agebuf[3*STRLENOF("ddddd+hh:mm:ss  ")];
++	struct berval agebv, cyclebv, phasebv;
+ 
+ 	switch( c->op ) {
+ 	case SLAP_CONFIG_EMIT:
+@@ -843,6 +845,14 @@
+ 			cyclebv.bv_val = agebv.bv_val + agebv.bv_len;
+ 			log_age_unparse( li->li_cycle, &cyclebv, sizeof( agebuf ) - agebv.bv_len );
+ 			agebv.bv_len += cyclebv.bv_len;
++			if ( li->li_phased ) {
++				agebv.bv_val[agebv.bv_len] = ' ';
++				agebv.bv_len++;
++				phasebv.bv_val = agebv.bv_val + agebv.bv_len;
++				log_age_unparse( li->li_phase, &phasebv,
++					sizeof( agebuf ) - agebv.bv_len );
++				agebv.bv_len += phasebv.bv_len;
++			}
+ 			value_add_one( &c->rvalue_vals, &agebv );
+ 			break;
+ 		case LOG_SUCCESS:
+@@ -907,6 +917,8 @@
+ 			}
+ 			li->li_age = 0;
+ 			li->li_cycle = 0;
++			li->li_phase = 0;
++			li->li_phased = 0;
+ 			break;
+ 		case LOG_SUCCESS:
+ 			li->li_success = 0;
+@@ -999,17 +1011,36 @@
+ 				li->li_cycle = log_age_parse( c->argv[2] );
+ 				if ( li->li_cycle < 1 ) {
+ 					rc = 1;
++				} else if ( c->argc > 3 &&
++					( li->li_phase = log_age_parse( c->argv[3] ) ) < 0 ) {
++					li->li_phase = 0;
++					rc = 1;
++				} else if ( c->argc > 3 && li->li_phase >= li->li_cycle ) {
++					snprintf( c->cr_msg, sizeof( c->cr_msg ),
++						"<%s> phase must be less than interval",
++						c->argv[0] );
++					Debug( LDAP_DEBUG_CONFIG|LDAP_DEBUG_NONE,
++						"%s: %s\n", c->log, c->cr_msg );
++					li->li_phase = 0;
++					rc = 1;
+ 				} else if ( slapMode & SLAP_SERVER_MODE ) {
+ 					struct re_s *re = li->li_task;
+-					if ( re )
++					li->li_phased = c->argc > 3;
++					if ( re ) {
+ 						re->interval.tv_sec = li->li_cycle;
+-					else if ( li->li_open ) {
++						re->phase.tv_sec = li->li_phase;
++						re->aligned = li->li_phased;
++					} else if ( li->li_open ) {
+ 						ldap_pvt_thread_mutex_lock( &slapd_rq.rq_mutex );
+ 						li->li_task = ldap_pvt_runqueue_insert( &slapd_rq,
+ 							li->li_cycle, accesslog_purge, li,
+ 							"accesslog_purge", li->li_db ?
+ 								li->li_db->be_suffix[0].bv_val :
+ 								c->be->be_suffix[0].bv_val );
++						if ( li->li_task ) {
++							li->li_task->phase.tv_sec = li->li_phase;
++							li->li_task->aligned = li->li_phased;
++						}
+ 						ldap_pvt_thread_mutex_unlock( &slapd_rq.rq_mutex );
+ 					}
+ 				}
+@@ -2537,6 +2568,10 @@
+ 		li->li_task = ldap_pvt_runqueue_insert( &slapd_rq,
+ 				li->li_cycle, accesslog_purge, li,
+ 				"accesslog_purge", li->li_db->be_suffix[0].bv_val );
++		if ( li->li_task ) {
++			li->li_task->phase.tv_sec = li->li_phase;
++			li->li_task->aligned = li->li_phased;
++		}
+ 	}
+ 	ldap_pvt_thread_mutex_unlock( &slapd_rq.rq_mutex );
+ 

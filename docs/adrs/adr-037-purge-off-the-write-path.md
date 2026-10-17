@@ -530,3 +530,50 @@ before merging, or the commit says plainly that multi-site is unvalidated.
   side effect.
 - `docs/BACKLOG.md` — "The accesslog purge stalls the pod that runs it, and we
   pin writes to one pod": the measurement, the A/B table and the hazard.
+
+---
+
+## Amendment, 2026-10-18: a phase is a value, and decision 5a is a workaround
+
+Decisions 5 and 5a were written against the scheduler slapd ships, where the
+next purge is `now + interval` computed at dispatch. We now carry a local patch
+that adds an optional third value — `olcAccessLogPurge: <age> <interval>
+[<phase>]` — firing the task at `phase + k*interval` counted from the epoch
+(`images/openldap-deb/local-patches/accesslog-purge-phase.patch`, built by
+`images/openldap-deb/Containerfile.ol26src`). It is ours, not upstream's, and
+it is deliberately absent from the 2.7.1 packaging fork's series.
+
+**5a is retired where the patch runs.** All three drift sources it describes
+come from deriving the next run from the moment of dispatch; deriving it from
+absolute time removes them together. Dispatch latency no longer accumulates, an
+overrun lands on the next grid slot rather than re-phasing by a whole interval,
+and a restart returns to the same grid instead of re-phasing to the restart
+instant. The half of 5a that stands is that phase still cannot be read back —
+`back-monitor` has no runqueue subsystem — but that stops mattering once
+nothing drifts: re-assertion was only ever needed because the value would not
+stay put. Re-asserting once per rotation becomes the fallback for an unpatched
+slapd, not the mechanism.
+
+**5's premise inverts.** It says there is no per-pod *policy* to diverge, so
+every pod carries the same configured value and the CR gains no per-pod purge
+field. That was true of stock slapd and is false with a phase: the phase is
+exactly a per-pod value, and something must derive it — ordinal × step, or an
+explicit per-pod assignment. The operator reconciles `olcAccessLogPurge`
+uniformly from the CR today, so **the patch alone does not produce a stagger**;
+it only makes one expressible. A `SlapdDatabase` field carrying the step, plus
+a per-pod derived value, is now required work rather than a thing this ADR
+could decline.
+
+The failure mode if that is missed is quiet, and was nearly met in practice: a
+driver written on the assumption that the server multiplies the value by the
+pod's ordinal would write one phase for every pod, the providers would stay
+synchronised, and the arm would report no difference — reading as "the patch
+does nothing" rather than "the stagger never happened".
+
+**And the case for rotation narrows, honestly.** Option C — staggering, which
+this ADR adopted as the first step — was costed as phase control plus standing
+operator work to maintain it. With the phase it is one declarative value per
+pod and no standing work at all. What full write-endpoint rotation still buys
+over it is the elimination of the **write target's own** stall, and the second
+driver (every provider's sid keeps advancing, ADR-036). It no longer buys the
+de-synchronisation, because staggering now delivers that by configuration.

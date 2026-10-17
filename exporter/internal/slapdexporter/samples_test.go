@@ -73,8 +73,8 @@ func TestSamplesFromEntriesCuratedContract(t *testing.T) {
 		bare(famThreadsBack):    {1, prometheus.GaugeValue},
 		bare(famThreadsMax):     {16, prometheus.GaugeValue},
 		bare(famThreadsMaxPend): {0, prometheus.GaugeValue},
-		key(famWaiters, map[string]string{"direction": "read"}):  {1, prometheus.GaugeValue},
-		key(famWaiters, map[string]string{"direction": "write"}): {0, prometheus.GaugeValue},
+		key(famWaiters, map[string]string{wantDirectionLabel: "read"}):  {1, prometheus.GaugeValue},
+		key(famWaiters, map[string]string{wantDirectionLabel: "write"}): {0, prometheus.GaugeValue},
 		bare(famStartTime): {startTime27, prometheus.GaugeValue},
 		// openldap_mdb_* is unchanged by the curation: gauges, by suffix.
 		suffix("openldap_mdb_pages_max", statsSuffix):       {2560, prometheus.GaugeValue},
@@ -266,8 +266,8 @@ func TestSamplesFromEntriesMatchesDNsCaseInsensitively(t *testing.T) {
 	setAttr(w, "monitorCounter", []string{"3"})
 	got := byKey(t, SamplesFromEntries([]*ldap.Entry{e, w}))
 	want := map[string]float64{
-		op(famOpsCompleted, "search"):                           5,
-		key(famWaiters, map[string]string{"direction": "read"}): 3,
+		op(famOpsCompleted, "search"):                                  5,
+		key(famWaiters, map[string]string{wantDirectionLabel: "read"}): 3,
 	}
 	if !maps.Equal(got, want) {
 		t.Errorf("got %v, want %v", got, want)
@@ -355,7 +355,7 @@ func TestSamplesFromEntriesLabelsKnowSlapdNotSlaptain(t *testing.T) {
 		case s.Name == famOpsInitiated || s.Name == famOpsCompleted:
 			want = []string{"op"}
 		case s.Name == famWaiters:
-			want = []string{"direction"}
+			want = []string{wantDirectionLabel}
 		}
 		if got := slices.Sorted(maps.Keys(s.Labels)); !slices.Equal(got, want) {
 			t.Errorf("%s labels %v, want %v", key(s.Name, s.Labels), got, want)

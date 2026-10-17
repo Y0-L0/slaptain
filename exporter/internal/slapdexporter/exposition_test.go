@@ -213,9 +213,9 @@ func TestHandlerFailedReadIsUpZeroAndNoMonitorFamily(t *testing.T) {
 		fail    func(*fakeSlapd)
 		counter string // the exporter counter whose result="fail" counts the failure; "" for none
 	}{
-		{"dial fails", func(f *fakeSlapd) { f.dialErr = errFake }, famDials},
-		{"bind fails", func(f *fakeSlapd) { f.bindErr = errFake }, famBinds},
-		{"search fails", func(f *fakeSlapd) { f.searchErr = errFake }, ""},
+		{caseDialFails, func(f *fakeSlapd) { f.dialErr = errFake }, famDials},
+		{caseBindFails, func(f *fakeSlapd) { f.bindErr = errFake }, famBinds},
+		{caseSearchFails, func(f *fakeSlapd) { f.searchErr = errFake }, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := healthyFake(t)

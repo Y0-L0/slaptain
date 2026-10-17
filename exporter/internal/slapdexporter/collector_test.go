@@ -62,7 +62,7 @@ func TestCollectorReadsOnScrapeNotOnATimer(t *testing.T) {
 func TestCollectorDialsTheConfiguredURI(t *testing.T) {
 	f := healthyFake(t)
 	opts := externalOpts()
-	opts.URI = "ldap://ldap.example.org:1024"
+	opts.URI = remoteURI
 	scrape(t, newScrapeTarget(t, opts, f))
 	if !slices.Equal(f.uris, []string{opts.URI}) {
 		t.Errorf("dialled %q, want [%q]", f.uris, opts.URI)
@@ -189,10 +189,10 @@ func TestCollectorUpSaysWhetherThisScrapeRead(t *testing.T) {
 		want float64
 	}{
 		{"healthy", func(*fakeSlapd) {}, 1},
-		{"dial fails", func(f *fakeSlapd) { f.dialErr = errFake }, 0},
+		{caseDialFails, func(f *fakeSlapd) { f.dialErr = errFake }, 0},
 		{"recovered", func(f *fakeSlapd) { f.dialErr = nil }, 1},
-		{"bind fails", func(f *fakeSlapd) { f.bindErr = errFake }, 0},
-		{"search fails", func(f *fakeSlapd) { f.bindErr, f.searchErr = nil, errFake }, 0},
+		{caseBindFails, func(f *fakeSlapd) { f.bindErr = errFake }, 0},
+		{caseSearchFails, func(f *fakeSlapd) { f.bindErr, f.searchErr = nil, errFake }, 0},
 		{"partial search", func(f *fakeSlapd) { f.partial = true }, 0},
 		{"recovered again", func(f *fakeSlapd) { f.searchErr, f.partial = nil, false }, 1},
 	} {
@@ -211,9 +211,9 @@ func TestCollectorFailedReadIsAbsentNeverTheLastValue(t *testing.T) {
 		name string
 		fail func(*fakeSlapd)
 	}{
-		{"dial fails", func(f *fakeSlapd) { f.dialErr = errFake }},
-		{"bind fails", func(f *fakeSlapd) { f.bindErr = errFake }},
-		{"search fails", func(f *fakeSlapd) { f.searchErr = errFake }},
+		{caseDialFails, func(f *fakeSlapd) { f.dialErr = errFake }},
+		{caseBindFails, func(f *fakeSlapd) { f.bindErr = errFake }},
+		{caseSearchFails, func(f *fakeSlapd) { f.searchErr = errFake }},
 		// go-ldap returns entries AND an error for e.g. a size limit hit
 		// mid-search. A partial tree is not a reading: half the families
 		// present and half absent would be read as a real change.
@@ -341,8 +341,8 @@ func TestCollectorBindModes(t *testing.T) {
 		wantBind  bool // openldap_exporter_binds_total present
 	}{
 		{"external", externalOpts(), []string{"external"}, true},
-		{"simple", Options{URI: DefaultURI, Bind: BindSimple, BindDN: "cn=monitor,dc=example,dc=org",
-			BindPassword: "s3cret", Listen: DefaultListen},
+		{"simple", Options{URI: DefaultURI, Bind: BindSimple, BindDN: monitorBindDN,
+			BindPassword: testPassword, Listen: DefaultListen},
 			[]string{"simple:cn=monitor,dc=example,dc=org:s3cret"}, true},
 		{"none", Options{URI: DefaultURI, Bind: BindNone, Listen: DefaultListen}, nil, false},
 	} {
@@ -390,14 +390,14 @@ func TestCollectorFamilyTypes(t *testing.T) {
 	for _, s := range scrape(t, newScrapeTarget(t, externalOpts(), healthyFake(t))) {
 		got[s.Name] = s.Type
 	}
-	want := map[string]string{famUp: "GAUGE", famDials: "COUNTER", famBinds: "COUNTER",
-		famOpsInitiated: "COUNTER", famOpsCompleted: "COUNTER", famConnsTotal: "COUNTER",
-		famSentBytes: "COUNTER", famSentPDUs: "COUNTER", famSentEntries: "COUNTER", famSentReferrals: "COUNTER",
-		famConnsCurrent: "GAUGE", famMaxFDs: "GAUGE", famThreadsOpen: "GAUGE", famThreadsActive: "GAUGE",
-		famThreadsPending: "GAUGE", famThreadsStart: "GAUGE", famThreadsBack: "GAUGE", famThreadsMax: "GAUGE",
-		famThreadsMaxPend: "GAUGE", famWaiters: "GAUGE", famStartTime: "GAUGE"}
+	want := map[string]string{famUp: typeGauge, famDials: typeCounter, famBinds: typeCounter,
+		famOpsInitiated: typeCounter, famOpsCompleted: typeCounter, famConnsTotal: typeCounter,
+		famSentBytes: typeCounter, famSentPDUs: typeCounter, famSentEntries: typeCounter, famSentReferrals: typeCounter,
+		famConnsCurrent: typeGauge, famMaxFDs: typeGauge, famThreadsOpen: typeGauge, famThreadsActive: typeGauge,
+		famThreadsPending: typeGauge, famThreadsStart: typeGauge, famThreadsBack: typeGauge, famThreadsMax: typeGauge,
+		famThreadsMaxPend: typeGauge, famWaiters: typeGauge, famStartTime: typeGauge}
 	for _, f := range mdbFamilies {
-		want[f] = "GAUGE"
+		want[f] = typeGauge
 	}
 	if !maps.Equal(got, want) {
 		t.Errorf("family types = %v\nwant           %v", got, want)

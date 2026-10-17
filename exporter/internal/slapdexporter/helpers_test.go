@@ -32,6 +32,24 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// Fixture values more than one test spells. socketURI is spelled out rather
+// than taken from DefaultURI so a test pinning the default does not compare the
+// constant with itself; wantDirectionLabel likewise for the label-set test.
+const (
+	remoteURI          = "ldap://ldap.example.org:1024"
+	socketURI          = "ldapi:///run/openldap/slapd.ldapi"
+	monitorBindDN      = "cn=monitor,dc=example,dc=org"
+	flagBindSimple     = "--bind=simple"
+	flagBindDN         = "--bind-dn=" + monitorBindDN
+	testPassword       = "s3cret"
+	caseDialFails      = "dial fails"
+	caseBindFails      = "bind fails"
+	caseSearchFails    = "search fails"
+	typeGauge          = "GAUGE"
+	typeCounter        = "COUNTER"
+	wantDirectionLabel = "direction"
+)
+
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 //
 // testdata/ holds REAL cn=Monitor output, recorded by testdata/record.sh from a
@@ -475,9 +493,9 @@ func scrape(t *testing.T, reg *prometheus.Registry) []scraped {
 			var v float64
 			typ := mf.GetType().String()
 			switch typ {
-			case "GAUGE":
+			case typeGauge:
 				v = m.GetGauge().GetValue()
-			case "COUNTER":
+			case typeCounter:
 				v = m.GetCounter().GetValue()
 			case "UNTYPED":
 				v = m.GetUntyped().GetValue()

@@ -260,6 +260,13 @@ const (
 	gauge       = prometheus.GaugeValue
 	// attrTimestamp holds a generalizedTime, exported as Unix seconds.
 	attrTimestamp = "monitorTimestamp"
+	// The cn=Monitor attributes most families read their value from.
+	attrMonitorCounter = "monitorCounter"
+	attrMonitoredInfo  = "monitoredInfo"
+	attrMDBPageSize    = "olmMDBPageSize"
+	// Label names shared by several families.
+	labelDirection = "direction"
+	labelResult    = "result"
 )
 
 // family maps one cn=Monitor attribute to one metric family.
@@ -283,35 +290,35 @@ var monitorFamilies = []family{
 	{name: "openldap_operations_completed_total", typ: counter, dn: "cn=*,cn=Operations,cn=Monitor", label: "op",
 		attr: "monitorOpCompleted", help: "Operations completed, by type (cn=<Op>,cn=Operations monitorOpCompleted)."},
 	{name: "openldap_connections_total", typ: counter, dn: "cn=Total,cn=Connections,cn=Monitor",
-		attr: "monitorCounter", help: "Connections accepted since start (cn=Total,cn=Connections)."},
+		attr: attrMonitorCounter, help: "Connections accepted since start (cn=Total,cn=Connections)."},
 	{name: "openldap_connections_current", typ: gauge, dn: "cn=Current,cn=Connections,cn=Monitor",
-		attr: "monitorCounter", help: "Connections open now (cn=Current,cn=Connections)."},
+		attr: attrMonitorCounter, help: "Connections open now (cn=Current,cn=Connections)."},
 	{name: "openldap_max_file_descriptors", typ: gauge, dn: "cn=Max File Descriptors,cn=Connections,cn=Monitor",
-		attr: "monitorCounter", help: "File descriptor limit (cn=Max File Descriptors,cn=Connections)."},
+		attr: attrMonitorCounter, help: "File descriptor limit (cn=Max File Descriptors,cn=Connections)."},
 	{name: "openldap_sent_bytes_total", typ: counter, dn: "cn=Bytes,cn=Statistics,cn=Monitor",
-		attr: "monitorCounter", help: "Bytes sent (cn=Bytes,cn=Statistics)."},
+		attr: attrMonitorCounter, help: "Bytes sent (cn=Bytes,cn=Statistics)."},
 	{name: "openldap_sent_pdus_total", typ: counter, dn: "cn=PDU,cn=Statistics,cn=Monitor",
-		attr: "monitorCounter", help: "PDUs sent (cn=PDU,cn=Statistics)."},
+		attr: attrMonitorCounter, help: "PDUs sent (cn=PDU,cn=Statistics)."},
 	{name: "openldap_sent_entries_total", typ: counter, dn: "cn=Entries,cn=Statistics,cn=Monitor",
-		attr: "monitorCounter", help: "Entries sent (cn=Entries,cn=Statistics)."},
+		attr: attrMonitorCounter, help: "Entries sent (cn=Entries,cn=Statistics)."},
 	{name: "openldap_sent_referrals_total", typ: counter, dn: "cn=Referrals,cn=Statistics,cn=Monitor",
-		attr: "monitorCounter", help: "Referrals sent (cn=Referrals,cn=Statistics)."},
+		attr: attrMonitorCounter, help: "Referrals sent (cn=Referrals,cn=Statistics)."},
 	{name: "openldap_threads_open", typ: gauge, dn: "cn=Open,cn=Threads,cn=Monitor",
-		attr: "monitoredInfo", help: "Worker threads open (cn=Open,cn=Threads)."},
+		attr: attrMonitoredInfo, help: "Worker threads open (cn=Open,cn=Threads)."},
 	{name: "openldap_threads_active", typ: gauge, dn: "cn=Active,cn=Threads,cn=Monitor",
-		attr: "monitoredInfo", help: "Worker threads active (cn=Active,cn=Threads)."},
+		attr: attrMonitoredInfo, help: "Worker threads active (cn=Active,cn=Threads)."},
 	{name: "openldap_threads_pending", typ: gauge, dn: "cn=Pending,cn=Threads,cn=Monitor",
-		attr: "monitoredInfo", help: "Operations pending a thread (cn=Pending,cn=Threads)."},
+		attr: attrMonitoredInfo, help: "Operations pending a thread (cn=Pending,cn=Threads)."},
 	{name: "openldap_threads_starting", typ: gauge, dn: "cn=Starting,cn=Threads,cn=Monitor",
-		attr: "monitoredInfo", help: "Worker threads starting (cn=Starting,cn=Threads)."},
+		attr: attrMonitoredInfo, help: "Worker threads starting (cn=Starting,cn=Threads)."},
 	{name: "openldap_threads_backload", typ: gauge, dn: "cn=Backload,cn=Threads,cn=Monitor",
-		attr: "monitoredInfo", help: "Active plus pending (cn=Backload,cn=Threads)."},
+		attr: attrMonitoredInfo, help: "Active plus pending (cn=Backload,cn=Threads)."},
 	{name: "openldap_threads_max", typ: gauge, dn: "cn=Max,cn=Threads,cn=Monitor",
-		attr: "monitoredInfo", help: "Worker thread limit (cn=Max,cn=Threads)."},
+		attr: attrMonitoredInfo, help: "Worker thread limit (cn=Max,cn=Threads)."},
 	{name: "openldap_threads_max_pending", typ: gauge, dn: "cn=Max Pending,cn=Threads,cn=Monitor",
-		attr: "monitoredInfo", help: "Pending operation limit (cn=Max Pending,cn=Threads)."},
-	{name: "openldap_waiters", typ: gauge, dn: "cn=*,cn=Waiters,cn=Monitor", label: "direction",
-		attr: "monitorCounter", help: "Descriptors waiting, by direction (cn=Read|Write,cn=Waiters)."},
+		attr: attrMonitoredInfo, help: "Pending operation limit (cn=Max Pending,cn=Threads)."},
+	{name: "openldap_waiters", typ: gauge, dn: "cn=*,cn=Waiters,cn=Monitor", label: labelDirection,
+		attr: attrMonitorCounter, help: "Descriptors waiting, by direction (cn=Read|Write,cn=Waiters)."},
 	{name: "openldap_start_time_seconds", typ: gauge, dn: "cn=Start,cn=Time,cn=Monitor",
 		attr: attrTimestamp, help: "slapd start time, Unix seconds (cn=Start,cn=Time monitorTimestamp)."},
 }
@@ -325,7 +332,7 @@ var mdbStatFamilies = []family{
 	{name: "openldap_mdb_readers_used", typ: gauge, attr: "olmMDBReadersUsed",
 		help: "olmMDBReadersUsed: reader slots in use"},
 	{name: "openldap_mdb_entries", typ: gauge, attr: "olmMDBEntries", help: "olmMDBEntries: entries in the database"},
-	{name: "openldap_mdb_page_size_bytes", typ: gauge, attr: "olmMDBPageSize",
+	{name: "openldap_mdb_page_size_bytes", typ: gauge, attr: attrMDBPageSize,
 		help: "olmMDBPageSize: LMDB page size (2.7+)"},
 }
 
@@ -489,10 +496,10 @@ func NewCollector(opts Options, dial DialFunc) *Collector {
 		dial: dial,
 		dials: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "openldap_exporter_dials_total", Help: "Connection attempts to slapd, by result.",
-		}, []string{"result"}),
+		}, []string{labelResult}),
 		binds: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "openldap_exporter_binds_total", Help: "Bind attempts to slapd, by result.",
-		}, []string{"result"}),
+		}, []string{labelResult}),
 		up: prometheus.NewDesc("openldap_up",
 			"1 when this scrape read cn=Monitor, 0 when the dial, bind or search failed.", nil, nil),
 		descs: map[string]*prometheus.Desc{},

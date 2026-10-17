@@ -47,7 +47,7 @@ func TestParseFlagsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseFlags(nil): %v", err)
 	}
-	want := Options{URI: "ldapi:///run/openldap/slapd.ldapi", Bind: BindExternal, Listen: ":9330", Timeout: 5 * time.Second}
+	want := Options{URI: socketURI, Bind: BindExternal, Listen: ":9330", Timeout: 5 * time.Second}
 	if got != want {
 		t.Errorf("defaults = %+v, want %+v", got, want)
 	}
@@ -71,14 +71,14 @@ func TestParseFlagsSidecarInvocation(t *testing.T) {
 // TestParseFlagsSimpleBindReadsThePasswordFile: the password comes from the
 // file's content, never from argv.
 func TestParseFlagsSimpleBindReadsThePasswordFile(t *testing.T) {
-	pw := passwordFile(t, "s3cret")
-	got, err := ParseFlags([]string{"--uri=ldap://ldap.example.org:1024", "--bind=simple",
-		"--bind-dn=cn=monitor,dc=example,dc=org", "--bind-password-file=" + pw, "--listen=127.0.0.1:19330", "--timeout=2s"})
+	pw := passwordFile(t, testPassword)
+	got, err := ParseFlags([]string{"--uri=" + remoteURI, flagBindSimple,
+		flagBindDN, "--bind-password-file=" + pw, "--listen=127.0.0.1:19330", "--timeout=2s"})
 	if err != nil {
 		t.Fatalf("ParseFlags: %v", err)
 	}
-	want := Options{URI: "ldap://ldap.example.org:1024", Bind: BindSimple, BindDN: "cn=monitor,dc=example,dc=org",
-		BindPassword: "s3cret", Listen: "127.0.0.1:19330", Timeout: 2 * time.Second}
+	want := Options{URI: remoteURI, Bind: BindSimple, BindDN: monitorBindDN,
+		BindPassword: testPassword, Listen: "127.0.0.1:19330", Timeout: 2 * time.Second}
 	if got != want {
 		t.Errorf("got %+v, want %+v", got, want)
 	}
@@ -90,18 +90,18 @@ func TestParseFlagsSimpleBindReadsThePasswordFile(t *testing.T) {
 // A password may end in a space or in a deliberate second newline.
 func TestParseFlagsPasswordFileTrimsOneLineEnding(t *testing.T) {
 	for _, tc := range []struct{ name, content, want string }{
-		{"no line ending", "s3cret", "s3cret"},
-		{"one LF", "s3cret\n", "s3cret"},
-		{"one CRLF", "s3cret\r\n", "s3cret"},
-		{"trailing space survives", "s3cret ", "s3cret "},
-		{"trailing space before LF survives", "s3cret \n", "s3cret "},
-		{"only one LF is removed", "s3cret\n\n", "s3cret\n"},
-		{"a lone CR is not a line ending", "s3cret\r", "s3cret\r"},
-		{"leading space survives", " s3cret\n", " s3cret"},
+		{"no line ending", testPassword, testPassword},
+		{"one LF", testPassword + "\n", testPassword},
+		{"one CRLF", testPassword + "\r\n", testPassword},
+		{"trailing space survives", testPassword + " ", testPassword + " "},
+		{"trailing space before LF survives", testPassword + " \n", testPassword + " "},
+		{"only one LF is removed", testPassword + "\n\n", testPassword + "\n"},
+		{"a lone CR is not a line ending", testPassword + "\r", testPassword + "\r"},
+		{"leading space survives", " " + testPassword + "\n", " " + testPassword},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pw := passwordFile(t, tc.content)
-			got, err := ParseFlags([]string{"--bind=simple", "--bind-dn=cn=monitor,dc=example,dc=org",
+			got, err := ParseFlags([]string{flagBindSimple, flagBindDN,
 				"--bind-password-file=" + pw})
 			if err != nil {
 				t.Fatalf("ParseFlags: %v", err)
@@ -128,7 +128,7 @@ func TestParseFlagsBindNone(t *testing.T) {
 // starting and failing every scrape — a sidecar that runs but can never read
 // looks healthy (Ready) and exports nothing.
 func TestParseFlagsRefuses(t *testing.T) {
-	pw := passwordFile(t, "s3cret")
+	pw := passwordFile(t, testPassword)
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
 	for _, tc := range []struct {
 		name string
@@ -136,12 +136,12 @@ func TestParseFlagsRefuses(t *testing.T) {
 	}{
 		{"unknown --bind", []string{"--bind=sasl"}},
 		{"empty --bind", []string{"--bind="}},
-		{"simple without a password file", []string{"--bind=simple", "--bind-dn=cn=monitor,dc=example,dc=org"}},
+		{"simple without a password file", []string{flagBindSimple, flagBindDN}},
 		{"simple with a missing password file",
-			[]string{"--bind=simple", "--bind-dn=cn=monitor,dc=example,dc=org", "--bind-password-file=" + missing}},
-		{"simple without a DN", []string{"--bind=simple", "--bind-password-file=" + pw}},
+			[]string{flagBindSimple, flagBindDN, "--bind-password-file=" + missing}},
+		{"simple without a DN", []string{flagBindSimple, "--bind-password-file=" + pw}},
 		{"credentials with external", []string{"--bind=external", "--bind-password-file=" + pw}},
-		{"a DN with none", []string{"--bind=none", "--bind-dn=cn=monitor,dc=example,dc=org"}},
+		{"a DN with none", []string{"--bind=none", flagBindDN}},
 		// An empty --uri is a flag error, not a URI for DialURL to judge every
 		// scrape: refused here so the sidecar does not run Ready and read nothing.
 		{"empty URI", []string{"--uri="}},
@@ -162,14 +162,14 @@ func TestParseFlagsRefuses(t *testing.T) {
 // after review), and a second validator here could only disagree with it.
 func TestNormalizeURI(t *testing.T) {
 	for _, tc := range []struct{ name, in, want string }{
-		{"slapd -h form", "ldapi://%2frun%2fopenldap%2fslapd.ldapi", "ldapi:///run/openldap/slapd.ldapi"},
-		{"slapd -h form, upper-case escapes", "ldapi://%2Frun%2Fopenldap%2Fslapd.ldapi", "ldapi:///run/openldap/slapd.ldapi"},
+		{"slapd -h form", "ldapi://%2frun%2fopenldap%2fslapd.ldapi", socketURI},
+		{"slapd -h form, upper-case escapes", "ldapi://%2Frun%2Fopenldap%2Fslapd.ldapi", socketURI},
 		{"another socket path", "ldapi://%2fvar%2frun%2fslapd%2fldapi", "ldapi:///var/run/slapd/ldapi"},
-		{"path form unchanged", "ldapi:///run/openldap/slapd.ldapi", "ldapi:///run/openldap/slapd.ldapi"},
+		{"path form unchanged", socketURI, socketURI},
 		// go-ldap dials its compiled-in default socket for an empty ldapi
 		// path; that is DialURL's documented behaviour, not ours to override.
 		{"empty-path ldapi unchanged", "ldapi://", "ldapi://"},
-		{"ldap unchanged", "ldap://ldap.example.org:1024", "ldap://ldap.example.org:1024"},
+		{"ldap unchanged", remoteURI, remoteURI},
 		{"ldaps unchanged", "ldaps://ldap.example.org:1025", "ldaps://ldap.example.org:1025"},
 		{"other scheme unchanged (DialURL refuses it)", "http://ldap.example.org", "http://ldap.example.org"},
 	} {

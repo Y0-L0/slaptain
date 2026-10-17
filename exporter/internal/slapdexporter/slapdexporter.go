@@ -184,9 +184,11 @@ func ParseFlags(args []string) (Options, error) {
 // NormalizeURI returns raw in a form ldap.DialURL can dial.
 //
 // slapd's own -h spelling of an ldapi socket percent-encodes the path into the
-// host part (ldapi://%2frun%2fopenldap%2fslapd.ldapi), which net/url — and so
-// go-ldap — rejects. That form, and only that form, is rewritten to
-// ldapi:///<path>; an escape that does not decode is an error. Everything else
+// host part (ldapi://%2frun%2fopenldap%2fslapd.ldapi), which net/url rejects,
+// and go-ldap with it before v3.4.15. That form, and only that form, is
+// rewritten to ldapi:///<path>; an escape that does not decode is an error —
+// at flag parsing, so a malformed --uri stops the exporter at startup instead
+// of failing every scrape. Everything else
 // passes through unchanged: validating a URI is ldap.DialURL's job, and a
 // second validator here could only disagree with it.
 func NormalizeURI(raw string) (string, error) {

@@ -191,7 +191,8 @@ func TestNormalizeURI(t *testing.T) {
 // TestNormalizeURIResultIsDialableByGoLDAP: the point of normalising is that
 // go-ldap can dial the result. A real unix socket, named the way slapd -h
 // names it, must accept a connection from ldap.DialURL(NormalizeURI(...)).
-// (go-ldap rejects the -h form outright: net/url refuses "%2f" in a host.)
+// (Before v3.4.15, go-ldap rejected the -h form outright: net/url refuses "%2f"
+// in a host.)
 func TestNormalizeURIResultIsDialableByGoLDAP(t *testing.T) {
 	// A short directory: unix socket paths are limited to ~108 bytes.
 	dir, err := os.MkdirTemp("", "sx")
@@ -213,10 +214,12 @@ func TestNormalizeURIResultIsDialableByGoLDAP(t *testing.T) {
 		}
 	}()
 
+	// go-ldap v3.4.15 learned to dial this form unnormalised (parseLDAPURL
+	// percent-decodes an ldapi host), so the rewrite is no longer what makes the
+	// socket reachable. NormalizeURI stays for its other job — refusing a
+	// malformed escape at flag parsing rather than at every scrape — and this
+	// test keeps pinning that what it returns still reaches the socket.
 	hForm := "ldapi://" + strings.ReplaceAll(sock, "/", "%2f")
-	if _, err := ldap.DialURL(hForm); err == nil {
-		t.Fatalf("go-ldap dialled %q unnormalised; this test's premise is gone", hForm)
-	}
 	norm, err := NormalizeURI(hForm)
 	if err != nil {
 		t.Fatalf("NormalizeURI(%q): %v", hForm, err)

@@ -50,10 +50,21 @@ podman inspect --format '{{index .Config.Labels "net.chuck-chuck-chuck.slaptain.
 podman run --rm --entrypoint="" <image> slapd -VV
 ```
 
-A build timestamp older than the tag's commit is normal for `-ol26` and not a
-staleness bug: its Containerfile rarely changes, so the layers are cached and
-the image keeps its original creation date while taking a fresh tag. Judge it
-by the label and the version string, never by the date.
+Neither of the two dates in play answers the question, and they are different
+dates with different causes — which is what makes them inviting to misread:
+
+- the **image** creation date (`podman inspect --format '{{.Created}}'`) can
+  sit well before the tag's commit, because a Containerfile that rarely changes
+  means cached layers and an image that keeps its original date while taking a
+  fresh tag;
+- the **binary** build date, in `slapd -VV`, is older still for `-ol26` — it is
+  *Debian's* build date for the prebuilt package, so it stays fixed no matter
+  when the image was assembled. On `-ol26src` it is our own compile, so it
+  tracks the build.
+
+Measured on one pair: `-ol26` reads image 2026-10-06 and binary `May 29 2025`;
+`-ol26src` reads image 2026-10-17 and binary `Oct 17 2026`. Judge by the label
+and the version string, never by either date.
 
 ## Pinning the 2.6 pair
 

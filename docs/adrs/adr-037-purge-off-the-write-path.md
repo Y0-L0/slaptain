@@ -577,3 +577,115 @@ pod and no standing work at all. What full write-endpoint rotation still buys
 over it is the elimination of the **write target's own** stall, and the second
 driver (every provider's sid keeps advancing, ADR-036). It no longer buys the
 de-synchronisation, because staggering now delivers that by configuration.
+
+---
+
+## Amendment, 2026-10-18 (second): the rotation, specified
+
+Decisions 1 and 2 said the purge runs where the writes are not, and that a
+Service carries the write endpoint. They did not say how either is scheduled.
+With the phase available as a configuration value, that can now be written
+down.
+
+### The grid
+
+With `n` read-write pods and a slot length `t`, the period is `T = n·t` and
+pod-k purges at phase `k·t`. The writer rotates every `t`, in lockstep.
+
+**`n` is `spec.replicas` — declared, never observed.** It has to be, because
+`n` determines `T`, and `T` is the interval written into every pod's
+configuration: deriving it from readiness would rewrite the whole fleet's
+`cn=config` on a single transient restart, which is the churn ADR-013 exists to
+prevent. Readiness belongs in writer *selection*, which persists nothing.
+
+**`t` is fixed and `T = n·t` varies**, not the reverse. Scaling then leaves
+every existing pod's phase alone and gives the new pod `n·t`; only the interval
+moves, and changing an interval does not move a phase. Holding `T` fixed and
+recomputing `t = T/n` would re-phase the entire fleet on every scale event.
+
+### Where the writer sits: `d`
+
+Let `d` be the number of slots between a pod's own purge and its writer slot.
+Two constraints bound it, one at each end:
+
+- it must have finished purging before it writes: `d·t ≥ P`, for purge
+  duration `P`;
+- writes must have drained before it purges again: `(n−d)·t ≥ D`, for drain
+  time `D`.
+
+→ Adding them gives the sizing rule, **`T ≥ P + D`**, and leaves `d` free in
+`[P/t, n − D/t]`. `d` is therefore a tunable with a measured range rather than
+a fixed choice, and it stays one until there is evidence for a winner.
+
+`d = n−1` — the writer is the next pod to purge, having had the longest time to
+recover — is the preferred end and the one being measured first. Note what it
+does to this ADR's capacity condition: `write ≤ delete·(n−1)/n` assumes the
+purge may use the whole non-writing window, which is exactly `d = n−1`. At
+`d = 1` it tightens to `write ≤ delete·(1/n)`, so the choice that looks safer
+costs roughly half the write ceiling.
+
+Consequence of `d = n−1` worth watching: the writer purges immediately after
+its slot ends, carrying its freshest local writes with syncprov actively
+serving them. `d = n−2` buys a cooldown slot and exists only for `n ≥ 3`. We do
+not know whether it matters.
+
+### Writer selection
+
+At slot `s`, walk the preference order `d = n−1, n−2, … 1` and take the first
+pod that is Ready, is not purging this slot (never `d = 0`), is not read-only
+under ADR-036's authorship gate, and is not working off purge backlog, lag, or
+a recent absence (decision 4's promotion gate).
+
+With `n = 2` and one pod down the only candidate is the purging pod. Take it
+and accept the stall: writes continuing badly beats writes not continuing.
+
+A returning pod needs no special handling. Its phase is absolute, so it rejoins
+its own slot at the next boundary without re-phasing anyone — which under the
+stock scheduler would instead have re-phased it to the restart instant and
+collided silently with whoever owned that slot.
+
+### Databases align, they do not spread
+
+A cluster with `D` replicated databases has `D` accesslogs and `D` purges per
+pod per period. They are **aligned**: pod-k purges all of its databases at
+`k·t`, giving one busy window per pod of duration `ΣPᵢ`.
+
+Spreading them over `n·D` slots would isolate each purge and defeat the purpose
+— every pod would then be intermittently disturbed throughout the period, and
+the writer slot would have to dodge each database separately. Concentrating a
+pod's disturbance into the window where it is not writing is the whole point.
+
+### The reads
+
+Reads go to a service of the read-only replicas plus the current writer. The
+argument is **freshness, not latency**: only one provider purges at a time, so
+latency alone would justify excluding only that one, but a provider that has
+just purged is working off replication lag measured peaking near 35 s, and
+under `d = n−1` the writer is by construction the most recovered provider.
+
+It is a quantitative improvement against an already-asynchronous baseline, and
+its cost scales inversely with `readReplicas` — at `readReplicas: 0` the read
+service collapses onto one pod, which at a read-dominated profile is a cliff.
+The default therefore follows `readReplicas`, with "every pod that is not
+purging" available as the other mode. This is one of the few places where the
+right answer is a property of the deployment rather than of the design.
+
+### Where the configuration lives
+
+`olcAccessLogPurge: <age> <interval> <phase>` has two owners, not one:
+
+- `<age>` is a per-database retention policy and stays on `SlapdDatabase`;
+- `<interval>` and `<phase>` are a schedule over pods and move to the cluster.
+
+The operator composes the per-(pod, database) value from both. This removes the
+consistency problem without cross-resource validation — databases cannot
+disagree about a schedule they no longer own. Per ADR-024, the interval half of
+the existing per-database field must then be refused when cluster rotation is
+on rather than silently overridden.
+
+### Unmeasured
+
+`P` against `t` sets `d`'s lower bound and is computable from the running
+sequence (`T × write rate / delete rate`); `D` sets its upper bound and has no
+value at all yet. Until both exist, `d` is a parameter and `T ≥ P + D` is a
+rule we cannot yet evaluate for any concrete deployment.

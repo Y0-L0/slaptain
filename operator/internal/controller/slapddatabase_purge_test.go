@@ -65,7 +65,7 @@ func TestDesiredAccesslogPurge(t *testing.T) {
 		{"unset falls back to the operator default", "", defaultAccesslogPurge},
 		{"whitespace-only is still unset", testBlank, defaultAccesslogPurge},
 		{"none opts out of purging entirely", noneSentinel, ""},
-		{"none is matched case-insensitively", "None", ""},
+		{"none is matched case-insensitively", noneMixedCase, ""},
 		{"none tolerates surrounding whitespace", "  none  ", ""},
 		{"an explicit window is used verbatim", explicitPurge, explicitPurge},
 		{"an explicit window is trimmed", "  14+00:00 1+00:00 ", "14+00:00 1+00:00"},

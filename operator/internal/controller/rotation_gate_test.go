@@ -16,7 +16,6 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
@@ -48,6 +47,10 @@ func scWithRotation(replicas int32, r ldapv1alpha1.SlapdRotationConfig) *ldapv1a
 
 func dur(d time.Duration) *metav1.Duration { return &metav1.Duration{Duration: d} }
 
+// fieldSlotLength is the spec path the gate's messages must name, so that a
+// reader of the condition knows what to edit without reading the operator.
+const fieldSlotLength = "spec.rotation.slotLength"
+
 func TestEvaluateRotation(t *testing.T) {
 	cases := []struct {
 		name         string
@@ -69,7 +72,7 @@ func TestEvaluateRotation(t *testing.T) {
 		{
 			name: "explicitly disabled, slot length and all",
 			sc: scWithRotation(3, ldapv1alpha1.SlapdRotationConfig{
-				Enabled: ptr.To(false), SlotLength: dur(6 * time.Hour),
+				Enabled: new(false), SlotLength: dur(6 * time.Hour),
 			}),
 			wantActive: false,
 			wantStatus: metav1.ConditionTrue,
@@ -78,7 +81,7 @@ func TestEvaluateRotation(t *testing.T) {
 		{
 			name: "enabled with a slot length: T = replicas * t, writer at n-1",
 			sc: scWithRotation(3, ldapv1alpha1.SlapdRotationConfig{
-				Enabled: ptr.To(true), SlotLength: dur(6 * time.Hour),
+				Enabled: new(true), SlotLength: dur(6 * time.Hour),
 			}),
 			wantActive:   true,
 			wantStatus:   metav1.ConditionTrue,
@@ -90,7 +93,7 @@ func TestEvaluateRotation(t *testing.T) {
 		{
 			name: "replicas unset defaults to one pod, which is a one-slot grid",
 			sc: scWithRotation(0, ldapv1alpha1.SlapdRotationConfig{
-				Enabled: ptr.To(true), SlotLength: dur(time.Hour),
+				Enabled: new(true), SlotLength: dur(time.Hour),
 			}),
 			wantActive:   true,
 			wantStatus:   metav1.ConditionTrue,
@@ -102,7 +105,7 @@ func TestEvaluateRotation(t *testing.T) {
 		{
 			name: "duty 4: enabled with no slot length is inert, and says so",
 			sc: scWithRotation(3, ldapv1alpha1.SlapdRotationConfig{
-				Enabled: ptr.To(true),
+				Enabled: new(true),
 			}),
 			wantActive: false,
 			wantStatus: metav1.ConditionFalse,
@@ -111,7 +114,7 @@ func TestEvaluateRotation(t *testing.T) {
 		{
 			name: "duty 1: a zero slot length collapses every phase onto zero",
 			sc: scWithRotation(3, ldapv1alpha1.SlapdRotationConfig{
-				Enabled: ptr.To(true), SlotLength: dur(0),
+				Enabled: new(true), SlotLength: dur(0),
 			}),
 			wantActive: false,
 			wantStatus: metav1.ConditionFalse,
@@ -120,7 +123,7 @@ func TestEvaluateRotation(t *testing.T) {
 		{
 			name: "duty 1: a negative slot length is the same fault",
 			sc: scWithRotation(3, ldapv1alpha1.SlapdRotationConfig{
-				Enabled: ptr.To(true), SlotLength: dur(-time.Hour),
+				Enabled: new(true), SlotLength: dur(-time.Hour),
 			}),
 			wantActive: false,
 			wantStatus: metav1.ConditionFalse,
@@ -129,7 +132,7 @@ func TestEvaluateRotation(t *testing.T) {
 		{
 			name: "duty 2: 500ms has no representation in olcAccessLogPurge",
 			sc: scWithRotation(3, ldapv1alpha1.SlapdRotationConfig{
-				Enabled: ptr.To(true), SlotLength: dur(500 * time.Millisecond),
+				Enabled: new(true), SlotLength: dur(500 * time.Millisecond),
 			}),
 			wantActive: false,
 			wantStatus: metav1.ConditionFalse,
@@ -138,7 +141,7 @@ func TestEvaluateRotation(t *testing.T) {
 		{
 			name: "duty 2: a sub-second remainder on an otherwise sane value",
 			sc: scWithRotation(3, ldapv1alpha1.SlapdRotationConfig{
-				Enabled: ptr.To(true), SlotLength: dur(time.Hour + 500*time.Millisecond),
+				Enabled: new(true), SlotLength: dur(time.Hour + 500*time.Millisecond),
 			}),
 			wantActive: false,
 			wantStatus: metav1.ConditionFalse,
@@ -147,7 +150,7 @@ func TestEvaluateRotation(t *testing.T) {
 		{
 			name: "one whole second is the finest grid the server can express",
 			sc: scWithRotation(2, ldapv1alpha1.SlapdRotationConfig{
-				Enabled: ptr.To(true), SlotLength: dur(time.Second),
+				Enabled: new(true), SlotLength: dur(time.Second),
 			}),
 			wantActive:   true,
 			wantStatus:   metav1.ConditionTrue,
@@ -159,7 +162,7 @@ func TestEvaluateRotation(t *testing.T) {
 		{
 			name: "duty 3: a writerOffset above n-1 is clamped, and the clamp is reported",
 			sc: scWithRotation(3, ldapv1alpha1.SlapdRotationConfig{
-				Enabled: ptr.To(true), SlotLength: dur(time.Hour), WriterOffset: ptr.To(int32(9)),
+				Enabled: new(true), SlotLength: dur(time.Hour), WriterOffset: new(int32(9)),
 			}),
 			wantActive:   true,
 			wantStatus:   metav1.ConditionTrue,
@@ -171,7 +174,7 @@ func TestEvaluateRotation(t *testing.T) {
 		{
 			name: "duty 3: a writerOffset below 1 would put the writer on the purging pod",
 			sc: scWithRotation(3, ldapv1alpha1.SlapdRotationConfig{
-				Enabled: ptr.To(true), SlotLength: dur(time.Hour), WriterOffset: ptr.To(int32(0)),
+				Enabled: new(true), SlotLength: dur(time.Hour), WriterOffset: new(int32(0)),
 			}),
 			wantActive:   true,
 			wantStatus:   metav1.ConditionTrue,
@@ -183,7 +186,7 @@ func TestEvaluateRotation(t *testing.T) {
 		{
 			name: "an in-range writerOffset is taken verbatim and reported as active",
 			sc: scWithRotation(4, ldapv1alpha1.SlapdRotationConfig{
-				Enabled: ptr.To(true), SlotLength: dur(time.Hour), WriterOffset: ptr.To(int32(2)),
+				Enabled: new(true), SlotLength: dur(time.Hour), WriterOffset: new(int32(2)),
 			}),
 			wantActive:   true,
 			wantStatus:   metav1.ConditionTrue,
@@ -248,28 +251,28 @@ func TestEvaluateRotation_MessagesNameTheField(t *testing.T) {
 		{
 			name: "zero slot length",
 			sc: scWithRotation(3, ldapv1alpha1.SlapdRotationConfig{
-				Enabled: ptr.To(true), SlotLength: dur(0),
+				Enabled: new(true), SlotLength: dur(0),
 			}),
-			mustSay: []string{"spec.rotation.slotLength"},
+			mustSay: []string{fieldSlotLength},
 		},
 		{
 			name: "sub-second slot length",
 			sc: scWithRotation(3, ldapv1alpha1.SlapdRotationConfig{
-				Enabled: ptr.To(true), SlotLength: dur(500 * time.Millisecond),
+				Enabled: new(true), SlotLength: dur(500 * time.Millisecond),
 			}),
-			mustSay: []string{"spec.rotation.slotLength", "500ms"},
+			mustSay: []string{fieldSlotLength, "500ms"},
 		},
 		{
 			name: "missing slot length",
 			sc: scWithRotation(3, ldapv1alpha1.SlapdRotationConfig{
-				Enabled: ptr.To(true),
+				Enabled: new(true),
 			}),
-			mustSay: []string{"spec.rotation.slotLength"},
+			mustSay: []string{fieldSlotLength},
 		},
 		{
 			name: "clamped writer offset",
 			sc: scWithRotation(3, ldapv1alpha1.SlapdRotationConfig{
-				Enabled: ptr.To(true), SlotLength: dur(time.Hour), WriterOffset: ptr.To(int32(9)),
+				Enabled: new(true), SlotLength: dur(time.Hour), WriterOffset: new(int32(9)),
 			}),
 			mustSay: []string{"spec.rotation.writerOffset", "9", "2"},
 		},
@@ -291,7 +294,7 @@ func TestEvaluateRotation_MessagesNameTheField(t *testing.T) {
 // from, like every other condition this operator publishes.
 func TestRotationConfiguredCondition(t *testing.T) {
 	sc := scWithRotation(3, ldapv1alpha1.SlapdRotationConfig{
-		Enabled: ptr.To(true), SlotLength: dur(0),
+		Enabled: new(true), SlotLength: dur(0),
 	})
 	sc.Generation = 7
 

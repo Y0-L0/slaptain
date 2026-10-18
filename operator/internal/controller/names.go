@@ -105,6 +105,9 @@ const (
 	attrOlcPasswordHash = "olcPasswordHash"
 	attrOlcOverlay      = "olcOverlay"
 	attrOlcSpCheckpoint = "olcSpCheckpoint"
+	// attrOlcAccessLogPurge carries "<age> <interval>", and a third "<phase>"
+	// value on an image built with the accesslog-purge-phase patch (ADR-037).
+	attrOlcAccessLogPurge = "olcAccessLogPurge"
 
 	// olcTrue and olcFalse are cn=config's boolean syntax.
 	olcTrue  = "TRUE"

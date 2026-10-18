@@ -18,7 +18,6 @@ import (
 
 	ldap "github.com/go-ldap/ldap/v3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 )
 
 // ADR-037, second amendment, "Where the configuration lives": olcAccessLogPurge
@@ -37,6 +36,8 @@ const (
 	twoFieldPurge = "2+00:00 1+00:00"
 	// ageOnlyPurge is the shape a rotating cluster wants from the CR.
 	ageOnlyPurge = "2+00:00"
+	// noneMixedCase is the opt-out spelled the way a user might.
+	noneMixedCase = "None"
 )
 
 func activePlan(slot time.Duration, replicas int32) rotationPlan {
@@ -57,10 +58,10 @@ func TestSplitPurgeAge(t *testing.T) {
 	}{
 		{"the shipped default splits into its age", defaultAccesslogPurge, defaultPurgeAge, true},
 		{"an age alone carries no interval", ageOnlyPurge, ageOnlyPurge, false},
-		{"an age and an interval", twoFieldPurge, "2+00:00", true},
-		{"an already-phased value is still an age plus extras", "2+00:00 06:00:00 02:00:00", "2+00:00", true},
-		{"surrounding whitespace is not a field", "  2+00:00  ", ageOnlyPurge, false},
-		{"slapd's internal respacing is not a field count", "2+00:00\t1+00:00", "2+00:00", true},
+		{"an age and an interval", twoFieldPurge, ageOnlyPurge, true},
+		{"an already-phased value is an age plus extras", ageOnlyPurge + " 06:00:00 02:00:00", ageOnlyPurge, true},
+		{"surrounding whitespace is not a field", "  " + ageOnlyPurge + "  ", ageOnlyPurge, false},
+		{"slapd's internal respacing is not a field count", ageOnlyPurge + "\t1+00:00", ageOnlyPurge, true},
 		{"empty in, empty out", "", "", false},
 		{"whitespace-only in, empty out", testBlank, "", false},
 	}
@@ -213,7 +214,7 @@ func TestPlanPodPurge_EveryPodGetsItsOwnPhase(t *testing.T) {
 	const n = 4
 	plan := activePlan(90*time.Minute, n)
 	seen := map[string]int32{}
-	for ord := int32(0); ord < n; ord++ {
+	for ord := range int32(n) {
 		v := planPodPurge(plan, sdWithPurge(""), ord).Value
 		fields := strings.Fields(v)
 		if len(fields) != 3 {
@@ -240,7 +241,7 @@ func TestPlanPodPurge_DatabasesAlignOnOnePodsPhase(t *testing.T) {
 	dbB := sdWithPurge(ageOnlyPurge)
 	dbB.Name = "beta"
 
-	for ord := int32(0); ord < 3; ord++ {
+	for ord := range int32(3) {
 		a := strings.Fields(planPodPurge(plan, dbA, ord).Value)
 		b := strings.Fields(planPodPurge(plan, dbB, ord).Value)
 		if len(a) != 3 || len(b) != 3 {
@@ -316,14 +317,14 @@ func TestAggregateAccesslogPurgeConverged(t *testing.T) {
 		{
 			name:       "rotation off: nothing to say, and True is the honest answer",
 			active:     false,
-			obs:        []purgePhaseObservation{{pod: "slapd-0", assessed: true}},
+			obs:        []purgePhaseObservation{{pod: testPod0, assessed: true}},
 			wantStatus: metav1.ConditionTrue,
 			wantReason: reasonRotationDisabled,
 		},
 		{
 			name:       "rotation on and every pod took its phase",
 			active:     true,
-			obs:        []purgePhaseObservation{{pod: "slapd-0", assessed: true}, {pod: "slapd-1", assessed: true}},
+			obs:        []purgePhaseObservation{{pod: testPod0, assessed: true}, {pod: testPod1, assessed: true}},
 			wantStatus: metav1.ConditionTrue,
 			wantReason: reasonConverged,
 			mustSay:    []string{"2"},
@@ -332,7 +333,7 @@ func TestAggregateAccesslogPurgeConverged(t *testing.T) {
 			name:       "a declared interval withholds the whole database",
 			active:     true,
 			withheld:   withheld,
-			obs:        []purgePhaseObservation{{pod: "slapd-0", assessed: true}},
+			obs:        []purgePhaseObservation{{pod: testPod0, assessed: true}},
 			wantStatus: metav1.ConditionFalse,
 			wantReason: reasonPurgeIntervalDeclared,
 			mustSay:    []string{"accesslogPurge"},
@@ -341,28 +342,28 @@ func TestAggregateAccesslogPurgeConverged(t *testing.T) {
 			name:   "an unpatched image names the pod that refused the phase",
 			active: true,
 			obs: []purgePhaseObservation{
-				{pod: "slapd-0", assessed: true},
-				{pod: "slapd-1", assessed: true, unsupported: true},
+				{pod: testPod0, assessed: true},
+				{pod: testPod1, assessed: true, unsupported: true},
 			},
 			wantStatus: metav1.ConditionFalse,
 			wantReason: reasonPurgePhaseUnsupported,
-			mustSay:    []string{"slapd-1"},
+			mustSay:    []string{testPod1},
 		},
 		{
 			name:   "an unread pod is noted and never indicted (ADR-025)",
 			active: true,
 			obs: []purgePhaseObservation{
-				{pod: "slapd-0", assessed: true},
-				{pod: "slapd-1"},
+				{pod: testPod0, assessed: true},
+				{pod: testPod1},
 			},
 			wantStatus: metav1.ConditionTrue,
 			wantReason: reasonConverged,
-			mustSay:    []string{"slapd-1", "not assessed"},
+			mustSay:    []string{testPod1, "not assessed"},
 		},
 		{
 			name:       "no pod could be read at all: Unknown, never False",
 			active:     true,
-			obs:        []purgePhaseObservation{{pod: "slapd-0"}, {pod: "slapd-1"}},
+			obs:        []purgePhaseObservation{{pod: testPod0}, {pod: testPod1}},
 			wantStatus: metav1.ConditionUnknown,
 			wantReason: reasonNoReachablePod,
 		},
@@ -400,7 +401,7 @@ func TestAccesslogPurgeConvergedFor(t *testing.T) {
 	sd := sdWithPurge("")
 	sd.Generation = 4
 	cond := accesslogPurgeConvergedFor(sd, true, nil,
-		[]purgePhaseObservation{{pod: "slapd-0", assessed: true, unsupported: true}})
+		[]purgePhaseObservation{{pod: testPod0, assessed: true, unsupported: true}})
 
 	if cond.Type != accesslogPurgeConvergedCondition {
 		t.Fatalf("Type = %q, want %q", cond.Type, accesslogPurgeConvergedCondition)
@@ -417,9 +418,9 @@ func TestAccesslogPurgeConvergedFor(t *testing.T) {
 // milestone's one hard compatibility requirement, asserted against the resolver
 // the pre-rotation code used directly.
 func TestPlanPodPurge_RotationOffIsByteIdenticalToTheOldResolution(t *testing.T) {
-	for _, field := range []string{"", testBlank, noneSentinel, "None", twoFieldPurge, ageOnlyPurge} {
+	for _, field := range []string{"", testBlank, noneSentinel, noneMixedCase, twoFieldPurge, ageOnlyPurge} {
 		sd := sdWithPurge(field)
-		for ord := int32(0); ord < 4; ord++ {
+		for ord := range int32(4) {
 			got := planPodPurge(rotationPlan{}, sd, ord)
 			if got.Withheld {
 				t.Fatalf("field %q, pod %d: withheld with rotation off", field, ord)

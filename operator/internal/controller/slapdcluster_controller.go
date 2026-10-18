@@ -245,6 +245,19 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, fmt.Errorf("reconcileTLSGate: %w", tlsErr)
 	}
 
+	// 1d. The rotation gate (ADR-037, fourth amendment). spec.rotation's CEL
+	// rule checks the duration GRAMMAR and nothing else, so "0s" and "500ms"
+	// are both admitted and neither can be honoured. Evaluate the block here,
+	// publish RotationConfigured, and carry on: unlike the TLS gate this one
+	// withholds nothing — a rotation that cannot be honoured leaves the cluster
+	// behaving exactly as it did before the feature existed, which is strictly
+	// better than refusing to reconcile a running directory over a schedule.
+	//
+	// The SlapdDatabase controller re-evaluates the same pure function from the
+	// same CR rather than reading a status field, so the two can never disagree
+	// about the grid, and nothing new is persisted to keep in sync.
+	r.reconcileRotationGate(ctx, sc)
+
 	// 2. Reconcile cn=config credential secret (<name>-config-password).
 	if err := r.reconcileSecret(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileSecret: %w", err)

@@ -256,7 +256,8 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// reconcile completed: reconcileReplication writes syncrepl stanzas only
 	// to these — see the comment on its healthyPods parameter. startupObs
 	// carries one startup-only observation per READ-WRITE pod (ADR-034 R3).
-	appliedPods, failedPods, healthyPods, startupObs := r.applyToPods(ctx, sc, sd, configPW, rootPW)
+	appliedPods, failedPods, healthyPods, startupObs, purgeObs :=
+		r.applyToPods(ctx, sc, sd, configPW, rootPW)
 
 	// Track whether any step was incomplete — forces requeue even if database
 	// creation succeeded on all pods. Without this, the operator would stop
@@ -376,6 +377,20 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	//      no special case (ADR-001).
 	setCondition(&sd.Status.Conditions, startupConfigConvergedFor(sd, startupObs))
 
+	// 10c. Publish AccesslogPurgeConverged (ADR-037). Observation of what the
+	//      per-pod pass above actually managed to write, plus the one refusal
+	//      the spec can declare: an interval in this database's accesslogPurge
+	//      while the cluster's rotation owns the schedule. Recomputed wholly
+	//      from this pass (ADR-001), and an unreadable pod never counts toward
+	//      False (ADR-025).
+	rotation := evaluateRotation(sc)
+	var purgeHold *purgeWithhold
+	if pp := planPodPurge(rotation, sd, 0); pp.Withheld {
+		purgeHold = &purgeWithhold{Reason: pp.Reason, Message: pp.Message}
+	}
+	setCondition(&sd.Status.Conditions,
+		accesslogPurgeConvergedFor(sd, rotation.Active, purgeHold, purgeObs))
+
 	// 11. Update status. The precedence lives in databasePhase, which is pure
 	//      and therefore assertable — inline here it was dead in every test,
 	//      because the envtest fixtures have no pods at all.
@@ -416,8 +431,16 @@ func (r *SlapdDatabaseReconciler) applyToPods(
 	sc *ldapv1alpha1.SlapdCluster,
 	sd *ldapv1alpha1.SlapdDatabase,
 	configPW, rootPW string,
-) (appliedPods, failedPods []string, healthyPods map[string]bool, startupObs []startupConfigObservation) {
+) (appliedPods, failedPods []string, healthyPods map[string]bool,
+	startupObs []startupConfigObservation, purgeObs []purgePhaseObservation,
+) {
 	log := logf.FromContext(ctx)
+	// replicas is n, and it is spec.replicas — DECLARED, never observed. The
+	// loop bound has always been this, and ADR-037's grid now leans on it: n
+	// fixes the purge interval T = n·t written into every pod's cn=config, so
+	// deriving it from readiness would rewrite the whole fleet's configuration
+	// on one transient restart, which is the churn ADR-013 exists to prevent.
+	// It is not a bug that the loop ignores readiness.
 	replicas := sc.Spec.Replicas
 	if replicas == 0 {
 		replicas = 1
@@ -425,6 +448,13 @@ func (r *SlapdDatabaseReconciler) applyToPods(
 	headlessSvc := sc.Name + "-headless"
 	healthyPods = map[string]bool{}
 	startupObs = make([]startupConfigObservation, 0, replicas)
+	purgeObs = make([]purgePhaseObservation, 0, replicas)
+
+	// One rotation decision for the whole pass, from the same pure function the
+	// cluster controller publishes RotationConfigured from (ADR-037). Read from
+	// the CR rather than from a status field, so the two can never disagree
+	// about the grid and nothing extra has to be kept true.
+	rotation := evaluateRotation(sc)
 
 	// RW pods.
 	for i := int32(0); i < replicas; i++ {
@@ -432,8 +462,11 @@ func (r *SlapdDatabaseReconciler) applyToPods(
 		host := fmt.Sprintf("%s.%s.%s.svc.%s",
 			podName, headlessSvc, sc.Namespace, r.ClusterDomain)
 		obs := startupConfigObservation{pod: podName}
-		err := r.reconcilePodDatabase(ctx, host, configPW, rootPW, sd, sc, false, i, &obs)
+		pobs := purgePhaseObservation{pod: podName}
+		err := r.reconcilePodDatabase(ctx, host, configPW, rootPW, sd, sc, false, i, &obs,
+			rotation, &pobs)
 		startupObs = append(startupObs, obs)
+		purgeObs = append(purgeObs, pobs)
 		if err != nil {
 			log.Info("database reconcile skipped for pod (will retry)",
 				"pod", podName, "err", err)
@@ -452,8 +485,12 @@ func (r *SlapdDatabaseReconciler) applyToPods(
 			host := fmt.Sprintf("%s.%s.%s.svc.%s",
 				podName, roHeadless, sc.Namespace, r.ClusterDomain)
 			// ordinal is unused for RO pods (serverID is RW-only), but the
-			// signature requires it.
-			if err := r.reconcilePodDatabase(ctx, host, configPW, rootPW, sd, sc, true, i, nil); err != nil {
+			// signature requires it. Neither observation applies: an RO pod
+			// carries no syncprov overlay (ADR-034) and no accesslog overlay at
+			// all (ADR-019 R3), so it has no purge phase to take and must never
+			// count toward either verdict.
+			if err := r.reconcilePodDatabase(ctx, host, configPW, rootPW, sd, sc, true, i, nil,
+				rotation, nil); err != nil {
 				log.Info("database reconcile skipped for read-only pod (will retry)",
 					"pod", podName, "err", err)
 				failedPods = append(failedPods, podName)
@@ -463,7 +500,7 @@ func (r *SlapdDatabaseReconciler) applyToPods(
 			}
 		}
 	}
-	return appliedPods, failedPods, healthyPods, startupObs
+	return appliedPods, failedPods, healthyPods, startupObs, purgeObs
 }
 
 // reconcileSeed is step 8 for a database that still needs its seed. It
@@ -702,6 +739,8 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 	readOnly bool,
 	ordinal int32,
 	startupObs *startupConfigObservation,
+	rotation rotationPlan,
+	purgeObs *purgePhaseObservation,
 ) error {
 	log := logf.FromContext(ctx)
 
@@ -868,7 +907,7 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 
 	if !readOnly {
 		if dataDN, err = r.convergeProviderInfra(ctx, conn, host, dataDN, ensureDirs, sd, sc,
-			ordinal, wantsSyncProv, wantsAccesslog, startupObs); err != nil {
+			ordinal, wantsSyncProv, wantsAccesslog, startupObs, rotation, purgeObs); err != nil {
 			return err
 		}
 	}
@@ -963,6 +1002,8 @@ func (r *SlapdDatabaseReconciler) convergeProviderInfra(
 	ordinal int32,
 	wantsSyncProv, wantsAccesslog bool,
 	startupObs *startupConfigObservation,
+	rotation rotationPlan,
+	purgeObs *purgePhaseObservation,
 ) (string, error) {
 	// Ensure the dynamic modules backing the overlays are loaded BEFORE
 	// any ensure call below. Fresh bootstraps load them via slapd.conf
@@ -1026,7 +1067,11 @@ func (r *SlapdDatabaseReconciler) convergeProviderInfra(
 		if err := r.ensureAccesslogDB(ctx, conn, host, ensureDirs, sd, sc); err != nil {
 			return dataDN, fmt.Errorf("ensure accesslog DB at %s: %w", host, err)
 		}
-		if err := r.ensureAccesslogOverlay(ctx, conn, host, dataDN, sd); err != nil {
+		// The phase is this POD's, and every database on it shares that phase
+		// (ADR-037: databases align, they do not spread). ordinal is the pod's
+		// StatefulSet ordinal, which is the grid's k.
+		pp := planPodPurge(rotation, sd, ordinal)
+		if err := r.ensureAccesslogOverlay(ctx, conn, host, dataDN, sd, pp, purgeObs); err != nil {
 			return dataDN, fmt.Errorf("ensure accesslog overlay at %s: %w", host, err)
 		}
 	}
@@ -1664,6 +1709,8 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogOverlay(
 	conn *ldap.Conn,
 	host, dataDN string,
 	sd *ldapv1alpha1.SlapdDatabase,
+	pp purgePodPlan,
+	obs *purgePhaseObservation,
 ) error {
 	log := logf.FromContext(ctx)
 
@@ -1672,7 +1719,14 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogOverlay(
 		return err
 	}
 
-	purge := desiredAccesslogPurge(sd)
+	// The purge value is decided for THIS pod (ADR-037): with rotation off it
+	// is what it has always been, and with rotation on it is
+	// "<age> <interval> <phase>", where the phase is this pod's ordinal times
+	// the cluster's slot length. A withheld plan means the database declares
+	// something the cluster's schedule cannot honour — leave olcAccessLogPurge
+	// exactly as it is on this pod and let the condition carry the news
+	// (ADR-024 R4: rejected, never ignored).
+	purge := pp.Value
 
 	if !hasAccesslog {
 		log.Info("adding accesslog overlay to data database", "host", host, "dataDN", dataDN)
@@ -1683,12 +1737,28 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogOverlay(
 		addReq.Attribute("olcAccessLogDB", []string{ldapv1alpha1.AccesslogSuffix(sd.Name)})
 		addReq.Attribute("olcAccessLogOps", []string{"writes"})
 		addReq.Attribute("olcAccessLogSuccess", []string{olcTrue})
-		if purge != "" {
+		if purge != "" && !pp.Withheld {
 			addReq.Attribute("olcAccessLogPurge", []string{purge})
 		}
-		if err := guardedAdd(conn, addReq); err != nil {
-			if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
-				return fmt.Errorf("add accesslog overlay: %w", err)
+		addErr := guardedAdd(conn, addReq)
+		// Attempt, then report (ADR-037, PURGE-ROTATION-PLAN Phase 3). A stock
+		// slapd refuses the phase at config-parse time and takes the WHOLE add
+		// down with it, so this retry is not an optimisation: without it a
+		// cluster on an unpatched image would get no accesslog overlay at all,
+		// and a data DB without one stops producing deltas for its consumers.
+		// Retry with the two-field value, record the pod, let the condition
+		// name it.
+		if isPurgeArityRejection(addErr) && pp.Fallback != "" {
+			log.Info("slapd refused the accesslog purge phase; adding the overlay with the "+
+				"two-field value instead (this image carries no accesslog-purge-phase patch, ADR-037)",
+				"host", host, "dataDN", dataDN, "wanted", purge, "fallback", pp.Fallback)
+			markPurgePhaseUnsupported(obs)
+			addReq.Attributes = replacePurgeAttr(addReq.Attributes, pp.Fallback)
+			addErr = guardedAdd(conn, addReq)
+		}
+		if addErr != nil {
+			if !ldap.IsErrorWithCode(addErr, ldap.LDAPResultEntryAlreadyExists) {
+				return fmt.Errorf("add accesslog overlay: %w", addErr)
 			}
 		}
 	}
@@ -1710,7 +1780,41 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogOverlay(
 	// Leaving it write-once meant an operator-defaulted or edited purge window
 	// never reached a pod whose overlay predated the change, and an unpurged
 	// journal ends in stalled data writes.
-	return r.ensureAccesslogPurge(ctx, conn, host, dataDN, purge)
+	// A withheld plan converges nothing: every pod keeps the value it carries.
+	if pp.Withheld {
+		return nil
+	}
+	return r.ensureAccesslogPurge(ctx, conn, host, dataDN, pp, obs)
+}
+
+// replacePurgeAttr rewrites olcAccessLogPurge on a prepared AddRequest, adding
+// it when absent. One caller, one purpose: the three-field purge value falling
+// back to the two-field one on a slapd that cannot parse a phase, with the rest
+// of the request reused verbatim.
+func replacePurgeAttr(attrs []ldap.Attribute, value string) []ldap.Attribute {
+	for i := range attrs {
+		if strings.EqualFold(attrs[i].Type, attrOlcAccessLogPurge) {
+			attrs[i].Vals = []string{value}
+			return attrs
+		}
+	}
+	return append(attrs, ldap.Attribute{Type: attrOlcAccessLogPurge, Vals: []string{value}})
+}
+
+// markPurgePhaseUnsupported records that this pod's slapd refused the phase.
+// Nil-safe: a caller with no observation to fill records nothing.
+func markPurgePhaseUnsupported(obs *purgePhaseObservation) {
+	if obs != nil {
+		obs.unsupported = true
+	}
+}
+
+// markPurgeAssessed notes that this pod's accesslog overlay was actually read,
+// which is what makes the pod evidence at all (ADR-025). Nil-safe.
+func markPurgeAssessed(obs *purgePhaseObservation) {
+	if obs != nil {
+		obs.assessed = true
+	}
 }
 
 // ensureAccesslogPurge converges olcAccessLogPurge on the data DB's accesslog
@@ -1720,12 +1824,14 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogOverlay(
 func (r *SlapdDatabaseReconciler) ensureAccesslogPurge(
 	ctx context.Context,
 	conn *ldap.Conn,
-	host, dataDN, purge string,
+	host, dataDN string,
+	pp purgePodPlan,
+	obs *purgePhaseObservation,
 ) error {
 	sr, err := conn.Search(ldap.NewSearchRequest(
 		dataDN, ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
 		0, 0, false, "(objectClass=olcAccessLogConfig)",
-		[]string{"olcAccessLogPurge"}, nil,
+		[]string{attrOlcAccessLogPurge}, nil,
 	))
 	if err != nil {
 		return fmt.Errorf("search accesslog overlay under %s: %w", dataDN, err)
@@ -1734,8 +1840,30 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogPurge(
 		return nil
 	}
 
-	return ensureOverlayAttr(ctx, conn, host, sr.Entries[0].DN, "olcAccessLogPurge",
-		sr.Entries[0].GetEqualFoldAttributeValues("olcAccessLogPurge"), purge)
+	// The pod answered and its overlay was read, so this pod IS evidence from
+	// here on, whichever way the write goes. Every earlier return — the dial,
+	// the bind, this search — leaves the observation unassessed, which is how
+	// "we did not look" stays distinct from "we looked and it differs"
+	// (ADR-025, carried over from the ADR-034 observation).
+	markPurgeAssessed(obs)
+
+	live := sr.Entries[0].GetEqualFoldAttributeValues(attrOlcAccessLogPurge)
+	err = ensureOverlayAttr(ctx, conn, host, sr.Entries[0].DN, attrOlcAccessLogPurge, live, pp.Value)
+	if !isPurgeArityRejection(err) || pp.Fallback == "" {
+		return err
+	}
+
+	// Attempt, then report. The third value is what this slapd's accesslog
+	// overlay cannot parse, so fall back to the two-field one: the journal
+	// stays bounded — an unpurged journal ends in stalled DATA writes, which is
+	// what defaultAccesslogPurge exists to prevent — and the pod simply does
+	// not take its phase.
+	logf.FromContext(ctx).Info("slapd refused the accesslog purge phase; converging the "+
+		"two-field value instead (this image carries no accesslog-purge-phase patch, ADR-037)",
+		"host", host, "dataDN", dataDN, "wanted", pp.Value, "fallback", pp.Fallback)
+	markPurgePhaseUnsupported(obs)
+	return ensureOverlayAttr(ctx, conn, host, sr.Entries[0].DN, attrOlcAccessLogPurge,
+		live, pp.Fallback)
 }
 
 // moduleBaseName normalises one olcModuleLoad value to a bare module name:

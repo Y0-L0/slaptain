@@ -198,6 +198,48 @@ nowhere near the arm where the write target did not purge (ADR-037, third
 amendment). What the stagger buys is a pod that is *not* purging for the write
 endpoint to sit on — a prerequisite, not the benefit.
 
+#### The write endpoint
+
+Turning the rotation on publishes a second client Service, `<cluster>-write`,
+selecting exactly one read-write pod: the one whose purge is furthest away. It moves
+at every slot boundary, in lockstep with the grid, so the pod taking writes is never
+the pod purging. It answers on the same ports as `<cluster>` and honours
+`spec.service.type`, so a client that dials `<cluster>:389` today writes to
+`<cluster>-write:389` instead and changes nothing else.
+
+**Send writes there and no purge runs where your writes land.** Reads stay on
+`<cluster>` (or `<cluster>-readonly`): spreading them is the point of having
+providers. Writes sent anywhere else remain perfectly legal — every pod is a
+provider and accepts a write — they just cost you the stall the rotation exists to
+remove. The endpoint is a recommendation, not an enforcement.
+
+**It benefits clients that open short-lived connections.** A Kubernetes Service
+steers *new* connections; it does not re-wire an established one, so a client holding
+one connection keeps writing to the pod it first reached, however often the endpoint
+moves. A connection-pooling client therefore needs a maximum connection lifetime that
+is short relative to `slotLength` — the shorter the ratio, the larger the share of
+writes that lands on the current target. We have not measured where that ratio stops
+paying, so no number is given here; ADR-037 declines to fix numbers it has not
+measured, and so does this guide. A client that holds connections for hours gets
+nothing from the rotation, and no operator-side setting can change that.
+
+The current writer and the next rotation are published on the SlapdCluster as
+`WriteEndpointRotating`:
+
+| Reason | What it means |
+|---|---|
+| `WriterSelected` | the message names the pod the endpoint selects and the instant it moves next |
+| `NoEligibleWriter` | no pod could be chosen this pass — none Ready, or readiness could not be read at all. The selector is left exactly where it was and writes keep going there, because a Service selecting nothing is a total write outage. Nothing was repointed, and the message says so |
+
+Observation only: it gates nothing and withholds nothing.
+
+**Turning the rotation off** leaves `<cluster>-write` in place and widens it to the
+whole read-write fleet, so a client still following it keeps writing. It is not
+deleted — clients were told to follow that name — and it is not left pinned to one
+pod, because with the rotation off nothing phases that pod's purge any more and every
+write would land on a provider that purges. A cluster that never rotated never grows
+the Service at all.
+
 The API server checks only that `slotLength` parses as a Go duration. Everything
 else is the operator's, and each is published on the SlapdCluster as
 `RotationConfigured` — reported, never refused, so a schedule you cannot honour

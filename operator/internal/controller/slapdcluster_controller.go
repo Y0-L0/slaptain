@@ -273,6 +273,25 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, fmt.Errorf("reconcileClusterIPService: %w", err)
 	}
 
+	// 4a. Publish the per-database directory lists the init container reads.
+	//     A ConfigMap rather than pod-template env: the StatefulSet must not
+	//     roll when a database is added or removed (ADR-013 amendment,
+	//     2026-09-28). Written before the StatefulSet so a pod that starts as
+	//     a result of this pass already finds the current list.
+	if err := r.reconcileDatabaseDirsConfigMap(ctx, sc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcileDatabaseDirsConfigMap: %w", err)
+	}
+
+	// 4b. Publish the startup-only cn=config table the init container's offline
+	//     converger applies (ADR-034 R1). Same shape and same reason as 4a — a
+	//     ConfigMap referenced by name, so a spec edit does not roll the fleet —
+	//     and likewise before the StatefulSet, so a pod this pass creates
+	//     already reads the current table. The operator's involvement ends
+	//     here: it never writes one of these attributes to a running slapd.
+	if err := r.reconcileStartupConfigMap(ctx, sc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcileStartupConfigMap: %w", err)
+	}
+
 	// 4c. The rotating write endpoint (ADR-037 decision 2, PURGE-ROTATION-PLAN
 	//     Phase 4). <name>-write selects exactly ONE read-write pod — the one
 	//     whose purge is furthest away — and moves at every slot boundary, so
@@ -293,25 +312,6 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	rotationRequeue, err := r.reconcileWriteService(ctx, sc, rotation, now)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileWriteService: %w", err)
-	}
-
-	// 4a. Publish the per-database directory lists the init container reads.
-	//     A ConfigMap rather than pod-template env: the StatefulSet must not
-	//     roll when a database is added or removed (ADR-013 amendment,
-	//     2026-09-28). Written before the StatefulSet so a pod that starts as
-	//     a result of this pass already finds the current list.
-	if err := r.reconcileDatabaseDirsConfigMap(ctx, sc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcileDatabaseDirsConfigMap: %w", err)
-	}
-
-	// 4b. Publish the startup-only cn=config table the init container's offline
-	//     converger applies (ADR-034 R1). Same shape and same reason as 4a — a
-	//     ConfigMap referenced by name, so a spec edit does not roll the fleet —
-	//     and likewise before the StatefulSet, so a pod this pass creates
-	//     already reads the current table. The operator's involvement ends
-	//     here: it never writes one of these attributes to a running slapd.
-	if err := r.reconcileStartupConfigMap(ctx, sc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcileStartupConfigMap: %w", err)
 	}
 
 	// 5. Reconcile StatefulSet — unless the certificate gate is holding it.

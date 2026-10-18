@@ -204,6 +204,48 @@ Phase 4's, which is why the grid still needs no clock anywhere.
 **Done when** an e2e shows the Service selector following the grid, and the pod
 it names is never the pod whose phase is current.
 
+**Landed 2026-10-18.** `<cluster>-write` selects one pod by
+`statefulset.kubernetes.io/pod-name` and moves at every slot boundary. Five
+specs green on a single-site lab cluster (`E2E_LABEL_FILTER=write-rotation`),
+red first against the Phase 3 operator — 5/5 failing on `services "slapd-write" not found`.
+
+Three things worth carrying forward.
+
+*The requeue was the trap.* The controller's steady-state `RequeueAfter` is
+gated on `spec.replication.enabled`; a Running cluster without replication
+returns a bare `ctrl.Result{}` and nothing schedules another pass. A rotation
+requeue returned from inside that branch rotates replicated clusters and
+silently never rotates the others. It is merged at the end of the pass instead
+(`requeueAfterFor`), and the mutation that puts it back in the branch was
+observed red.
+
+*Readiness is per pod now.* The operator had only `sts.Status.ReadyReplicas`,
+which is a count and names nobody. The rotation lists pods and reduces them with
+`readyOrdinals`; a pod that could not be read is absent from the map and absence
+is not readiness. Measured live: with `slotLength: 5s` and `slapd-1` deleted,
+the endpoint went `slapd-0 → slapd-2` across the slot `slapd-1` was due to take,
+and gave it back the second it went Ready again.
+
+*Rotation off retires the endpoint rather than deleting or freezing it.* The
+selector loses its pod-name entry and the Service becomes an alias of
+`<cluster>`. Deleting it would turn a configuration change into a write outage
+at every client that followed the advice; freezing it would pin every write to a
+pod whose purge nothing phases any more, which is the measured stall arriving at
+the moment the user believes they returned to the old behaviour. It is never
+*created* when rotation is off, so a cluster that never rotated stays
+byte-identical.
+
+**The precondition, confirmed rather than discovered.** A Kubernetes Service
+steers new connections and does not re-wire established ones. Measured through a
+NodePort mirror of the endpoint, reading the writing pod out of each entry's own
+`entryCSN` `#sid#`: with the endpoint moved `slapd-1 → slapd-2`, a fresh
+connection wrote with sid `003` (slapd-2) and the connection held across the move
+wrote with sid `002` (slapd-1). That is this document's own "Known risks" entry
+observed, not a new finding: the rotation is for short-lived connections by
+design, and a pooling client needs a maximum connection lifetime short relative
+to `slotLength`. Where that ratio stops paying is unmeasured and no number is
+invented for it.
+
 ## Out of scope, deliberately
 
 - **The read Service** (ADR-037's ROs-plus-writer design). It is a freshness

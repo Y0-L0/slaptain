@@ -780,6 +780,19 @@ reports `0` for "no evidence" goes quiet exactly when the thing it watches
 breaks. Alert on the *absence* of recent observation —
 `time() - slaptain_cluster_peer_last_checked_seconds` — not only on bad values.
 
+**`WriteEndpointRotating` is where the writes are, not whether they are
+healthy** (ADR-037). It rides the generic condition series, so it needs no
+kube-state-metrics configuration of its own, and it exists only on a cluster
+with `spec.rotation` on. True with reason `WriterSelected` means
+`<cluster>-write` names a pod and the message says which, and when it moves
+next. False with reason `NoEligibleWriter` means no pod could be chosen this
+pass — none Ready, or readiness could not be read at all — and the endpoint was
+deliberately left selecting whatever it already selected, so writes are still
+landing somewhere. That is worth a fuse: it is not an outage, but a cluster
+stuck there has stopped rotating, and the stall the rotation removes comes back
+the moment the frozen target's purge fires. Pair it with `Ready` and
+`PodsResponsive`, which say *why* nothing was eligible.
+
 **Two conditions are inverted.** `ReplicationModePeerWiringRequired` and
 `ReplicationModeDemoteWiringRequired` report True when a human still owes the
 cluster some wiring. A healthy peer-mode cluster has one True and one False, so

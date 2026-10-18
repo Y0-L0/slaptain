@@ -822,3 +822,208 @@ func TestWriteTargetAgreesWithThePhaseGrid(t *testing.T) {
 		}
 	}
 }
+
+// eligibleRecording wraps a predicate and records, in order, every ordinal
+// writeTarget asked about. The walk's ORDER is a decision in its own right
+// (ADR-037, tenth amendment: "preferred first, every offset exactly once"), and
+// a walk that reaches the right pod by luck is indistinguishable from a correct
+// one if only the answer is asserted.
+func eligibleRecording(inner func(int32) bool, seen *[]int32) func(int32) bool {
+	return func(o int32) bool {
+		*seen = append(*seen, o)
+		return inner(o)
+	}
+}
+
+// The repro ADR-037's tenth amendment was written for: the ninth amendment's
+// ascending walk `v, v+1, … n−1` has exactly ONE candidate whenever v sits at
+// the end of the range. At v = -1 — "write just before purging", one of the two
+// configurations this ADR exists to compare — a single ineligible pod therefore
+// drops the writes onto the PURGING pod while n−2 eligible pods stand
+// unexamined.
+//
+// The degenerate fallback exists for n = 2 with one pod down, where there
+// genuinely is no other candidate. Reaching it with candidates available is the
+// defect.
+func TestWriteTargetDoesNotFallToThePurgingPodWhileAnotherIsEligible(t *testing.T) {
+	cases := []struct {
+		name    string
+		n, v    int32
+		slot    int32
+		down    int32
+		want    int32
+		because string
+	}{
+		{
+			name: "v of -1 with the preferred pod down walks AWAY from the purge",
+			n:    4, v: -1, slot: 0, down: 3,
+			want:    2,
+			because: "offset 2 is still \"just before the purge\", one slot further out; offset 0 is the purging pod and three pods were never asked",
+		},
+		{
+			name: "n-1 spelled out has the same hole and the same fix",
+			n:    4, v: 3, slot: 0, down: 3,
+			want:    1,
+			because: "the bare form degrades ASCENDING — same selection as -1, opposite degradation, which is why ADR-037 recommends the signed spelling",
+		},
+		{
+			name: "a five-pod fleet at v of -1 keeps walking down, not onto the purge",
+			n:    5, v: -1, slot: 2, down: 1,
+			want:    0,
+			because: "ordinal 1 is offset 4; the next rung down is offset 3, ordinal 0 — the purging pod 2 is not a candidate while that exists",
+		},
+		{
+			name: "v of +2 at the top of a three-pod fleet wraps rather than giving up",
+			n:    3, v: 2, slot: 0, down: 2,
+			want:    1,
+			because: "stepping alone exhausts the range at |v| >= 2 (2, then nothing); the wrap offers offset 1 before the purging pod",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			eligible := func(o int32) bool { return o != tc.down }
+			got, ok := writeTarget(tc.slot, tc.n, tc.v, eligible)
+			if !ok {
+				t.Fatalf("writeTarget(%d, %d, %d, all but %d) found no writer — %s",
+					tc.slot, tc.n, tc.v, tc.down, tc.because)
+			}
+			if got == tc.slot {
+				t.Fatalf("writeTarget(%d, %d, %d, all but %d) = %d, the PURGING pod, while eligible pods went unexamined — %s",
+					tc.slot, tc.n, tc.v, tc.down, got, tc.because)
+			}
+			if got != tc.want {
+				t.Fatalf("writeTarget(%d, %d, %d, all but %d) = %d, want %d — %s",
+					tc.slot, tc.n, tc.v, tc.down, got, tc.want, tc.because)
+			}
+		})
+	}
+}
+
+// The order itself, pinned. ADR-037's tenth amendment tabulates it: candidates
+// are (v + k·sign(v)) mod n for increasing k, skipping ≡ 0, until all n−1
+// non-zero offsets have been offered — preferred first, each exactly once.
+//
+// The sign is read BEFORE the value is normalised mod n, so -1 and n−1 select
+// the same pod and degrade in opposite directions. That divergence is the
+// amendment's point and not an accident to flatten.
+func TestWriteTargetWalkOrder(t *testing.T) {
+	cases := []struct {
+		name    string
+		n, v    int32
+		want    []int32
+		because string
+	}{
+		{
+			name: "+1 degrades upward", n: 4, v: 1,
+			want:    []int32{1, 2, 3},
+			because: "the default: purge the slot after writing, then a little later",
+		},
+		{
+			name: "-1 degrades downward", n: 4, v: -1,
+			want:    []int32{3, 2, 1},
+			because: "\"just before the purge\" degrades to \"further before the purge\", never across it",
+		},
+		{
+			name: "+2 wraps after the top", n: 4, v: 2,
+			want:    []int32{2, 3, 1},
+			because: "stepping alone would stop at 3 and never offer 1, which is the same hole in a new place",
+		},
+		{
+			name: "-2 wraps after the bottom", n: 4, v: -2,
+			want:    []int32{2, 1, 3},
+			because: "the descending walk skips offset 0 and resumes at the top",
+		},
+		{
+			name: "n-1 is not -1: same first candidate, ascending degradation", n: 4, v: 3,
+			want:    []int32{3, 1, 2},
+			because: "the sign is read before the modulo, so the bare spelling degrades the other way",
+		},
+		{
+			name: "every non-zero offset exactly once on a wider fleet", n: 6, v: -1,
+			want:    []int32{5, 4, 3, 2, 1},
+			because: "the walk terminates having offered all n-1 non-zero offsets",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var seen []int32
+			// slot 0 makes the ordinal the offset, so the recorded sequence
+			// reads as the table does. Nothing is eligible, so the walk runs
+			// to exhaustion and the degenerate fallback asks about the purging
+			// pod last.
+			got, ok := writeTarget(0, tc.n, tc.v, eligibleRecording(eligibleNone(), &seen))
+			if ok {
+				t.Fatalf("writeTarget(0, %d, %d, nothing eligible) = %d, true — want no writer",
+					tc.n, tc.v, got)
+			}
+			wantSeen := append(append([]int32{}, tc.want...), 0)
+			if len(seen) != len(wantSeen) {
+				t.Fatalf("writeTarget(0, %d, %d) asked about %v, want %v (walk then the degenerate fallback) — %s",
+					tc.n, tc.v, seen, wantSeen, tc.because)
+			}
+			for i := range wantSeen {
+				if seen[i] != wantSeen[i] {
+					t.Fatalf("writeTarget(0, %d, %d) asked about %v, want %v — %s",
+						tc.n, tc.v, seen, wantSeen, tc.because)
+				}
+			}
+		})
+	}
+}
+
+// The strengthened property, over every fleet size, every slot and every legal
+// v of both signs: the writer is never the pod purging WHILE ANY OTHER POD IS
+// ELIGIBLE. The previous form asserted only "not the purging pod on a fully
+// healthy fleet", which the ninth amendment's walk satisfied while still
+// handing writes to the purging pod the moment one preferred pod went away.
+//
+// Three eligibility shapes per (n, slot, v) bound it from the tight end: a
+// single other pod, that pod plus the purging one, and everything except one
+// other pod.
+func TestWriteTargetPrefersAnyEligiblePodOverThePurgingOne(t *testing.T) {
+	for n := int32(2); n <= 15; n++ {
+		for slot := int32(0); slot < n; slot++ {
+			for v := -2*n + 1; v <= 2*n; v++ {
+				if v%n == 0 {
+					// Refused by the gate with a condition; writeTarget's
+					// defensive floor reads it as 1, which is covered above.
+					continue
+				}
+				for q := int32(0); q < n; q++ {
+					if q == slot {
+						continue
+					}
+					// Only one other pod is up: it must be chosen.
+					if got, ok := writeTarget(slot, n, v, eligibleSet(q)); !ok || got != q {
+						t.Fatalf("writeTarget(%d, %d, %d, only %d eligible) = %d, %v; want %d, true — "+
+							"the walk must offer every non-zero offset before the purging pod",
+							slot, n, v, q, got, ok, q)
+					}
+					// That pod and the purging pod are up: still that pod.
+					if got, ok := writeTarget(slot, n, v, eligibleSet(q, slot)); !ok || got != q {
+						t.Fatalf("writeTarget(%d, %d, %d, %d and the purging pod eligible) = %d, %v; want %d, true — "+
+							"the degenerate fallback is for when NOTHING else is left",
+							slot, n, v, q, got, ok, q)
+					}
+					// Everything but that pod is up: anything except the purge.
+					all := make([]int32, 0, n-1)
+					for o := int32(0); o < n; o++ {
+						if o != q {
+							all = append(all, o)
+						}
+					}
+					got, ok := writeTarget(slot, n, v, eligibleSet(all...))
+					if !ok {
+						t.Fatalf("writeTarget(%d, %d, %d, all but %d) found no writer", slot, n, v, q)
+					}
+					if got == slot && n > 2 {
+						t.Fatalf("writeTarget(%d, %d, %d, all but %d) = %d, the purging pod, with %d others eligible",
+							slot, n, v, q, got, n-2)
+					}
+				}
+			}
+		}
+	}
+}

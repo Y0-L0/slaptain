@@ -90,7 +90,7 @@ value is rewritten at every pod start, so the way back is a restart.
 | `spec.replication.syncprovSessionlog` | 5000 | converged |
 | `spec.replication.syncprovSessionlogSource` | `InMemory` | **startup-only** |
 | `spec.replication.syncprovCheckpoint` | none | converged |
-| `spec.replication.accesslogPurge` | `7+00:00 1+00:00` | converged |
+| `spec.replication.accesslogPurge` | `7+00:00 1+00:00` | converged (age only under cluster rotation) |
 
 `spec.maxSize` takes a Kubernetes quantity (`32Gi`) or a bare byte count; the
 operator converts. A value it cannot parse is an error, not a fallback.
@@ -101,6 +101,16 @@ attribute. Both were verified live-modifiable on a running slapd before being
 converged at all — replace and delete, no crash, no hang — which is the precondition
 ADR-024 now puts on this class. (They used to be written only at overlay creation,
 so edits were silently ignored; that debt is paid.)
+
+`accesslogPurge` has one caveat, and it is about who owns the *schedule*. With the
+cluster's purge rotation on (`SlapdCluster.spec.rotation.enabled`, ADR-037) the
+interval and each pod's purge phase are derived from the cluster — interval
+`spec.replicas × spec.rotation.slotLength`, phase `ordinal × slotLength` — so what
+this field still carries is the retention **age**. An age alone is honoured, `"none"`
+still opts out, and a value carrying an interval is **refused with a condition**
+naming the database rather than quietly overridden: a field that cannot be honoured
+is rejected or converged, never ignored (ADR-024). With rotation off — the default —
+nothing changes, and a two-field value is the normal thing to write.
 
 `spec.replication.syncprovSessionlogSource` chooses *where* the data database's
 syncprov session log lives. `InMemory` (the default, and what an unset field means)
@@ -299,6 +309,12 @@ costs a consumer a full refresh rather than data.
 `spec.replication.accesslogPurge` defaults to `"7+00:00 1+00:00"` — keep seven days of
 journal, sweep once a day. Unset gets that default; the explicit sentinel `"none"`
 opts out of purging entirely; any other value is used verbatim.
+
+Under the cluster's purge rotation (`spec.rotation.enabled`, ADR-037) the sweep half
+of that value belongs to the cluster, not to this database: the interval is
+`replicas × slotLength` and each pod sweeps at its own phase, so this field carries
+the age alone and an interval in it is refused rather than overridden. The sizing
+arithmetic below is unchanged — only who writes the interval moves.
 
 There is a default because "no opinion" is not a neutral setting here. An unpurged
 journal grows until it reaches its 8Gi map ceiling, and the accesslog overlay sits in

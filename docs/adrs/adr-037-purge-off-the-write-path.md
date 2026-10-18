@@ -762,3 +762,89 @@ Either way it does not touch the client-visible conclusion above.
 
 Every arm is the 2+2 shape. There is no three-provider data, so the `d = n−2`
 cooldown question stays unknown rather than answered badly.
+
+## Amendment, 2026-10-18 (fourth): the API, and what admission cannot check
+
+The second amendment specified the grid and left its expression open. This
+records the shape the operator actually exposes, and one finding about
+Kubernetes validation that changed the design while it was being built.
+
+### The block
+
+`SlapdCluster.spec.rotation`, three fields:
+
+- `enabled` (`*bool`, unset means off). Decision 6 leaves "defaults on or off"
+  open; opt-in is what makes an operator upgrade a no-op for a cluster that
+  said nothing. A pointer for the reason `spec.logLevel` is one — with
+  `omitempty` an explicit `false` serialises to nothing, and "turned it off"
+  would be indistinguishable from "said nothing" the day the default moves.
+- `slotLength` (`*metav1.Duration`), the `t` of the grid. **Required when
+  enabled, with no default.** This ADR fixes no number for `t` on purpose: its
+  only guidance is an expectation about deployments, not a value the operator
+  may impose. A default here would be a schedule every silent cluster had
+  accepted without choosing, and moving it later would re-phase every fleet
+  that had.
+- `writerOffset` (`*int32`), the `d` of "Where the writer sits". **Defaults to
+  `n−1`**, which this ADR already names the preferred end and the one being
+  measured first, and clamps to `[1, n−1]`.
+
+The interval is derived, never declared: `T = spec.replicas × t`. Nothing in
+the block restates `n`.
+
+### `metav1.Duration` buys less than it looks like it buys
+
+It was chosen for API-server-side parse validation. **It does not provide
+any.** controller-gen renders `metav1.Duration` as a bare `type: string` — no
+format, no pattern — and **silently drops field-level validation markers on
+it**: the identical `+kubebuilder:validation:Pattern` renders on a `*string`
+and vanishes on a `*metav1.Duration`. Measured by experiment, not inferred.
+Left alone, `slotLength: banana` is admitted and fails much later as a
+typed-client decode error, at a distance from the thing that caused it.
+
+The recovery is a struct-level `XValidation` CEL rule carrying the duration
+grammar, which is the pattern already used on `SlapdClusterSpec`. It compiles
+— envtest installs these CRDs and a kube-apiserver refuses a CRD whose CEL
+does not compile or exceeds its cost budget.
+
+It is also a pointer. `metav1.Duration` is a struct, so `omitempty` does not
+apply to it: by value, an unset field serialises as `"0s"`, which both claims
+a slot length nobody chose and destroys the unset-versus-zero distinction that
+"required when enabled" rests on. Found by a test going red, not by reading.
+
+### What admission checks is the grammar, and only the grammar
+
+The rule says the string parses as a Go duration. It does not say the duration
+is usable, and `"0s"` satisfies it. The message is worded to claim no more
+than that — it originally said "positive", which the rule does not check.
+
+That wording is not a nicety. With `t = 0` every pod's phase `k·t` is zero, so
+the whole fleet purges at the same instant: precisely the synchronised purge
+this ADR exists to remove, arriving silently behind a value the API server had
+just pronounced valid. A rule that promises more than it checks is the failure
+this ADR names in its own closing argument — a record of an intention is not a
+record of a state.
+
+So the following are the **operator's** to enforce, each reported as a
+condition rather than refused at admission:
+
+1. `slotLength <= 0`.
+2. A `slotLength` whose derived interval or phase is not a whole number of
+   seconds. `olcAccessLogPurge` is `[ddd+]hh:mm[:ss]`; `500ms` passes
+   admission and cannot be written.
+3. `writerOffset > n−1`. The upper bound depends on `spec.replicas`, which a
+   marker cannot see; only `minimum: 1` is expressible.
+4. `slotLength` absent while `enabled` is true. Deliberately not a CEL rule:
+   the operator has to handle an older CRD anyway, and a named condition is a
+   better message than a refused apply.
+
+The capacity condition and `T ≥ P + D` stay unpoliced, per decision 6.
+
+### The per-database field
+
+`SlapdDatabase.spec.replication.accesslogPurge` keeps its three states
+unchanged while rotation is off. With rotation on it contributes the **age**
+only, and an interval in it is refused with a condition rather than silently
+overridden — ADR-024's rule that a field which cannot be honoured is rejected
+or converged, never ignored. No admission marker enforces this, because the
+two-field form must stay legal for every cluster not using rotation; all five
+shipped samples carry one.

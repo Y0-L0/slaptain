@@ -883,6 +883,12 @@ type SlapdClusterSpec struct {
 	// Prometheus metrics. Unset adds nothing to the pod.
 	// +optional
 	Monitoring SlapdMonitoringConfig `json:"monitoring,omitempty"`
+	// rotation configures the purge/write rotation of ADR-037: each pod purges
+	// its accesslogs at its own phase on an absolute time grid, and the write
+	// endpoint moves in lockstep so the pod taking writes is never the pod
+	// purging. Unset changes nothing — see SlapdRotationConfig.
+	// +optional
+	Rotation SlapdRotationConfig `json:"rotation,omitempty"`
 }
 
 // SlapdMonitoringConfig configures the slapd exporter sidecar (ADR-033 Surface 3).
@@ -912,6 +918,186 @@ type SlapdMonitoringConfig struct {
 	// which belongs to the slapd container.
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
+// SlapdRotationConfig configures the purge/write rotation (ADR-037).
+//
+// The problem it solves: accesslog_purge() deletes expired journal entries in
+// an unpaced loop holding the accesslog environment's single LMDB writer, and
+// every client write appends to that same environment. A provider's purge
+// therefore blocks that provider's WRITES while reads keep flowing — measured
+// at a 30 s write stall per cycle on the pod taking writes, and at zero on a
+// pod that is not. Scheduling cannot fix it: the duty cycle is
+// write rate / delete rate and the purge interval does not appear in it. The
+// only lever is moving the purge off the write path.
+//
+// THE GRID. With n read-write pods and a slot length t, the rotation period is
+// T = n·t and pod k purges at phase k·t, counted from the epoch; the write
+// endpoint moves every t, in lockstep. T is the interval the operator writes
+// into every pod's olcAccessLogPurge, and k·t is that pod's phase — a third
+// value in the attribute (<age> <interval> <phase>), anchored on the epoch so
+// that nothing drifts and a restarted pod rejoins its own slot.
+//
+// That third value is OURS: it comes from a local patch to the accesslog
+// overlay, not from upstream, so it needs an image carrying it. A stock slapd
+// rejects the three-field value outright ("extra cruft after <age> <interval>"),
+// which the operator reports as a condition naming the pod rather than looping
+// on it (ADR-037 first amendment).
+//
+// n IS spec.replicas — DECLARED, NEVER OBSERVED. This is deliberate and it is
+// not a bug to fix. n fixes T, and T is persisted into every pod's cn=config:
+// deriving n from readiness would rewrite the whole fleet's configuration on a
+// single transient restart, which is the churn ADR-013 exists to prevent.
+// Readiness belongs in writer SELECTION, which persists nothing.
+//
+// t IS FIXED AND T = n·t VARIES, not the reverse. Scaling then leaves every
+// existing pod's phase where it was and gives the new pod phase n·t; only the
+// interval moves, and changing an interval does not move a phase. Holding T
+// fixed and recomputing t = T/n would re-phase the entire fleet on every scale
+// event.
+//
+// WHERE THE AGE LIVES. olcAccessLogPurge has two owners under rotation: the
+// retention age stays per-database on SlapdDatabase.spec.replication.
+// accesslogPurge, while the interval and the phase are a schedule over pods and
+// live here. The operator composes the per-(pod, database) value from both. An
+// INTERVAL in the per-database field is then refused with a condition rather
+// than silently overridden, per ADR-024's rule that a field which cannot be
+// honoured is rejected and never ignored.
+//
+// Databases ALIGN, they do not spread: a pod purges all of its accesslogs at
+// its own phase, concentrating its disturbance into the one window where it is
+// not taking writes. Spreading them over n·D slots would disturb every pod
+// throughout the period and defeat the purpose.
+//
+// WHAT IS NOT PROVEN. The rotation itself has never been measured — both arms
+// of ADR-037's table pinned writes to one pod and varied only which pod purged.
+// A Service selector change does not move established connections, so a client
+// that pools them may keep writing to the former target; the scheme needs the
+// bulk of writes to follow, not all of them.
+//
+// The rule below carries slotLength's GRAMMAR check, which cannot live on the
+// field itself (see SlotLength). It accepts Go's unsigned duration syntax and
+// nothing else, so an unparseable or negative value is refused at admission
+// instead of becoming a decode error much later. It says nothing about the
+// value being usable — "0s" matches it — and its message is worded to claim no
+// more than it checks.
+// +kubebuilder:validation:XValidation:rule="!has(self.slotLength) || self.slotLength.matches('^([0-9]+([.][0-9]+)?(ns|us|µs|ms|s|m|h))+$')",message="rotation.slotLength must be a Go duration such as 6h, 90m or 12h30m"
+type SlapdRotationConfig struct {
+	// enabled turns the rotation on: per-pod purge phases plus a write endpoint
+	// that moves with them.
+	//
+	// Opt-in: unset means false. ADR-037 decision 6 leaves "defaults on or off"
+	// open, and opt-in is what makes an operator upgrade a no-op for every
+	// existing cluster — nothing about an installed cluster's purge schedule or
+	// its endpoints changes until somebody sets this field.
+	//
+	// A pointer rather than a plain bool for the same reason spec.logLevel is
+	// one: with omitempty an explicit `enabled: false` serialises to nothing,
+	// and "the user turned it off" would then be indistinguishable from "the
+	// user said nothing" — which matters the day the default moves.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+	// slotLength is t, the time each pod spends as the write target, and the
+	// spacing between neighbouring pods' purge phases. The resulting purge
+	// interval written to every pod is T = spec.replicas × t.
+	//
+	// REQUIRED when enabled is true, and there is NO DEFAULT. ADR-037 fixes no
+	// number for t on purpose: its only guidance is an expectation about
+	// deployments — OpenLDAP's own default purges roughly daily, and "a
+	// production-shaped deployment is likelier to sit at 6 or 12 hours" — which
+	// is not a value the operator may invent. A default here would be a schedule
+	// imposed on every cluster that said nothing, and changing it later would
+	// re-phase every fleet that had accepted it.
+	//
+	// Sizing is yours (ADR-037 decision 6): the operator will not refuse a
+	// rotation whose phases are too long for your write rate, and it will not
+	// shorten one to keep a purge small. The arithmetic is the capacity
+	// condition write rate ≤ delete rate × (n−1)/n against your own storage —
+	// every provider logs every write, including the ones it receives by
+	// syncrepl, while only the inactive ones purge. The hazard is measured:
+	// draining ~250,000 entries in one cycle restarted both providers and cost
+	// 255 s of replication lag.
+	//
+	// Set it no shorter than you can afford a purge to take: a purge still
+	// running when its next fire comes due makes the daemon skip that cycle, so
+	// the pod whose purge ran long is also the pod whose phase has moved. The
+	// bound at this end is d·t ≥ P — see writerOffset.
+	//
+	// The operator derives the whole schedule from this one value — interval
+	// T = spec.replicas × t, phase ordinal × t — so there is no second number to
+	// keep consistent with it, and no interval of yours for slapd to fire on
+	// part-way through a phase (ADR-037's second amendment moves the interval off
+	// SlapdDatabase for exactly that reason).
+	//
+	// WHAT ADMISSION CHECKS IS THE GRAMMAR, AND ONLY THE GRAMMAR. The CEL rule
+	// on this struct says the string parses as a Go duration; it does not say
+	// the duration is usable, and "0s" satisfies it. A zero or negative slot
+	// length, and one finer than a whole second, are rejected by the OPERATOR
+	// with a condition naming this cluster, not by the API server.
+	//
+	// Why that matters rather than being a technicality: with t = 0 every pod's
+	// phase k·t is zero, so the whole fleet purges at the same instant — which
+	// is precisely the synchronised purge this feature exists to remove, and it
+	// would arrive silently, behind a value the API server had just pronounced
+	// valid. A rule that promises more than it checks is the failure ADR-037
+	// names in its own closing argument: a record of an intention is not a
+	// record of a state.
+	//
+	// One limit the API cannot express: olcAccessLogPurge's fields are
+	// [ddd+]hh:mm[:ss], whole seconds, so a slot length that does not land on a
+	// whole number of seconds — or whose derived interval or phase does not —
+	// has no representation on the server. The admission rule accepts Go's full
+	// duration grammar, including "500ms"; refusing what cannot be written is
+	// the operator's job, not the API server's.
+	//
+	// A Go duration string: "6h", "90m", "12h30m". A POINTER because
+	// metav1.Duration is a struct and omitempty does not apply to one — the
+	// value form would serialise an unset field as "0s", claiming a slot length
+	// nobody chose and erasing the distinction between "not set" and "set to
+	// zero" that "required when enabled, no default" rests on.
+	//
+	// The shape is checked by the CEL rule on this struct rather than by a
+	// Pattern marker here, and that is forced rather than chosen: controller-gen
+	// renders metav1.Duration as a bare `type: string` and DROPS field-level
+	// validation markers on it (verified against controller-gen v0.20.0 — the
+	// same Pattern marker renders on a *string field and vanishes on this one).
+	// Without some rule `slotLength: banana` is admitted and the error surfaces
+	// later as a decode failure in whatever typed client reads the object — a
+	// rejection in an operator log instead of in the reply to the apply that
+	// caused it.
+	// +optional
+	SlotLength *metav1.Duration `json:"slotLength,omitempty"`
+	// writerOffset is d, the number of slots between a pod's own purge and the
+	// slot in which it is the write target. Unset means the operator's default
+	// of n−1 (n = spec.replicas): the writer is the pod that purges NEXT, having
+	// had the longest time to work off its purge backlog and its replication
+	// lag. ADR-037's second amendment calls that "the preferred end and the one
+	// being measured first".
+	//
+	// Valid range is [1, n−1]. d = 0 would make the write target the pod purging
+	// this slot, which is the whole thing the rotation avoids; the upper bound
+	// depends on spec.replicas and so cannot be expressed as a CRD marker — the
+	// operator clamps it and reports what it did.
+	//
+	// Why a tunable rather than a fixed choice: ADR-037 bounds d at both ends
+	// and can evaluate only one of them. A pod must have finished purging before
+	// it writes (d·t ≥ P, for purge duration P, which is computable as
+	// T × write rate / delete rate) and writes must have drained before it
+	// purges again ((n−d)·t ≥ D, for drain time D). D HAS NO MEASURED VALUE AT
+	// ALL, so the sizing rule T ≥ P + D can only be half-evaluated today and d
+	// stays a parameter with a measured range rather than a decided number.
+	//
+	// What d costs: the capacity condition above assumes the purge may use the
+	// entire non-writing window, which is exactly d = n−1. At d = 1 it tightens
+	// to write rate ≤ delete rate × 1/n, so the setting that looks more cautious
+	// roughly halves the write ceiling at n = 2. The known cost of d = n−1 is
+	// that the writer purges immediately after its slot ends, carrying its
+	// freshest local writes with syncprov actively serving them; d = n−2 buys a
+	// cooldown slot, exists only for n ≥ 3, and nobody has measured whether it
+	// matters.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	WriterOffset *int32 `json:"writerOffset,omitempty"`
 }
 
 // ExternalPeerReplicationState summarises the replication health of one external peer.

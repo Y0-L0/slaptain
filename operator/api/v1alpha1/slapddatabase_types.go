@@ -228,7 +228,8 @@ type DatabaseReplicationConfig struct {
 	// Format: "<maxage> <interval>", e.g. "2+00:00 1+00:00" means purge entries
 	// older than 2 days, sweeping once a day.
 	//
-	// Three states:
+	// Three states, with cluster rotation off (see below for what changes when
+	// it is on):
 	//   - unset ("") — the operator applies its default of "7+00:00 1+00:00":
 	//     keep 7 days, sweep daily. This is the normal case.
 	//   - "none" — no purging at all. The journal grows unbounded; you are
@@ -247,6 +248,32 @@ type DatabaseReplicationConfig struct {
 	// and a dormant consumer (upstream ITS#9580) is mitigated by the cookie-flush
 	// fix; clusters still on the -ol26 image pair carry elevated exposure and
 	// should treat a long consumer outage as needing a checked resync.
+	//
+	// WITH CLUSTER ROTATION ON (SlapdCluster.spec.rotation.enabled) THIS FIELD
+	// CARRIES THE AGE ONLY. Rotation makes the schedule a property of the
+	// cluster, not of a database: the interval is T = replicas × slotLength and
+	// each pod's purge phase is its own, so there is nothing per-database left
+	// to decide but how long to keep the entries (ADR-037, second amendment —
+	// "<age> is a per-database retention policy and stays on SlapdDatabase;
+	// <interval> and <phase> are a schedule over pods and move to the cluster").
+	// Databases then cannot disagree about a schedule they no longer own, and
+	// the operator needs no cross-resource validation to keep them consistent.
+	//
+	// So, with rotation on:
+	//   - unset ("") — the operator's default age, 7 days.
+	//   - "none" — still opts out entirely. No purging on this journal; the
+	//     rotation simply has nothing to do for it.
+	//   - an age alone, e.g. "2+00:00" — honoured.
+	//   - a value carrying an INTERVAL, e.g. "2+00:00 1+00:00" — REFUSED, with
+	//     a condition naming this database. It is not silently overridden by
+	//     the cluster's schedule: a field that cannot be honoured is rejected
+	//     or converged, never ignored (ADR-024). You get told which value the
+	//     operator could not keep, rather than discovering months later that
+	//     the interval you set has never been in force.
+	//
+	// Rotation off — the default, and what every existing deployment has — is
+	// unchanged in every respect, including that a two-field value is the
+	// normal thing to write.
 	//
 	// Converged on every reconcile: a later edit is applied to pods whose
 	// accesslog overlay already exists, and "none" removes the attribute.

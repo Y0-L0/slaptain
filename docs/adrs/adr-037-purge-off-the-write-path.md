@@ -915,3 +915,74 @@ for, now a property of the scheduler rather than of a re-assertion loop.
 
 What this does not show is multi-pod behaviour, which needs a cluster and
 belongs to the milestones that write the attribute and move the endpoint.
+
+## Amendment, 2026-10-18 (sixth): what the first live run changed
+
+The per-pod phase converges. Three things the design did not anticipate came
+out of running it against a real slapd rather than a test double, and all
+three are the same shape: "attempt, then report" was specified as though the
+attribute fails on its own, and it does not.
+
+### A stock slapd takes the whole overlay down, not just the attribute
+
+The phase is refused at config-parse time, and the refusal takes the entire
+`olcOverlay=accesslog` ADD with it. So on an unpatched image the failure is
+not "a pod without its phase" — it is **a data database with no accesslog
+overlay at all**, which stops producing deltas for every consumer of it.
+
+The ADD path therefore retries with the two-field value, exactly as the
+convergence path does. This is not an optimisation and not defensive
+programming; without it the degraded mode is worse than the feature's absence.
+
+### There is nothing to "leave in place" on a fresh cluster
+
+The plan said that on rejection the operator leaves the two-field value alone.
+That assumes a value exists. On a cluster that never had one, writing nothing
+leaves the journal unpurged — the slow-motion outage `defaultAccesslogPurge`
+exists to prevent. So the fallback is **written**, not merely left, and the
+condition reports the phase that was lost.
+
+### A declared interval withholds; it does not degrade
+
+ADR-024 R4 says a field that cannot be honoured is rejected rather than
+ignored. Implemented as a **withhold**, in the shape ADR-027 and ADR-031
+already use: when a `SlapdDatabase` declares an interval while cluster
+rotation owns the schedule, the operator writes nothing to any pod and says
+so. The pods keep what they have. Degrading to a partial write would leave
+the fleet in a state neither the user nor the operator asked for.
+
+A defect found mid-transition and fixed: the withheld condition was appending
+the pods it had not assessed, which reads as "these pods were unreachable"
+when the truth is that the operator deliberately wrote to none of them. A
+withhold must not describe itself in the vocabulary of a failure.
+
+### Where the conditions live
+
+`RotationConfigured` on **SlapdCluster**: all four checks the fourth amendment
+hands the controller are properties of `spec.rotation`, which lives there. It
+reports and never refuses — a schedule that cannot be honoured leaves the
+cluster behaving exactly as it did before the feature existed.
+
+`AccesslogPurgeConverged` on **SlapdDatabase**: `olcAccessLogPurge` is an
+attribute of one database's overlay on one pod, and both failure modes are
+per-database facts.
+
+The SlapdDatabase controller re-derives the grid from the `SlapdCluster` CR
+rather than reading a status field the cluster controller wrote. No new
+persistent state, and the two controllers cannot come to disagree about the
+grid — which matters because they run on different resync clocks and the grid
+is absolute precisely so that does not need coordinating.
+
+### Still true, and worth repeating
+
+This changes no client-visible number. The third amendment measured that and
+it has not stopped being true: a staggered fleet whose writes still land
+wherever the client chose measures like an unstaggered one. The write endpoint
+is the deliverable.
+
+Two paths remain unexercised end to end. `PurgePhaseUnsupported` has never
+been produced by a running pod — reaching it needs a 2.6 image, and the LMDB
+1.0 break makes that destructive on a 2.7 volume — so the rejection string is
+verified against the real binary and the branch is unit-tested, which is not
+the same as having seen it. And this is a `cn=config` change on the
+replication path validated on one site: **multi-site is unvalidated.**

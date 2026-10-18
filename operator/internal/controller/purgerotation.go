@@ -16,7 +16,15 @@ limitations under the License.
 
 package controller
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
+
+// secondsPerDay is where formatLogAge stops filling the hours field and starts
+// the "ddd+" prefix slapd's log_age_parse expects.
+const secondsPerDay = 24 * 60 * 60
 
 // The purge rotation grid (ADR-037, second amendment "the rotation,
 // specified"). With n read-write pods and a slot length t, the period is
@@ -42,8 +50,8 @@ import "time"
 //     moves, and changing an interval does not move a phase. Holding T fixed and
 //     recomputing t = T/n would re-phase the entire fleet on every scale event.
 //
-// The five functions below are STUBS returning their zero value. The contract is
-// the doc comment plus purgerotation_test.go, which is red against them.
+// The contract of each of the five functions below is its doc comment plus
+// purgerotation_test.go, which was authored and observed red against them.
 
 // formatLogAge renders d in the time format slapd's log_age_parse accepts:
 // "hh:mm:ss", or "ddd+hh:mm:ss" once d reaches a day.
@@ -64,7 +72,18 @@ import "time"
 //     configuration for that pod; "00:00:00" is the conservative defined answer,
 //     and as an interval it is refused loudly by the server rather than silently.
 func formatLogAge(d time.Duration) string {
-	return "" // not implemented
+	if d < 0 {
+		d = 0
+	}
+
+	secs := int64(d / time.Second)
+	days, rest := secs/secondsPerDay, secs%secondsPerDay
+	hh, mm, ss := rest/3600, rest%3600/60, rest%60
+
+	if days > 0 {
+		return fmt.Sprintf("%d+%02d:%02d:%02d", days, hh, mm, ss)
+	}
+	return fmt.Sprintf("%02d:%02d:%02d", hh, mm, ss)
 }
 
 // purgePhase returns the offset into the period at which pod `ordinal` purges:
@@ -99,7 +118,12 @@ func formatLogAge(d time.Duration) string {
 //   - a negative ordinal reads as pod 0.
 //   - n <= 0 or t <= 0 means there is no grid: the phase is zero.
 func purgePhase(ordinal, n int32, t time.Duration) time.Duration {
-	return 0 // not implemented
+	if n <= 0 || t <= 0 || ordinal <= 0 {
+		return 0
+	}
+	// Deliberately unwrapped: an ordinal at or beyond n yields a phase slapd
+	// refuses, which is the loud failure the doc comment above argues for.
+	return time.Duration(ordinal) * t
 }
 
 // rotationSlot returns the ordinal whose purge is current at `now`:
@@ -126,7 +150,20 @@ func purgePhase(ordinal, n int32, t time.Duration) time.Duration {
 //   - the result is always in [0, n), never negative.
 //   - n <= 0, or a slot length below one second, means there is no grid: slot 0.
 func rotationSlot(now time.Time, t time.Duration, n int32) int32 {
-	return 0 // not implemented
+	step := int64(t / time.Second)
+	if n <= 0 || step <= 0 {
+		return 0
+	}
+
+	// Floor division, not Go's truncation, so the grid stays continuous
+	// across the epoch.
+	sec := now.Unix()
+	slots := sec / step
+	if sec < 0 && sec%step != 0 {
+		slots--
+	}
+
+	return int32((slots%int64(n) + int64(n)) % int64(n))
 }
 
 // composePurge builds the olcAccessLogPurge value: "<age> <interval> <phase>".
@@ -154,7 +191,11 @@ func rotationSlot(now time.Time, t time.Duration, n int32) int32 {
 //     result is "" as well. Emitting an age alone would be a two-field value
 //     slapd refuses, and inventing an interval here would hide the misconfiguration.
 func composePurge(age string, interval, phase time.Duration) string {
-	return "" // not implemented
+	age = strings.TrimSpace(age)
+	if age == "" || interval <= 0 {
+		return ""
+	}
+	return age + " " + formatLogAge(interval) + " " + formatLogAge(phase)
 }
 
 // writeTarget picks the pod the write Service should select during slot `slot`.
@@ -184,5 +225,23 @@ func composePurge(age string, interval, phase time.Duration) string {
 // both purger and writer, reached through the degenerate fallback. n <= 0 has no
 // writer. A slot outside [0, n) is read modulo n.
 func writeTarget(slot, n, d int32, eligible func(int32) bool) (int32, bool) {
-	return 0, false // not implemented
+	if n <= 0 {
+		return 0, false
+	}
+	slot = (slot%n + n) % n
+	d = min(max(d, 1), n-1)
+
+	// The preference walk. Offset 0 is not part of it.
+	for j := d; j >= 1; j-- {
+		if ord := (slot - j + n) % n; eligible(ord) {
+			return ord, true
+		}
+	}
+
+	// The degenerate fallback: nothing else is left, so the purging pod takes
+	// the writes and the stall with them.
+	if eligible(slot) {
+		return slot, true
+	}
+	return 0, false
 }

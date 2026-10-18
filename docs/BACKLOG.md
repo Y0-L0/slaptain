@@ -2970,3 +2970,30 @@ the reasonable reading rather than a demonstrated one. **A baseline run on
 
 **Then:** reproduce deliberately and control the dormancy variable, rather than
 taking it as a side effect of whichever spec happens to wipe a PVC.
+
+## The pod-name label is a constant in one place and a literal in two
+
+`statefulset.kubernetes.io/pod-name` is now `labelStatefulSetPodName` in
+`operator/internal/controller/writeservice.go`, and still an inline literal in
+`backup_job.go` (the backup Job's pod affinity) and `dirjob.go` (the mkdir
+Job's). Three spellings of one key, in code whose failure modes are all
+silent: a drifted constant gives the write Service a selector matching no pod
+— a total write outage — while the two Jobs keep working against the literal
+and nothing reports a disagreement.
+
+`goconst` does not force the fold: it triggers at three occurrences and the
+literal appears twice.
+
+Found while mutation-testing ADR-037's write Service. The mutation that
+revealed it is worth repeating anywhere a label key is asserted: misspell the
+constant and watch the suite. A table that asserts against the same constant
+the code builds from stays green through it, because both sides moved
+together — the key has to be spelled out literally on the test side at least
+once. `writeservice_test.go` does that now; nothing else does.
+
+### Shape of a fix (not written)
+
+- Fold the two literals onto `labelStatefulSetPodName`, and keep exactly one
+  test asserting the literal spelling.
+- Red first: misspell the constant, confirm the build is clean, and confirm
+  that test is the one that goes red.

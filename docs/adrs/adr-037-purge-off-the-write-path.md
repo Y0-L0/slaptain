@@ -1208,3 +1208,73 @@ Everything the seventh and eighth amendments settled stands: the
 connection-lifetime precondition, turning rotation off widening the endpoint
 rather than deleting it, the readiness route, and the requeue that cannot live
 inside the replication gate.
+
+## Amendment, 2026-10-18 (tenth): the walk degrades in the direction of the sign
+
+The ninth amendment specified the fallback walk as `v, v+1, … n−1` and praised
+the forbidden slot for falling off the end of the range. That range was wrong,
+and what it was buying was a hole.
+
+### The hole
+
+The walk had one candidate whenever `v` sat at the end of the range. At
+`slotsFromWriteToPurge: -1` — the "write just before purging" experiment, one
+of the two this ADR exists to compare — the walk is `{n−1}` and nothing else.
+A single ineligible pod therefore drops writes onto the **purging** pod while
+other perfectly good pods stand idle. The degenerate fallback was written for
+`n = 2` with one pod down, where there genuinely is no other candidate; here it
+fires with `n−2` candidates available and unexamined.
+
+This was not introduced by the new parameterisation. The old descending form
+had the identical hole at its own end (`d = 1`), so the ninth amendment
+transcribed a limitation rather than creating one. It is visible now because
+the signed spelling makes the configuration that exposes it one somebody will
+actually type.
+
+### The rule
+
+**The walk degrades in the direction of the sign — away from the purge —
+wrapping within the non-zero offsets when it runs out.**
+
+Candidates are `(v + k·sign(v)) mod n` for increasing `k`, skipping `≡ 0`,
+until all `n−1` non-zero offsets have been offered. Preferred first, every
+offset exactly once.
+
+| `n` | `v` | order |
+|---|---|---|
+| 4 | `+1` | 1, 2, 3 |
+| 4 | `-1` | 3, 2, 1 |
+| 4 | `+2` | 2, 3, 1 |
+| 4 | `-2` | 2, 1, 3 |
+
+The sign now carries two things: where the write sits relative to the purge,
+and which way the choice degrades when the preferred pod cannot take it. That
+second property is the point. A purely ascending walk degrades `-1` to offset
+`1` — from "just before the purge" to "just after it", the opposite end of the
+meaning — where stepping by the sign gives `-2`: still just before the purge,
+one slot further out. **Degradation should stay near the intent, not cross it.**
+
+Stepping alone is not enough: at `|v| ≥ 2` it exhausts the range before
+covering it (`n = 4, v = +2` gives `2, 3` and never tries `1`), which is the
+same hole in a new place. Hence the wrap.
+
+### What this costs, stated rather than glossed
+
+The ninth amendment's "the forbidden slot falls off the end of the range" is
+**withdrawn**. The walk needs an explicit `skip if ≡ 0` again. That claim was
+only ever true because the range stopped short, and stopping short is the
+defect. A skip in a loop is a cheap price for never handing writes to the
+purging pod while an eligible pod exists.
+
+### `-1` and `n−1` are the same selection and different fallbacks
+
+The sign has to be read before the value is normalised, so the two spellings
+now diverge: both pick the same pod, and they degrade in opposite directions.
+
+That is kept deliberately rather than flattened. The signed form is already
+what this ADR recommends — it is the spelling that survives scaling, since
+`n−1` means `n−1` only until somebody adds a pod — and the degradation
+direction is a second thing the sign legitimately expresses. The
+recommendation is therefore strengthened: **write the signed form.** A bare
+`n−1` is a value that was already going stale, and now also degrades away from
+what its author meant.

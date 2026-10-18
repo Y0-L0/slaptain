@@ -60,7 +60,11 @@ spec:
     ridSegment: 1
     # deltaSync: true                # default
     # syncprovCheckpoint: "500 15"
-    # accesslogPurge: "2+00:00 1+00:00"
+    # accesslogPurge: what this database KEEPS. WHEN the purge runs is the
+    # cluster's (SlapdCluster.spec.accesslogPurge.interval, or spec.rotation).
+    # accesslogPurge:
+    #   retention: "48h"       # unset -> 168h (7 days)
+    #   enabled: false         # never purge; the journal grows unbounded
 
   seed:
     entries:

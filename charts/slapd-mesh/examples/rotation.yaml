@@ -25,10 +25,24 @@
 # sizing arithmetic. 6h below is an illustration, not a recommendation: ADR-037
 # fixes no number for it and neither does this file.
 
+# One thing this overlay must NOT do: declare an interval. The schedule is the
+# cluster's and it is declared ONCE, in one of two mutually exclusive forms —
+# here (form B, staggered) or cluster.accesslogPurge.interval (form A, one
+# schedule for everyone). Stacking this file on a values file that sets the
+# other is refused by the operator, by name, as
+# RotationConfigured=False/ScheduleDeclaredTwice. three-site.yaml sets none, so
+# the stack above is clean.
+#
+# Each database still declares what it KEEPS
+# (databases[].spec.replication.accesslogPurge.retention); that is the half
+# that is genuinely per database, and it is untouched by this overlay.
+
 cluster:
   rotation:
     enabled: true
     slotLength: "6h"
-    # writerOffset is deliberately absent: unset takes the operator's
-    # replicas−1, the pod that purges NEXT and so has had the longest to work
-    # off its backlog. Set it only while measuring.
+    # slotsFromWriteToPurge is deliberately absent: unset takes the operator's
+    # 1 — "purge the slot after writing", which hands the endpoint on and then
+    # immediately works the journal down. -1 is the other experiment ("purge
+    # the slot before writing") and stays correct across a scale event, because
+    # the value is read mod replicas. Set it only while measuring.

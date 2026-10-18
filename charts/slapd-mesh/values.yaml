@@ -308,10 +308,32 @@ cluster:
   #  # pod's purge interval becomes replicas × slotLength, pod k purges at
   #  # k × slotLength. Whole seconds — olcAccessLogPurge counts in [ddd+]hh:mm[:ss].
   #  slotLength: "6h"
-  #  # d: slots between a pod's own purge and its turn at the write endpoint.
-  #  # Unset → the operator's replicas−1. Range [1, replicas−1]; clamped and
-  #  # reported. Leave unset unless you are measuring.
-  #  writerOffset: 1
+  #  # v: the SIGNED displacement in slots from a pod's write slot to its own
+  #  # purge slot, taken mod replicas. Unset → 1, "purge the slot after
+  #  # writing". -1 is "purge the slot before writing" and survives a scale
+  #  # event. The rule is `v mod replicas != 0` — zero and every multiple put
+  #  # the write on the purging pod and are refused by name. Leave unset unless
+  #  # you are measuring.
+  #  slotsFromWriteToPurge: 1
+
+  # -- FORM A of the purge schedule: one interval, every pod sweeping its
+  # accesslog journals at the same instants. This is what every mesh has always
+  # run; the operator's default of 24h is what the old two-token
+  # "7+00:00 1+00:00" spelled, so leave it unset unless you want a different
+  # sweep rate.
+  #
+  # It does NOT remove the write stall — every provider purges together,
+  # including the one taking writes. `rotation` above is the form that moves
+  # the purge off the write path, and the two are MUTUALLY EXCLUSIVE: setting
+  # both is refused with a condition naming them.
+  #
+  # Mesh-scoped like everything else here: byte-identical at every site, and
+  # each site's pods purge on their own absolute grid (ADR-028 §3).
+  #
+  # What each database KEEPS is the database's — see
+  # databases[].spec.replication.accesslogPurge.retention.
+  accesslogPurge: {}
+  #  interval: "24h"
 
 # -- Keep the SlapdDatabase and SlapdSchema objects when the release is removed
 # (`helm.sh/resource-policy: keep`). On by default: a database is the
@@ -360,7 +382,8 @@ databases: []
 #        ridSegment: 0         # unique per database within the mesh; 0 is legal and is the natural first (ADR-031)
 #        deltaSync: true
 #        syncprovCheckpoint: "500 15"
-#        accesslogPurge: "2+00:00 1+00:00"
+#        accesslogPurge:                   # what to KEEP; WHEN to purge is the cluster's (ADR-024 R6)
+#          retention: "48h"                # unset → 168h (7 days); enabled: false never purges
 #      seed:
 #        site: site-a          # the founder; every other site withholds
 #        entries:

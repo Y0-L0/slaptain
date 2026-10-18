@@ -235,6 +235,21 @@ var _ = Describe("ADR-037: the write endpoint rotates",
 						"lands here is measurably the same as no rotation",
 					i, now.UTC().Format(time.RFC3339), writer, slot, replicas, slotLength)
 
+				// THE SIGN. slotsFromWriteToPurge is unset here, so it takes
+				// the operator's default of 1: "purge the slot AFTER writing".
+				// The writer is therefore the pod that purges NEXT, ordinal
+				// (slot+1) mod n — the opposite end of the walk from the
+				// superseded writerOffset, whose unset default named the pod
+				// that had purged LAST. Both satisfy "never the purging pod"
+				// on a healthy fleet, so the assertion above cannot tell them
+				// apart and this one has to.
+				wantWriter := fmt.Sprintf("slapd-%d", (slot+1)%replicas)
+				Expect(writer).To(Equal(wantWriter),
+					"sample %d at %s: the write Service selects %s, want %s. With "+
+						"slotsFromWriteToPurge unset the default is +1 — the writer purges one "+
+						"slot from now, having just stopped taking writes (slot %d of %d, t=%s)",
+					i, now.UTC().Format(time.RFC3339), writer, wantWriter, slot, replicas, slotLength)
+
 				GinkgoWriter.Printf("sample %d  %s  slot=%d purging=%s writer=%s\n",
 					i, now.UTC().Format(time.RFC3339), slot, purging, writer)
 

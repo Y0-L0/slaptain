@@ -143,14 +143,25 @@ spec:
          wherever the client sent it. That is not a gap in the rotation — a
          mesh accepts a write at any provider by design (ADR-037 decision 2).
 
+         The sibling is spec.accesslogPurge (form A): one interval, every pod
+         purging together. The two are MUTUALLY EXCLUSIVE and the operator
+         refuses both as RotationConfigured=False/ScheduleDeclaredTwice —
+         refusing here instead would be a second authority with a worse
+         message and no view of spec.replicas.
+
          Field-by-field rather than toYaml for the same three reasons as
-         charts/slapd — slotLength must reach the API server as a string, and
-         `enabled: false` / `writerOffset: 0` must survive being falsy. See
-         that chart's template for the full argument. */ -}}
+         charts/slapd — every duration must reach the API server as a string,
+         and `enabled: false` / `slotsFromWriteToPurge: 0` must survive being
+         falsy. See that chart's template for the full argument. */ -}}
+  {{- $purge := .Values.cluster.accesslogPurge | default dict -}}
+  {{- with $purge.interval }}
+  accesslogPurge:
+    interval: {{ . | quote }}
+  {{- end }}
   {{- $rot := .Values.cluster.rotation | default dict -}}
   {{- $hasRotEnabled := and (hasKey $rot "enabled") (not (kindIs "invalid" $rot.enabled)) -}}
-  {{- $hasWriterOffset := and (hasKey $rot "writerOffset") (not (kindIs "invalid" $rot.writerOffset)) -}}
-  {{- if or $hasRotEnabled $rot.slotLength $hasWriterOffset }}
+  {{- $hasSlots := and (hasKey $rot "slotsFromWriteToPurge") (not (kindIs "invalid" $rot.slotsFromWriteToPurge)) -}}
+  {{- if or $hasRotEnabled $rot.slotLength $hasSlots }}
   rotation:
     {{- if $hasRotEnabled }}
     enabled: {{ $rot.enabled }}
@@ -158,7 +169,7 @@ spec:
     {{- with $rot.slotLength }}
     slotLength: {{ . | quote }}
     {{- end }}
-    {{- if $hasWriterOffset }}
-    writerOffset: {{ $rot.writerOffset }}
+    {{- if $hasSlots }}
+    slotsFromWriteToPurge: {{ $rot.slotsFromWriteToPurge }}
     {{- end }}
   {{- end }}

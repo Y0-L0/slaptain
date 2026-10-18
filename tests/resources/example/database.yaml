@@ -34,7 +34,12 @@ spec:
     ridSegment: 1
     deltaSync: true
     syncprovCheckpoint: "500 15"
-    accesslogPurge: "2+00:00 1+00:00"
+    # What this database KEEPS. WHEN the purge runs is the CLUSTER's — the
+    # operator's default 24h interval, or SlapdCluster.spec.accesslogPurge /
+    # spec.rotation (ADR-024 R6). database2.yaml leaves the block unset, so
+    # between the two the e2e exercises both the declared and defaulted paths.
+    accesslogPurge:
+      retention: "48h"
 
   indices:
     - "objectClass eq"

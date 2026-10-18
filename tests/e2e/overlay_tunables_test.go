@@ -46,6 +46,9 @@ var _ = Describe("overlay tunables: purge window and checkpoint",
 			rotating   bool
 			slotLength time.Duration
 			replicas   int32
+			// clusterInterval is T: how often every pod sweeps. Always
+			// positive — that is the invariant this milestone exists for.
+			clusterInterval time.Duration
 		)
 
 		BeforeAll(func(ctx SpecContext) {
@@ -59,6 +62,21 @@ var _ = Describe("overlay tunables: purge window and checkpoint",
 			if r := sc.Spec.Rotation; r.Enabled != nil && *r.Enabled && r.SlotLength != nil {
 				slotLength = r.SlotLength.Duration
 				rotating = slotLength > 0 && slotLength%time.Second == 0
+			}
+			// The INTERVAL is the cluster's whichever form declared it
+			// (ADR-024 R6): derived as replicas × slotLength under rotation,
+			// declared in spec.accesslogPurge otherwise, and the operator's
+			// 24h default when the cluster says nothing. No database declares
+			// one, which is what makes a withheld — and therefore unpurged —
+			// database unreachable.
+			switch {
+			case rotating:
+				clusterInterval = time.Duration(replicas) * slotLength
+			case sc.Spec.AccesslogPurge != nil && sc.Spec.AccesslogPurge.Interval != nil &&
+				sc.Spec.AccesslogPurge.Interval.Duration > 0:
+				clusterInterval = sc.Spec.AccesslogPurge.Interval.Duration
+			default:
+				clusterInterval = 24 * time.Hour
 			}
 			if !sc.Spec.Replication.Enabled || sc.IsConsumerOnly() {
 				Skip("cluster is not a syncrepl provider, so it carries neither " +
@@ -79,7 +97,7 @@ var _ = Describe("overlay tunables: purge window and checkpoint",
 				name := sd.Name
 				Eventually(ctx, func() bool {
 					return slapdDatabaseRunning(crdClient, namespace, name)
-				}).WithTimeout(5 * time.Minute).WithPolling(5 * time.Second).Should(BeTrue(),
+				}).WithTimeout(5*time.Minute).WithPolling(5*time.Second).Should(BeTrue(),
 					"SlapdDatabase %s never reached Running", name)
 			}
 
@@ -108,7 +126,7 @@ var _ = Describe("overlay tunables: purge window and checkpoint",
 					if !(&sd).DeltaSyncEnabled() {
 						continue
 					}
-					want := wantAccesslogPurge(sd)
+					want := wantPurgeValue(sd, clusterInterval, 0, false)
 
 					dataDB, ok := findMdb(observedMdbDatabases(conn), sd.Spec.Suffix)
 					Expect(ok).To(BeTrue(), "pod %s has no data database %q", pod, sd.Spec.Suffix)
@@ -120,8 +138,8 @@ var _ = Describe("overlay tunables: purge window and checkpoint",
 
 					if want == "" {
 						Expect(values).To(BeEmpty(),
-							"pod %s: %s (db %s) has accesslogPurge \"none\", so it must carry "+
-								"no olcAccessLogPurge", pod, dn, sd.Name)
+							"pod %s: %s (db %s) has accesslogPurge.enabled false, so it must "+
+								"carry no olcAccessLogPurge", pod, dn, sd.Name)
 						continue
 					}
 					Expect(values).To(ConsistOf(want),
@@ -171,13 +189,6 @@ var _ = Describe("overlay tunables: purge window and checkpoint",
 							continue
 						}
 						if purgeDisabled(sd) {
-							continue
-						}
-						if declaresPurgeInterval(sd) {
-							// ADR-024 R4: the operator REFUSES such a database
-							// rather than overriding it, and reports a
-							// condition. Nothing is written, so there is no
-							// per-pod value to assert.
 							continue
 						}
 
@@ -240,6 +251,52 @@ var _ = Describe("overlay tunables: purge window and checkpoint",
 					len(seen), len(rwPods), seen)
 			}, NodeTimeout(6*time.Minute))
 
+		// THE DEFECT, AS A STANDING REGRESSION GUARD. Measured on a fresh
+		// three-site mesh: a database declaring an interval, on a cluster
+		// created with rotation already on, ended up with NO olcAccessLogPurge
+		// at all on every pod at every site — the withhold assumed there was an
+		// existing value to keep. An unpurged journal grows to its map ceiling
+		// and then stops DATA writes, because the accesslog overlay sits in the
+		// data database's write path.
+		//
+		// Deliberately the weakest possible assertion and deliberately
+		// unconditional: not which value, not how many fields, not whether the
+		// fleet is staggered — just that EVERY replicated database on EVERY RW
+		// pod carries SOMETHING. The specs above check the composition; this one
+		// would have caught the outage, and it costs one search per pod per
+		// database either way.
+		It("leaves no replicated database unpurged on any RW pod",
+			Label("purge-rotation"), func(ctx SpecContext) {
+				for _, pod := range rwPods {
+					By("inspecting cn=config on " + pod)
+					conn := dialPodConfigEventually(ctx, pod)
+
+					for _, sd := range dbs {
+						if !(&sd).DeltaSyncEnabled() || purgeDisabled(sd) {
+							continue
+						}
+						dataDB, ok := findMdb(observedMdbDatabases(conn), sd.Spec.Suffix)
+						Expect(ok).To(BeTrue(), "pod %s has no data database %q", pod, sd.Spec.Suffix)
+
+						dn, values := overlayAttrValues(conn, dataDB.dn,
+							"(objectClass=olcAccessLogConfig)", "olcAccessLogPurge")
+						Expect(dn).NotTo(BeEmpty(),
+							"pod %s: data database %q has no accesslog overlay", pod, sd.Spec.Suffix)
+						Expect(values).NotTo(BeEmpty(),
+							"pod %s: %s (db %s) carries NO olcAccessLogPurge at all. Its journal "+
+								"grows to its map ceiling and then stops DATA writes — the "+
+								"outage ADR-024 R4 exists to prevent. Only "+
+								"accesslogPurge.enabled: false may produce this, and this "+
+								"database does not set it",
+							pod, dn, sd.Name)
+						Expect(len(strings.Fields(values[0]))).To(BeNumerically(">=", 2),
+							"pod %s: %s (db %s) carries olcAccessLogPurge %q, which slapd cannot "+
+								"parse as <age> <interval>", pod, dn, sd.Name, values[0])
+					}
+					conn.Close()
+				}
+			}, NodeTimeout(6*time.Minute))
+
 		It("converges the syncprov checkpoint on every RW pod's data database", func(ctx SpecContext) {
 			for _, pod := range rwPods {
 				By("inspecting cn=config on " + pod)
@@ -275,38 +332,53 @@ var _ = Describe("overlay tunables: purge window and checkpoint",
 		}, NodeTimeout(6*time.Minute))
 	})
 
-// wantAccesslogPurge mirrors the operator's resolution of
-// spec.replication.accesslogPurge: unset → the operator default, "none" → no
-// attribute, anything else verbatim. Spelled out here rather than imported so
-// the e2e states the contract instead of restating the code.
-func wantAccesslogPurge(sd ldapv1alpha1.SlapdDatabase) string {
-	v := strings.TrimSpace(sd.Spec.Replication.AccesslogPurge)
-	switch {
-	case v == "":
-		return "7+00:00 1+00:00"
-	case strings.EqualFold(v, "none"):
+// wantPurgeValue mirrors the operator's composition of olcAccessLogPurge from
+// its THREE owners (ADR-024 R6): the database's retention, the cluster's
+// interval, and — with rotation on — this pod's phase. Spelled out here rather
+// than imported so the e2e states the contract instead of restating the code.
+//
+// An empty answer means the attribute must be ABSENT, and the only way to get
+// one is the explicit enabled: false. That is the defect's negation: before the
+// decomposition a database declaring an interval on a rotating cluster was
+// WITHHELD, and ended up unpurged on every pod at every site.
+func wantPurgeValue(sd ldapv1alpha1.SlapdDatabase, interval, phase time.Duration, phased bool) string {
+	retention := wantRetention(sd)
+	if retention <= 0 {
 		return ""
-	default:
-		return v
 	}
+	v := logAge(retention) + " " + logAge(interval)
+	if phased {
+		v += " " + logAge(phase)
+	}
+	return v
 }
 
-// purgeDisabled reports the explicit "none" opt-out, which survives rotation —
-// a schedule must not resurrect a purge the user turned off.
+// wantRetention is the database's half: what it KEEPS. Zero means purging is
+// switched off entirely. The operator's default is 7 days.
+func wantRetention(sd ldapv1alpha1.SlapdDatabase) time.Duration {
+	p := sd.Spec.Replication.AccesslogPurge
+	if p == nil {
+		return 7 * 24 * time.Hour
+	}
+	if p.Enabled != nil && !*p.Enabled {
+		return 0
+	}
+	if p.Retention == nil || p.Retention.Duration <= 0 ||
+		p.Retention.Duration%time.Second != 0 {
+		// An unusable declared retention is REPORTED and the operator's
+		// default written anyway — the journal must stay bounded whatever the
+		// user got wrong.
+		return 7 * 24 * time.Hour
+	}
+	return p.Retention.Duration
+}
+
+// purgeDisabled is the explicit "never purge, keep forever" opt-out, which
+// survives rotation — a schedule must not resurrect a purge the user turned
+// off. It replaced the "none" sentinel when the directive was decomposed.
 func purgeDisabled(sd ldapv1alpha1.SlapdDatabase) bool {
-	return strings.EqualFold(strings.TrimSpace(sd.Spec.Replication.AccesslogPurge), "none")
-}
-
-// declaresPurgeInterval reports whether the DATABASE's own field carries an
-// interval. With rotation on the cluster owns the schedule, so such a database
-// is refused with a condition and nothing is written for it (ADR-024 R4) — the
-// operator's default is not a declaration and does not count.
-func declaresPurgeInterval(sd ldapv1alpha1.SlapdDatabase) bool {
-	v := strings.TrimSpace(sd.Spec.Replication.AccesslogPurge)
-	if v == "" || strings.EqualFold(v, "none") {
-		return false
-	}
-	return len(strings.Fields(v)) > 1
+	p := sd.Spec.Replication.AccesslogPurge
+	return p != nil && p.Enabled != nil && !*p.Enabled
 }
 
 // logAge renders a duration the way slapd's log_age_parse accepts it:

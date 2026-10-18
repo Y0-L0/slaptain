@@ -34,7 +34,11 @@ spec:
     ridSegment: 1
     deltaSync: true
     syncprovCheckpoint: "500 15"
-    accesslogPurge: "0+00:05 0+00:01"
+    # Retention of five minutes: the storm repro needs entries to age out of
+    # the journal fast. The one-minute SWEEP that used to sit beside it is the
+    # CLUSTER's now (ADR-024 R6) and is set on the storm-repro SlapdCluster.
+    accesslogPurge:
+      retention: "5m"
 
   indices:
     - "objectClass eq"

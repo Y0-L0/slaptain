@@ -291,6 +291,13 @@ Reproducibility and triage:
                          expectation moves with it: every stanza assertion is
                          relative (a scale moves the count by one, and that is
                          an in-cluster peer) or existence-based.
+  E2E_PURGE_INTERVAL   = How often every pod sweeps its accesslog journals
+                         (SlapdCluster.spec.accesslogPurge.interval, form A of
+                         ADR-024 R6's decomposition). Unset leaves the
+                         operator's 24h default. Mutually exclusive with
+                         E2E_ROTATION=1, which derives the interval instead;
+                         setting both is refused here, as the operator refuses
+                         it on the CR. A Go duration: "1m", "6h".
   E2E_ROTATION         = Set to 1 to install the mesh with the ADR-037 purge
                          rotation ON, by stacking the chart's own
                          charts/slapd-mesh/examples/rotation.yaml on the
@@ -809,6 +816,32 @@ setup_mesh_bundle() {
         rotation_values=(-f "$PROJECT_ROOT/charts/slapd-mesh/examples/rotation.yaml")
         log "Purge rotation (ADR-037): ON, via charts/slapd-mesh/examples/rotation.yaml"
     fi
+
+    # E2E_PURGE_INTERVAL sets form A: ONE sweep interval for the whole fleet
+    # (SlapdCluster.spec.accesslogPurge.interval, ADR-024 R6). The schedule is
+    # the cluster's since the purge directive was decomposed, so a fixture that
+    # needs an aggressive sweep — e2e-storm-repro.sh, whose whole premise is a
+    # journal that forgets fast — has to say so here rather than in the
+    # SlapdDatabase, which now only declares what it KEEPS.
+    #
+    # Refused with the rotation: the two forms are mutually exclusive and the
+    # operator reports setting both as ScheduleDeclaredTwice. Catching it here
+    # turns a condition nobody reads during a scripted run into a message at
+    # the moment the mistake is made.
+    local -a purge_values=()
+    if [[ -n "${E2E_PURGE_INTERVAL:-}" ]]; then
+        if [[ "${E2E_ROTATION:-0}" == "1" ]]; then
+            die "E2E_PURGE_INTERVAL and E2E_ROTATION=1 are the two mutually exclusive forms of one schedule (ADR-037 ninth amendment); the operator refuses both, so pick one"
+        fi
+        PURGE_VALUES_FILE=$(mktemp /tmp/e2e-purge-values.XXXXXX.yaml)
+        {
+            echo "cluster:"
+            echo "  accesslogPurge:"
+            echo "    interval: \"${E2E_PURGE_INTERVAL}\""
+        } > "$PURGE_VALUES_FILE"
+        purge_values=(-f "$PURGE_VALUES_FILE")
+        log "Accesslog purge interval (ADR-024 R6, form A): $E2E_PURGE_INTERVAL"
+    fi
     local ctx
     for ctx in "${CONTEXTS[@]}"; do
         log "[$ctx] Installing the mesh bundle (site ${SITE_NAMES[$ctx]}, identical values)..."
@@ -822,7 +855,7 @@ setup_mesh_bundle() {
         hctl "$ctx" upgrade --install slapd "$PROJECT_ROOT/charts/slapd-mesh" \
             --namespace "$NAMESPACE_TESTING" --create-namespace \
             --set retainOnUninstall=false \
-            -f "$MESH_VALUES_FILE" "${rotation_values[@]}"
+            -f "$MESH_VALUES_FILE" "${rotation_values[@]}" "${purge_values[@]}"
     done
 }
 

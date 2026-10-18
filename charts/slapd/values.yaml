@@ -203,7 +203,8 @@ monitoring: {}
 # condition reason on the CR is telling you.
 rotation: {}
 #  # -- Turn the rotation on. Opt-in; an explicit false is kept distinct from
-#  # unset, so setting it now survives the default moving later.
+#  # unset, so setting it now survives the default moving later. Mutually
+#  # exclusive with accesslogPurge.interval below — the operator refuses both.
 #  enabled: true
 #  # -- t: how long each pod holds the write endpoint, and the spacing between
 #  # neighbouring pods' purge phases. REQUIRED when enabled, and there is NO
@@ -212,11 +213,36 @@ rotation: {}
 #  # k × slotLength. A Go duration string; whole seconds, since olcAccessLogPurge
 #  # counts in [ddd+]hh:mm[:ss].
 #  slotLength: "6h"
-#  # -- d: how many slots sit between a pod's own purge and its turn at the write
-#  # endpoint. Unset → the operator's replicas−1, the pod that purges NEXT and so
-#  # has had the longest to work off its backlog. Valid range [1, replicas−1];
-#  # the operator clamps and says so. Leave it unset unless you are measuring.
-#  writerOffset: 1
+#  # -- v: the SIGNED displacement in slots from a pod's write slot to its own
+#  # purge slot, taken mod replicas. Unset → 1, "purge the slot after writing",
+#  # which is the configuration ADR-037 prefers. -1 is "purge the slot before
+#  # writing" and stays correct across a scale event, because it is read mod n.
+#  # The rule is `v mod replicas != 0`: zero and every multiple put the write on
+#  # the pod that is purging, and the operator refuses it by name. Leave it unset
+#  # unless you are measuring.
+#  slotsFromWriteToPurge: 1
+
+# -- spec.accesslogPurge: FORM A of the purge schedule — one interval, every pod
+# sweeping its accesslog journals at the same instants.
+#
+# This is what every cluster has always run, and the operator's default of 24h
+# is what the old two-token "7+00:00 1+00:00" spelled. Leave it unset unless you
+# want a different sweep rate.
+#
+# It does NOT remove the write stall: every provider purges together, including
+# the one taking writes, which is the arm ADR-037 measured at a 30 s stall per
+# cycle. `rotation` above is the form that moves the purge off the write path,
+# and the two are MUTUALLY EXCLUSIVE — setting both is refused with a condition
+# naming them, never silently resolved by precedence.
+#
+# Shortening the interval does not help and was measured: 15 s against 5 min
+# cost 18x the disk reads and took p99 from 2.1 ms to 143-230 ms for no gain.
+#
+# What each database KEEPS is the database's, not the cluster's — see
+# databases[].replication.accesslogPurge.retention.
+accesslogPurge: {}
+#  # -- How often every pod sweeps. A Go duration string, whole seconds.
+#  interval: "24h"
 
 # -- Cross-site fan-out for spec.replication.externalPeers: how many remote pods
 # each local pod opens a syncrepl connection to, per peer. Unset → 1. A per-peer

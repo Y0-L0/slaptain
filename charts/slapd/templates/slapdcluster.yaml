@@ -171,30 +171,44 @@ spec:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 
-  {{- /* spec.rotation (ADR-037). Presence-based on every key, and spelled out
-         field by field rather than passed through with toYaml, for two reasons:
+  {{- /* spec.accesslogPurge (form A) and spec.rotation (form B) — ADR-024 R6.
+         WHEN the purge runs is the cluster's, in one of two mutually exclusive
+         forms; WHAT each database keeps stays on the SlapdDatabase.
 
-         * slotLength must reach the API server as a STRING. The CRD renders
-           metav1.Duration as a bare `type: string`, so `--set
-           rotation.slotLength=90` would otherwise be sent as a number and
-           rejected as a type error rather than as the duration it is not.
-           Quoting it here makes the CEL rule — which checks the Go duration
-           grammar — the thing that answers.
-         * enabled and writerOffset must survive their meaningful falsy values.
-           `enabled: false` is NOT the same as unset once the default moves
-           (the CRD field is a pointer for exactly that reason), and
-           `writerOffset: 0` is out of range and must be REFUSED by the API
-           server rather than silently dropped here into the operator's n−1
-           default, which would turn a rejected value into a working one.
+         The chart renders whatever is set and leaves the refusal to the
+         operator, which reports it as RotationConfigured=False/
+         ScheduleDeclaredTwice. Refusing here would be a second authority with
+         a worse message and no view of spec.replicas.
+
+         Spelled out field by field rather than passed through with toYaml,
+         for two reasons:
+
+         * every duration must reach the API server as a STRING. The CRD
+           renders metav1.Duration as a bare `type: string`, so
+           `--set rotation.slotLength=90` would otherwise be sent as a number
+           and rejected as a type error rather than as the duration it is not.
+           Quoting makes the CEL rule — which checks the Go duration grammar —
+           the thing that answers.
+         * enabled and slotsFromWriteToPurge must survive their meaningful
+           falsy values. `enabled: false` is NOT the same as unset once the
+           default moves (the CRD field is a pointer for exactly that reason),
+           and `slotsFromWriteToPurge: 0` is the write landing on the purging
+           pod, which the OPERATOR must refuse by name — dropping it here would
+           turn a reported fault into a silent default of 1.
 
          The chart restates none of the operator's defaults: there is no
-         slotLength default to restate (there is deliberately none) and
-         writerOffset's n−1 is the operator's, computed from spec.replicas,
-         which a chart cannot see a scaled cluster's value of. */ -}}
+         slotLength default to restate (there is deliberately none), and
+         neither the 24h interval nor v's 1 belongs in a values file that
+         would then have to be edited when either moves. */ -}}
+  {{- $purge := .Values.accesslogPurge | default dict -}}
+  {{- with $purge.interval }}
+  accesslogPurge:
+    interval: {{ . | quote }}
+  {{- end }}
   {{- $rot := .Values.rotation | default dict -}}
   {{- $hasRotEnabled := and (hasKey $rot "enabled") (not (kindIs "invalid" $rot.enabled)) -}}
-  {{- $hasWriterOffset := and (hasKey $rot "writerOffset") (not (kindIs "invalid" $rot.writerOffset)) -}}
-  {{- if or $hasRotEnabled $rot.slotLength $hasWriterOffset }}
+  {{- $hasSlots := and (hasKey $rot "slotsFromWriteToPurge") (not (kindIs "invalid" $rot.slotsFromWriteToPurge)) -}}
+  {{- if or $hasRotEnabled $rot.slotLength $hasSlots }}
   rotation:
     {{- if $hasRotEnabled }}
     enabled: {{ $rot.enabled }}
@@ -202,7 +216,7 @@ spec:
     {{- with $rot.slotLength }}
     slotLength: {{ . | quote }}
     {{- end }}
-    {{- if $hasWriterOffset }}
-    writerOffset: {{ $rot.writerOffset }}
+    {{- if $hasSlots }}
+    slotsFromWriteToPurge: {{ $rot.slotsFromWriteToPurge }}
     {{- end }}
   {{- end }}

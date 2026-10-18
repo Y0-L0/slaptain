@@ -17,10 +17,12 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
@@ -121,7 +123,16 @@ const (
 //     A plausible-looking "-write" in a log line sends the reader hunting for a
 //     cluster that was never named.
 func writeServiceName(cluster string) string {
-	return ""
+	if cluster == "" {
+		return ""
+	}
+	return cluster + writeServiceSuffix
+}
+
+// statefulSetPodName spells a pod name the way the StatefulSet controller does,
+// which is what statefulset.kubernetes.io/pod-name carries.
+func statefulSetPodName(cluster string, ordinal int32) string {
+	return fmt.Sprintf("%s-%d", cluster, ordinal)
 }
 
 // writeServiceSelector returns the label selector that picks exactly one pod:
@@ -144,7 +155,16 @@ func writeServiceName(cluster string) string {
 //   - the returned map is never empty and never nil, for any input. An empty
 //     selector in a Service spec matches every pod in the namespace.
 func writeServiceSelector(cluster string, ordinal int32) map[string]string {
-	return nil
+	if ordinal < 0 {
+		// No pod is named "<cluster>--1", so the honest rendering of a negative
+		// ordinal would be a Service selecting nothing — the one outcome this
+		// file's header forbids outright. Pod 0 exists as long as the
+		// StatefulSet does.
+		ordinal = 0
+	}
+	sel := selectorLabels(cluster)
+	sel[labelStatefulSetPodName] = statefulSetPodName(cluster, ordinal)
+	return sel
 }
 
 // writeService builds the client-facing Service that names the current writer.
@@ -191,7 +211,48 @@ func writeServiceSelector(cluster string, ordinal int32) map[string]string {
 func (r *SlapdClusterReconciler) writeService(
 	sc *ldapv1alpha1.SlapdCluster, writer int32, ok bool,
 ) (*corev1.Service, bool) {
-	return nil, false
+	if sc == nil || !ok {
+		return nil, false
+	}
+
+	svcType := sc.Spec.Service.Type
+	if svcType == "" {
+		svcType = corev1.ServiceTypeClusterIP
+	}
+	ldapPort := sc.Spec.Service.LDAPPort
+	if ldapPort == 0 {
+		ldapPort = 389
+	}
+	ldapsPort := sc.Spec.Service.LDAPSPort
+	if ldapsPort == 0 {
+		ldapsPort = 636
+	}
+
+	return &corev1.Service{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: kindService},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      writeServiceName(sc.Name),
+			Namespace: sc.Namespace,
+		},
+		Spec: corev1.ServiceSpec{
+			Type:     svcType,
+			Selector: writeServiceSelector(sc.Name, writer),
+			Ports: []corev1.ServicePort{
+				{
+					Name:       portNameLDAP,
+					Port:       ldapPort,
+					TargetPort: intstr.FromString(portNameLDAP),
+					Protocol:   corev1.ProtocolTCP,
+				},
+				{
+					Name:       portNameLDAPS,
+					Port:       ldapsPort,
+					TargetPort: intstr.FromString(portNameLDAPS),
+					Protocol:   corev1.ProtocolTCP,
+				},
+			},
+		},
+	}, true
 }
 
 // nextSlotBoundary returns how long from now until the next slot boundary of
@@ -217,7 +278,28 @@ func (r *SlapdClusterReconciler) writeService(
 //     the defensive end of a path that should never be walked; what matters is
 //     that walking it costs one requeue every ten seconds and not a hot loop.
 func nextSlotBoundary(now time.Time, t time.Duration) time.Duration {
-	return 0
+	// Truncated to whole seconds exactly as rotationSlot does. Two grids — one
+	// from the requeue, one from the slot lookup — would disagree by the
+	// remainder every single cycle, silently.
+	step := int64(t / time.Second)
+	if step <= 0 {
+		return noGridRequeue
+	}
+
+	// Floor division, not Go's truncation, so the grid stays continuous across
+	// the epoch.
+	sec := now.Unix()
+	slots := sec / step
+	if sec < 0 && sec%step != 0 {
+		slots--
+	}
+
+	// How far into the current slot we are, at nanosecond resolution. By
+	// construction that is in [0, step) seconds, so the answer below is
+	// strictly positive and at most a whole slot: exactly on a boundary it is a
+	// full slot, never zero.
+	elapsed := time.Duration(sec-slots*step)*time.Second + time.Duration(now.Nanosecond())
+	return time.Duration(step)*time.Second - elapsed
 }
 
 // eligibleForWrites composes the predicate writeTarget consumes: the pods that
@@ -250,7 +332,21 @@ func nextSlotBoundary(now time.Time, t time.Duration) time.Duration {
 // Both maps are read-only to the returned closure, and it is safe to call for
 // any ordinal, including negative ones.
 func eligibleForWrites(ready map[int32]bool, heldReadOnly map[int32]bool) func(int32) bool {
-	return nil
+	return func(ordinal int32) bool {
+		if ordinal < 0 {
+			return false
+		}
+		// Absence is not readiness. A pod the operator could not assess is not
+		// a pod it may point the write endpoint at (ADR-025's rule, carried
+		// onto this surface).
+		if !ready[ordinal] {
+			return false
+		}
+		// ADR-036's authorship gate. Nothing populates this map today, so a nil
+		// one and an empty one must change no outcome at all; the seam is inert
+		// by construction rather than by a branch.
+		return !heldReadOnly[ordinal]
+	}
 }
 
 // writeRotationCondition renders the rotation's verdict as the published
@@ -273,5 +369,38 @@ func eligibleForWrites(ready map[int32]bool, heldReadOnly map[int32]bool) func(i
 func writeRotationCondition(
 	sc *ldapv1alpha1.SlapdCluster, writer int32, ok bool, next time.Time,
 ) metav1.Condition {
-	return metav1.Condition{}
+	cond := metav1.Condition{
+		Type:               writeEndpointCondition,
+		LastTransitionTime: metav1.Now(),
+	}
+	if sc != nil {
+		cond.ObservedGeneration = sc.Generation
+	}
+
+	when := "the next rotation instant is not known"
+	if !next.IsZero() {
+		when = "next rotation at " + next.UTC().Format(time.RFC3339)
+	}
+
+	if !ok {
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = reasonNoEligibleWriter
+		// Names no pod, deliberately. writeTarget answers 0 when nothing was
+		// eligible, and rendering that zero as "writes are going to <cluster>-0"
+		// is how a total outage comes to read as a healthy rotation.
+		cond.Message = "no pod was eligible to take writes this pass, so the write endpoint is " +
+			"unchanged: it still selects whatever it selected before, and writes keep landing " +
+			"there. A Service selecting nothing would be a total write outage, which is worse " +
+			"than an endpoint that stopped moving (ADR-037). " + when
+		return cond
+	}
+
+	cond.Status = metav1.ConditionTrue
+	cond.Reason = reasonWriterSelected
+	target := fmt.Sprintf("pod ordinal %d", writer)
+	if sc != nil {
+		target = statefulSetPodName(sc.Name, max(writer, 0))
+	}
+	cond.Message = fmt.Sprintf("the write endpoint selects %s; %s", target, when)
+	return cond
 }

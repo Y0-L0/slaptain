@@ -157,7 +157,7 @@ exists that keeps both logs bounded without ever purging the active node.
    that refuses to promote a provider still working off its purge backlog.
 
 **Why it may not be needed at your write rate.** The stall is entries-deleted ÷
-delete-rate, and the delete rate is ~1,000/s under load, ~2,800/s idle. At
+delete-rate, and the delete rate is ~2,500/s under load, ~2,800/s idle. At
 10k ops/s (30 writes/s) a cycle deletes ~9,850 entries: zero iterations
 dropped, replication lag peaking at 3.3 s, no stall resolvable at 10 s
 granularity (two runs, agreeing to 0.1 s). At single-digit writes/s it is

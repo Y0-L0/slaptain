@@ -216,7 +216,7 @@ dressing a guess as a mechanism.
 → Intervals should be long, bounded only by how large a single purge may
 become.
 
-### C. Stagger the providers' purges, writes stay pinned — adopted as the first step
+### C. Stagger the providers' purges, writes stay pinned — WITHDRAWN (third amendment)
 
 Removing the simultaneity costs exactly one thing, phase control. It ends the
 worst case every deployment runs today and it is worth having on its own. It
@@ -689,3 +689,76 @@ on rather than silently overridden.
 sequence (`T × write rate / delete rate`); `D` sets its upper bound and has no
 value at all yet. Until both exist, `d` is a parameter and `T ≥ P + D` is a
 rule we cannot yet evaluate for any concrete deployment.
+
+---
+
+## Amendment, 2026-10-18 (third): staggering alone was measured, and does nothing
+
+Option C is **withdrawn**, and the narrowing in the second amendment is
+**retracted**. Both rested on the assumption that de-synchronising the
+providers' purges would recover part of the disturbance. It recovers none of it.
+
+Four arms at 100k ops/s, 0.3 % writes, 60-minute plateaus, medians over steady
+cycles, all on one patched 2.6.10 binary. Writes were pinned to pod-0 for every
+arm and pod-0 purged in every arm; only pod-1's phase varied:
+
+| arm | achieved | quiet p99 | disturbed | stall | dropped/cycle | peak p99 | peak CSN |
+|---|---|---|---|---|---|---|---|
+| sync | 96,286 | 2.82 ms | 60 s | 30 s | 944,359 | 2,369 ms | 19.6 s |
+| stagger | 96,780 | 2.98 ms | 60 s | 30 s | 949,123 | 2,904 ms | 34.7 s |
+| stagger (repeat) | 97,206 | 3.12 ms | 60 s | 30 s | 958,468 | 2,963 ms | 39.2 s |
+| peer-only (earlier) | 99,838 | 1.2 ms | **0 s** | **0 s** | **0** | 1 ms | 34.8 s |
+
+The staggered arms land on the synchronised arm and nowhere near peer-only:
+identical disturbance and stall, dropped work within 1.5 %. The stagger itself
+was verified rather than assumed — a measured separation of ~120 s against a
+configured 150 s, within one 30 s sampling interval, where the synchronised arm
+measured 30 s of pure scrape jitter.
+
+→ **The only variable that matters is whether the write target purges.** Moving
+a peer's purge half a cycle away changes nothing a client can see, because the
+write target's own purge was stalling its own writes the whole time.
+
+### What this does to the decisions
+
+Staggering is therefore **necessary but insufficient**: with every pod purging
+at the same instant there is no non-purging pod for the writer to sit on, so
+per-pod phases are a *prerequisite* of rotation rather than a cheaper
+alternative to it. Option C's "ship it on its own merits" was wrong — it has no
+merits alone. It ships as part of F or not at all.
+
+Rotation's case is restored whole. The second amendment reasoned that a phase
+makes staggering declarative and so leaves rotation buying only the write
+target's own stall; the measurement says the write target's own stall was
+always the entire quantity. Nothing is subtracted from F.
+
+### A measured number this ADR was carrying wrongly
+
+The delete rate under load was reported as ~1,000/s. That divided entries
+removed by the *disturbance* window rather than the *stall* window. Measured
+per cycle across both arm families — 73-77k entries removed against a 30 s
+stall — it is **~2,500/s under load**, against ~2,800/s idle on the same
+storage. Contention costs about 10 %, not the threefold this ADR implied.
+
+Consequences: the duty cycle `write rate / delete rate` is correspondingly
+lower, the capacity condition has more headroom than stated, and purge duration
+is `P ≈ interval × write rate / 2,500` on this storage — about 36 s at
+300 writes/s on a five-minute interval, against a measured 30 s stall.
+
+`P` cannot be read from the log on 2.6: the `etime`/`nentries` line sits inside
+a `LogTest( LDAP_DEBUG_SYNC )` block that exists in 2.7.1 and not in 2.6.x,
+which carries only the minCSN message under the same tag. At `logLevel: 16640`
+a 2.6 pod emits no purge lines at all, so on 2.6 `P` must be derived as above.
+
+### Open, and deliberately not resolved here
+
+Peak CSN lag is *higher* staggered (34.7 s and 39.2 s against 19.6 s). One
+plausible mechanism is that synchronising is accidentally good for replication:
+while the write target is stalled there is nothing new to replicate, so the
+peer's stall overlaps a quiet period. Separating them makes the peer stall while
+traffic flows. A second synchronised arm was still running when this was
+written, and it decides whether 19.6 s was an outlier or the inversion is real.
+Either way it does not touch the client-visible conclusion above.
+
+Every arm is the 2+2 shape. There is no three-provider data, so the `d = n−2`
+cooldown question stays unknown rather than answered badly.

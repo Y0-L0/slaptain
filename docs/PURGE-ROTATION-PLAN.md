@@ -319,10 +319,16 @@ Landed with it:
   `n`, so `-1` is `n-1` and survives a scale event. Default **1**. `minimum: 1`
   is gone; the rule is `v mod n ≠ 0`, which needs `spec.replicas` and is
   therefore reported rather than refused at admission.
-- **The fallback walk became ascending**, `v … n−1`. The pod purging this slot
-  falls off the end of the range instead of being excluded by a doc comment plus
-  a property test — the property test is kept anyway, as the guard against
-  someone reintroducing a walk that can reach it.
+- **The fallback walk degrades in the direction of the sign**, away from the
+  purge, wrapping within the non-zero offsets: `-1` degrades to `-2`, not to
+  `+1`, so a choice that cannot be honoured stays near what its author meant
+  rather than crossing to the opposite end of it. An earlier ascending-only
+  form (ADR-037 amendment 9) had one candidate whenever `v` sat at the end of
+  the range, which handed writes to the purging pod with eligible pods
+  unexamined; amendment 10 replaces it and withdraws the claim that the
+  forbidden slot could fall off the end. The skip is explicit again, and the
+  property test asserts the stronger form: never the purging pod **while any
+  other pod is eligible**.
 - **Two-token values are refused, never reinterpreted** (ADR-035: pre-1.0 the
   clean design wins). Because the field changed type, the refusal is the API
   server's rather than a condition — a stricter and earlier refusal than the

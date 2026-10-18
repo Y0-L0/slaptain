@@ -1,0 +1,34 @@
+# Turning the ADR-037 purge rotation on, for a mesh.
+#
+# An OVERLAY, not a second mesh: stack it on top of a complete values file so
+# that the thing it demonstrates is the only thing it says.
+#
+#   helm upgrade --install ldap ./charts/slapd-mesh \
+#     -n slaptain --create-namespace \
+#     -f charts/slapd-mesh/examples/three-site.yaml \
+#     -f charts/slapd-mesh/examples/rotation.yaml
+#
+# Applied UNCHANGED at every site, like everything else in this chart. The
+# values below name no site, no endpoint and no pod — they are a schedule
+# shape, and every site derives the same grid from the same cluster.replicas.
+#
+# What it does, at three sites of 2 read-write pods each (three-site.yaml):
+# every pod's accesslog purge interval becomes 2 × 6h = 12h, pod 0 purges on
+# the 12h grid and pod 1 six hours later, and each site publishes a
+# slapd-write Service naming whichever of its two pods is not about to purge.
+# Send WRITES to slapd-write; reads stay on slapd as before.
+#
+# Before you copy this, check the two prerequisites — a slapd image carrying
+# the purge-phase patch (2.7.1-0+slaptain2 or later), and clients whose
+# connections are short-lived relative to slotLength. Both are spelled out in
+# charts/slapd-mesh/values.yaml and in docs/TUNING.md, which also carries the
+# sizing arithmetic. 6h below is an illustration, not a recommendation: ADR-037
+# fixes no number for it and neither does this file.
+
+cluster:
+  rotation:
+    enabled: true
+    slotLength: "6h"
+    # writerOffset is deliberately absent: unset takes the operator's
+    # replicas−1, the pod that purges NEXT and so has had the longest to work
+    # off its backlog. Set it only while measuring.

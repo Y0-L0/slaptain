@@ -192,6 +192,55 @@ a slaptain patch, not upstream's, so it needs a slaptain slapd image
 Opt-in, and off by default: nothing about an existing cluster's purge schedule
 changes until you set it.
 
+#### Turning it on
+
+Both charts render `spec.rotation`, and a chart that says nothing about rotation
+renders byte-identically to one from before the feature existed — an upgrade changes
+nothing for a cluster that has not asked.
+
+Single site, `charts/slapd`:
+
+```yaml
+# values.yaml
+replicas: 3
+replication:
+  enabled: true
+rotation:
+  enabled: true
+  slotLength: "6h"      # required when enabled; there is no default
+```
+
+A mesh, `charts/slapd-mesh` — under `cluster:`, and applied unchanged at every site
+like everything else in that chart:
+
+```yaml
+cluster:
+  replicas: 2
+  rotation:
+    enabled: true
+    slotLength: "6h"
+```
+
+`charts/slapd-mesh/examples/rotation.yaml` is that block as a stackable overlay:
+`-f examples/three-site.yaml -f examples/rotation.yaml`.
+
+The values name no site, no endpoint and no pod — a schedule is a shape, and every
+site derives the same grid from the same `replicas`. The grid is nonetheless per
+**site**, over that site's own read-write pods; a write sent to another site lands
+where the client sent it, which is a mesh accepting writes at any provider rather
+than a gap in the rotation.
+
+Leave `writerOffset` unset unless you are measuring: unset is the operator's
+`replicas − 1`, the pod that purges next and has had the longest to work off its
+backlog. Note what the chart does *not* do — it restates neither that default nor
+any other, so the day the operator's changes, your cluster follows.
+
+**Before you set it, check both prerequisites.** The image must carry the
+purge-phase patch (above), and the clients must be the kind this helps — see
+*It benefits clients that open short-lived connections*, below. Neither is
+something the operator can arrange for you, and the second decides whether the
+feature does anything at all.
+
 **Staggering alone changes nothing a client can see.** This is measured, not
 cautionary: de-synchronising the providers' purges lands on the synchronised arm and
 nowhere near the arm where the write target did not purge (ADR-037, third

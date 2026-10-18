@@ -273,6 +273,46 @@ cluster:
   #  enabled: true
   #  resources: {}    # the exporter sidecar's own; no default, unset declares nothing
 
+  # -- spec.rotation (ADR-037): the accesslog purge runs where the writes are
+  # not. slapd purges an accesslog in one unpaced loop holding that
+  # environment's only LMDB writer, and every client write appends to the same
+  # environment — so a provider purging its own log blocks its own writes.
+  # Turning this on gives each read-write pod its own purge phase on one
+  # absolute grid, and publishes a second Service, <cluster.name>-write, that
+  # follows the grid and always names a pod that is not purging.
+  #
+  # MESH-SCOPED, like everything else in this file. These values name no site,
+  # no endpoint and no pod — they are a schedule SHAPE, and every site derives
+  # the same grid from the same cluster.replicas. Do not reach for a per-site
+  # value here: sites rotating on different grids would each still be
+  # internally correct, so the divergence would pass every parity check the
+  # mesh has (ADR-028 §3).
+  #
+  # The grid is per SITE, over that site's own read-write pods. A write sent to
+  # another site still lands wherever the client sent it — a mesh accepts a
+  # write at any provider by design, and the endpoint is a recommendation
+  # rather than an enforcement.
+  #
+  # Off by default; nothing about an installed mesh changes until you set it,
+  # and <cluster.name>-write is not created at all. Two prerequisites, both
+  # real: a slapd image carrying the purge-phase patch (2.7.1-0+slaptain2 or
+  # later), and clients that open SHORT-LIVED connections — a Service steers
+  # new connections and never re-wires an established one, so a pooling client
+  # needs a maximum connection lifetime short relative to slotLength to benefit
+  # at all. See docs/TUNING.md for sizing and docs/MULTI-SITE.md for the mesh
+  # install.
+  rotation: {}
+  #  enabled: true
+  #  # t: how long each pod holds the write endpoint, and the spacing between
+  #  # neighbouring pods' purge phases. REQUIRED when enabled, NO default. Every
+  #  # pod's purge interval becomes replicas × slotLength, pod k purges at
+  #  # k × slotLength. Whole seconds — olcAccessLogPurge counts in [ddd+]hh:mm[:ss].
+  #  slotLength: "6h"
+  #  # d: slots between a pod's own purge and its turn at the write endpoint.
+  #  # Unset → the operator's replicas−1. Range [1, replicas−1]; clamped and
+  #  # reported. Leave unset unless you are measuring.
+  #  writerOffset: 1
+
 # -- Keep the SlapdDatabase and SlapdSchema objects when the release is removed
 # (`helm.sh/resource-policy: keep`). On by default: a database is the
 # declaration of a directory that holds data, and how much a `helm uninstall`

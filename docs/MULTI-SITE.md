@@ -786,6 +786,41 @@ and the pods roll to drop the now-unused CA mount.
 Edit the directory values file and apply it at every site. The invariant table above
 is the checklist for what must not end up differing.
 
+### Turning on the purge rotation
+
+`cluster.rotation` (ADR-037) goes in `values.directory.yaml` alongside the rest of
+the cluster shape, and is applied **everywhere** like every other value in this
+chart:
+
+```yaml
+cluster:
+  rotation:
+    enabled: true
+    slotLength: "6h"      # required when enabled; there is no default
+```
+
+`charts/slapd-mesh/examples/rotation.yaml` is that block as a stackable overlay.
+
+It carries no per-site field and must never grow one. Every site derives the same
+grid from the same `cluster.replicas`, which is what keeps the invariant table
+above true of it. Two sites rotating on different grids would each still be
+internally correct, so nothing in the mesh would report the divergence.
+
+The grid is nevertheless per **site**: each site's `<cluster>-write` Service moves
+over that site's own read-write pods, and there is no mesh-wide write endpoint. A
+write sent to another site lands there, as it always has — a mesh accepts writes at
+any provider, and `<cluster>-write` is a recommendation, not an enforcement. Point
+each site's clients at that site's `<cluster>-write` for writes; reads stay on
+`<cluster>`.
+
+It helps clients whose connections are short-lived relative to `slotLength`, since
+a Service steers new connections and never re-wires an established one. Sizing, the
+image prerequisite and the condition reasons are in
+[TUNING.md](TUNING.md#the-purge-rotation-what-the-operator-checks-and-what-it-only-reports).
+
+Nothing about the rotation changes the pod template, so turning it on rolls no pod —
+unlike adding a peer.
+
 ### Reinstalling a site (and the trap in doing it by halves)
 
 Deleting the `SlapdCluster` garbage-collects the Secrets it owns — including

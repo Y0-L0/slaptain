@@ -679,6 +679,14 @@ helm-lint:
 	$(HELM) template slapd ./charts/slapd -f tests/values.slapd-persistent.yaml > /dev/null
 	$(HELM) template ldap ./charts/slapd-mesh -f charts/slapd-mesh/examples/three-site.yaml > /dev/null
 	$(HELM) template toolkit ./charts/slapd-toolkit > /dev/null
+# Rotation is opt-in, so the shapes above all render it OFF. These two render it
+# ON: without them nothing in CI exercises the rotation templating, and
+# examples/rotation.yaml is a file nothing reads until it has already rotted.
+	$(HELM) template slapd ./charts/slapd \
+		--set rotation.enabled=true --set rotation.slotLength=6h > /dev/null
+	$(HELM) template ldap ./charts/slapd-mesh \
+		-f charts/slapd-mesh/examples/three-site.yaml \
+		-f charts/slapd-mesh/examples/rotation.yaml > /dev/null
 
 ## verify-generated: regenerate the CRDs, the RBAC role and the deepcopy, and
 ## fail if any checked-in copy (operator/config, charts/operator/crds,

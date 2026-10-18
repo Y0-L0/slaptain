@@ -170,6 +170,54 @@ monitoring: {}
 #  enabled: true
 #  resources: {}    # the exporter sidecar's own; no default, unset declares nothing
 
+# -- spec.rotation (ADR-037): the accesslog purge runs where the writes are not.
+#
+# slapd purges an accesslog in one unpaced loop holding that environment's only
+# LMDB writer, and every client write appends to the same environment — so a
+# provider purging its own log blocks its own writes. Turning this on gives each
+# read-write pod its own purge phase on one absolute grid, and publishes a second
+# Service, <release>-write, that follows the grid and always names a pod that is
+# not purging.
+#
+# Off by default and nothing changes until you set it: an existing cluster keeps
+# the purge schedule it has, and <release>-write is not created at all.
+#
+# PREREQUISITES, both of them real:
+#
+#   1. A slapd image carrying the purge-phase patch (2.7.1-0+slaptain2 or later;
+#      `slapd -VV`). The phase is a third field of olcAccessLogPurge and is not
+#      upstream. A pod whose slapd refuses it keeps a bounded journal and simply
+#      does not take its phase, reported per database as PurgePhaseUnsupported.
+#   2. CLIENTS THAT OPEN SHORT-LIVED CONNECTIONS, or whose pool caps connection
+#      lifetime short relative to slotLength. A Kubernetes Service steers NEW
+#      connections; it never re-wires an established one. A client holding a
+#      connection for hours keeps writing to the pod it first reached however
+#      often the endpoint moves, and no operator-side setting changes that. We
+#      have not measured where the ratio stops paying, so no number is given.
+#
+# Writes sent anywhere but <release>-write stay perfectly legal — every pod is a
+# provider. The endpoint is a recommendation, and the only cost of ignoring it is
+# the stall this feature removes. Reads stay on <release> as before.
+#
+# Sizing is yours: see docs/TUNING.md for the capacity condition and what each
+# condition reason on the CR is telling you.
+rotation: {}
+#  # -- Turn the rotation on. Opt-in; an explicit false is kept distinct from
+#  # unset, so setting it now survives the default moving later.
+#  enabled: true
+#  # -- t: how long each pod holds the write endpoint, and the spacing between
+#  # neighbouring pods' purge phases. REQUIRED when enabled, and there is NO
+#  # default — a schedule is not something the operator may invent for you.
+#  # Every pod's purge interval becomes replicas × slotLength and pod k purges at
+#  # k × slotLength. A Go duration string; whole seconds, since olcAccessLogPurge
+#  # counts in [ddd+]hh:mm[:ss].
+#  slotLength: "6h"
+#  # -- d: how many slots sit between a pod's own purge and its turn at the write
+#  # endpoint. Unset → the operator's replicas−1, the pod that purges NEXT and so
+#  # has had the longest to work off its backlog. Valid range [1, replicas−1];
+#  # the operator clamps and says so. Leave it unset unless you are measuring.
+#  writerOffset: 1
+
 # -- Cross-site fan-out for spec.replication.externalPeers: how many remote pods
 # each local pod opens a syncrepl connection to, per peer. Unset → 1. A per-peer
 # externalPeers[].replicasPerPeer still wins where set. Buys link redundancy,

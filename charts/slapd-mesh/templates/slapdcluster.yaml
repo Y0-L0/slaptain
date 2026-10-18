@@ -127,3 +127,38 @@ spec:
   monitoring:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+
+  {{- /* spec.rotation (ADR-037). Mesh-scoped by construction and it must stay
+         that way: the three values below are a schedule shape — a duration and
+         a slot count — and none of them names a site, an endpoint or a pod.
+         They are read from .Values.cluster.rotation, which this chart applies
+         unchanged at every site, so every site derives the SAME grid from the
+         SAME spec.replicas. There is deliberately no per-site override and
+         there must never be one: sites rotating on different grids would still
+         each be internally correct, so the divergence would be invisible to
+         every parity check the mesh has (ADR-028 §3 — existence and a hash).
+
+         The grid is per SITE, not per mesh. Each site's write endpoint moves
+         over that site's own read-write pods; a cross-site write still lands
+         wherever the client sent it. That is not a gap in the rotation — a
+         mesh accepts a write at any provider by design (ADR-037 decision 2).
+
+         Field-by-field rather than toYaml for the same three reasons as
+         charts/slapd — slotLength must reach the API server as a string, and
+         `enabled: false` / `writerOffset: 0` must survive being falsy. See
+         that chart's template for the full argument. */ -}}
+  {{- $rot := .Values.cluster.rotation | default dict -}}
+  {{- $hasRotEnabled := and (hasKey $rot "enabled") (not (kindIs "invalid" $rot.enabled)) -}}
+  {{- $hasWriterOffset := and (hasKey $rot "writerOffset") (not (kindIs "invalid" $rot.writerOffset)) -}}
+  {{- if or $hasRotEnabled $rot.slotLength $hasWriterOffset }}
+  rotation:
+    {{- if $hasRotEnabled }}
+    enabled: {{ $rot.enabled }}
+    {{- end }}
+    {{- with $rot.slotLength }}
+    slotLength: {{ . | quote }}
+    {{- end }}
+    {{- if $hasWriterOffset }}
+    writerOffset: {{ $rot.writerOffset }}
+    {{- end }}
+  {{- end }}

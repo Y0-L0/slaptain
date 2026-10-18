@@ -129,12 +129,6 @@ func writeServiceName(cluster string) string {
 	return cluster + writeServiceSuffix
 }
 
-// statefulSetPodName spells a pod name the way the StatefulSet controller does,
-// which is what statefulset.kubernetes.io/pod-name carries.
-func statefulSetPodName(cluster string, ordinal int32) string {
-	return fmt.Sprintf("%s-%d", cluster, ordinal)
-}
-
 // writeServiceSelector returns the label selector that picks exactly one pod:
 // the standard cluster labels plus statefulset.kubernetes.io/pod-name set to
 // "<cluster>-<ordinal>".

@@ -256,7 +256,7 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// The SlapdDatabase controller re-evaluates the same pure function from the
 	// same CR rather than reading a status field, so the two can never disagree
 	// about the grid, and nothing new is persisted to keep in sync.
-	r.reconcileRotationGate(ctx, sc)
+	rotation := r.reconcileRotationGate(ctx, sc)
 
 	// 2. Reconcile cn=config credential secret (<name>-config-password).
 	if err := r.reconcileSecret(ctx, sc); err != nil {
@@ -271,6 +271,28 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// 4. Reconcile ClusterIP Service.
 	if err := r.reconcileClusterIPService(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileClusterIPService: %w", err)
+	}
+
+	// 4c. The rotating write endpoint (ADR-037 decision 2, PURGE-ROTATION-PLAN
+	//     Phase 4). <name>-write selects exactly ONE read-write pod — the one
+	//     whose purge is furthest away — and moves at every slot boundary, so
+	//     the pod taking writes is never the pod purging. That is the whole
+	//     feature: the per-pod phases underneath it changed no client-visible
+	//     number, and ADR-037's third amendment measured exactly that.
+	//
+	//     time.Now() is read ONCE, here, and threaded into pure functions; the
+	//     grid is absolute and epoch-anchored, so every decision and the requeue
+	//     that wakes the next one are read off the same instant.
+	//
+	//     Alongside the other Services, because it is one: it costs nothing when
+	//     the cluster is unhealthy, and a Service with no endpoints is harmless.
+	//     The requeue it asks for is merged at the END of the pass — see
+	//     requeueAfterFor, and the reason it may not live inside the replication
+	//     branch.
+	now := time.Now()
+	rotationRequeue, err := r.reconcileWriteService(ctx, sc, rotation, now)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcileWriteService: %w", err)
 	}
 
 	// 4a. Publish the per-database directory lists the init container reads.
@@ -414,19 +436,16 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	// Requeue until fully Running.
-	if sc.Status.Phase != ldapv1alpha1.PhaseRunning {
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-	}
-
-	// Periodic requeue for CSN convergence monitoring when replication is active.
-	// Without this, CSN checks only run on resource changes and go stale once
-	// the cluster stabilises.
-	if sc.Spec.Replication.Enabled {
-		return ctrl.Result{RequeueAfter: csnCheckInterval}, nil
-	}
-
-	return ctrl.Result{}, nil
+	// The pass's requeue, in one place.
+	//
+	// Two cadences, merged rather than branched: the controller's own — 10s
+	// until Running, then the 60s CSN tick, and that one is GATED on
+	// spec.replication.enabled, so a Running standalone cluster asks for no
+	// requeue at all (ADR-002 amendment) — and the rotation's next slot
+	// boundary. Returning the rotation's from inside the replication branch
+	// would rotate replicated clusters and silently never rotate the others,
+	// which is the failure mode ADR-037 keeps meeting.
+	return ctrl.Result{RequeueAfter: requeueAfterFor(sc, rotationRequeue)}, nil
 }
 
 // reconcileReadOnlyFleet runs steps 5a-5c: the read-only headless Service, the
@@ -668,18 +687,21 @@ func (r *SlapdClusterReconciler) headlessService(sc *ldapv1alpha1.SlapdCluster) 
 			// resolves <name>-<ordinal>.<name>-headless… for every per-pod
 			// cn=config operation (ADR-002), and syncrepl peers address each
 			// other the same way. Default behaviour drops a NotReady pod out of
-			// that DNS, so once slapd has a readiness probe an unhealthy pod
-			// would become an UNREACHABLE one — the operator could not converge
-			// it, and ADR-027's identity gate would then withhold syncrepl for
-			// the whole site. The cluster's answer to one sick pod must not be
-			// to stop configuring all of them.
+			// that DNS, so an unhealthy pod would become an UNREACHABLE one —
+			// the operator could not converge it, and ADR-027's identity gate
+			// would then withhold syncrepl for the whole site. The cluster's
+			// answer to one sick pod must not be to stop configuring all of
+			// them.
 			//
 			// The client-facing ClusterIP Service deliberately does NOT set
 			// this: stopping traffic at an unready pod is the point of a probe.
+			// Neither does <name>-write (ADR-037): a pod that is not answering
+			// LDAP is the last pod writes should be steered to.
 			//
-			// ADR-013 named this in May 2026 and it never shipped, because the
-			// probe it was written for never shipped. Landed on its own while it
-			// is still a no-op — nothing is ever NotReady today.
+			// ADR-013 named this in May 2026 and it landed on its own, while it
+			// was still a no-op. It stopped being one when ADR-030 shipped the
+			// readiness probe (slapdReadinessProbe, probes.go): a pod CAN be
+			// NotReady today, and this setting is what keeps it configurable.
 			PublishNotReadyAddresses: true,
 			Selector:                 selectorLabels(sc.Name),
 			Ports: []corev1.ServicePort{
@@ -854,18 +876,21 @@ func (r *SlapdClusterReconciler) readOnlyHeadlessService(sc *ldapv1alpha1.SlapdC
 			// resolves <name>-<ordinal>.<name>-headless… for every per-pod
 			// cn=config operation (ADR-002), and syncrepl peers address each
 			// other the same way. Default behaviour drops a NotReady pod out of
-			// that DNS, so once slapd has a readiness probe an unhealthy pod
-			// would become an UNREACHABLE one — the operator could not converge
-			// it, and ADR-027's identity gate would then withhold syncrepl for
-			// the whole site. The cluster's answer to one sick pod must not be
-			// to stop configuring all of them.
+			// that DNS, so an unhealthy pod would become an UNREACHABLE one —
+			// the operator could not converge it, and ADR-027's identity gate
+			// would then withhold syncrepl for the whole site. The cluster's
+			// answer to one sick pod must not be to stop configuring all of
+			// them.
 			//
 			// The client-facing ClusterIP Service deliberately does NOT set
 			// this: stopping traffic at an unready pod is the point of a probe.
+			// Neither does <name>-write (ADR-037): a pod that is not answering
+			// LDAP is the last pod writes should be steered to.
 			//
-			// ADR-013 named this in May 2026 and it never shipped, because the
-			// probe it was written for never shipped. Landed on its own while it
-			// is still a no-op — nothing is ever NotReady today.
+			// ADR-013 named this in May 2026 and it landed on its own, while it
+			// was still a no-op. It stopped being one when ADR-030 shipped the
+			// readiness probe (slapdReadinessProbe, probes.go): a pod CAN be
+			// NotReady today, and this setting is what keeps it configurable.
 			PublishNotReadyAddresses: true,
 			Selector:                 readOnlySelectorLabels(sc.Name),
 			Ports: []corev1.ServicePort{

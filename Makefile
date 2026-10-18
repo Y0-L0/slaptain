@@ -120,6 +120,13 @@ OPENLDAP_DEB_IMAGE_ASAN  = localhost/$(PROJECT)/openldap-deb:$(IMAGE_TAG)-asan
 # Carrier for the patched 2.6 build. Its own image because the .debs differ:
 # different upstream version, and the local patches are in them.
 OPENLDAP_DEB_IMAGE_OL26SRC = localhost/$(PROJECT)/openldap-deb:$(IMAGE_TAG)-ol26src
+# Stamped onto the -ol26src images as a label, derived from the directory so it
+# cannot drift from what was actually applied. `-ol26` and `-ol26src` differ by
+# three characters and only one of them carries patches, so the image says which
+# it is without anyone having to run slapd -VV to find out.
+OL26SRC_PATCHES := $(notdir $(basename $(wildcard images/openldap-deb/local-patches/*.patch)))
+OL26SRC_LABELS  = --label net.chuck-chuck-chuck.slaptain.local-patches="$(OL26SRC_PATCHES)" \
+		  --label org.opencontainers.image.description="OpenLDAP 2.6 from Debian source, with slaptain local patches"
 # Set RUN_UPSTREAM_TESTS=1 to run OpenLDAP's own test suite during the package
 # build (slow; off by default — see images/openldap-deb/README.md).
 RUN_UPSTREAM_TESTS ?= 0
@@ -278,12 +285,14 @@ $(STAMPS)/openldap-deb-ol26src: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
 $(STAMPS)/init-ol26src: $(INIT_SRCS) $(STAMPS)/openldap-deb-ol26src $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
 	$(CONTAINER_ENGINE) build \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_OL26SRC) \
+		$(OL26SRC_LABELS) \
 		-t $(INIT_IMAGE_OL26SRC) images/slapd-init/
 	@touch $@
 
 $(STAMPS)/slapd-ol26src: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-ol26src $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
 	$(CONTAINER_ENGINE) build \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_OL26SRC) \
+		$(OL26SRC_LABELS) \
 		-t $(SLAPD_IMAGE_OL26SRC) images/slapd/
 	@touch $@
 

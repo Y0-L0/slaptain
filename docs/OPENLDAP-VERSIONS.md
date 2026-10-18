@@ -1,8 +1,9 @@
 # OpenLDAP versions and image tags
 
-slaptain ships two slapd image pairs. The plain tag is **OpenLDAP 2.7.1**; the
-`-ol26` tag is the previous **OpenLDAP 2.6** build from Debian's package. The
-decision and its reasoning are in
+slaptain ships three slapd image pairs. The plain tag is **OpenLDAP 2.7.1**;
+the `-ol26` tag is the previous **OpenLDAP 2.6** build from Debian's package;
+the `-ol26src` tag is that same 2.6 built from Debian's *source* package with
+local patches applied. The decision and its reasoning are in
 [ADR-021](adrs/adr-021-openldap-2.7-dual-images.md).
 
 ## Which image is which
@@ -10,10 +11,11 @@ decision and its reasoning are in
 | Image tag | OpenLDAP | Use it for |
 |---|---|---|
 | `<registry>/slaptain/slapd:<tag>` + `slapd-init:<tag>` | 2.7.1 (`2.7.1-0+slaptain1`) | everything — this is the default |
-| `<registry>/slaptain/slapd:<tag>-ol26` + `slapd-init:<tag>-ol26` | 2.6.x (Debian trixie) | legacy interop and hot-migration clusters that must match a 2.6 source (ADR-011) |
+| `<registry>/slaptain/slapd:<tag>-ol26` + `slapd-init:<tag>-ol26` | 2.6.x (Debian trixie binary) | legacy interop and hot-migration clusters that must match a 2.6 source (ADR-011) |
+| `<registry>/slaptain/slapd:<tag>-ol26src` + `slapd-init:<tag>-ol26src` | 2.6.x (Debian trixie **source** + local patches) | anything needing a patch that only exists here — today, the `logpurge` phase parameter |
 
-`<tag>` is the same release tag for both pairs — `-ol26` is only a suffix, never
-a separate version line. `slapd-toolkit` and `operator` have one tag each and
+`<tag>` is the same release tag for all three pairs — the suffixes are only
+suffixes, never separate version lines. `slapd-toolkit` and `operator` have one tag each and
 carry no suffix.
 
 2.7 is the default because OpenLDAP 2.6 is affected by upstream
@@ -23,6 +25,35 @@ volumes and resyncs from peers drives the whole mesh into a
 2.7.0/2.7.1, and no distribution packages 2.7 as of 2026-09-11 — hence the 2.7
 images come from a vendored Debian packaging fork
 ([`images/openldap-deb/`](../images/openldap-deb/README.md)).
+
+### `-ol26` and `-ol26src` are three characters apart and only one is patched
+
+`-ol26` installs Debian's prebuilt binary, so it carries no local patch and has
+nowhere to carry one. `-ol26src` compiles the same upstream version from
+Debian's source with everything in
+[`images/openldap-deb/local-patches/`](../images/openldap-deb/local-patches/)
+applied.
+
+The failure this invites is quiet: deploy `-ol26` expecting a patched feature,
+and the configuration it needs is simply rejected, or worse accepted and
+ignored — a clean-looking run in which the thing under test never happened.
+`-ol26` is also the suffix a long-running 2.6 cluster already uses, so it is
+the one a hand reaches for.
+
+Two ways to tell them apart without deploying anything:
+
+```bash
+# the image says what it carries, without starting slapd
+podman inspect --format '{{index .Config.Labels "net.chuck-chuck-chuck.slaptain.local-patches"}}'   <registry>/slaptain/slapd:<tag>-ol26src
+
+# the binary says so too: a patched build carries a +slaptain… package version
+podman run --rm --entrypoint="" <image> slapd -VV
+```
+
+A build timestamp older than the tag's commit is normal for `-ol26` and not a
+staleness bug: its Containerfile rarely changes, so the layers are cached and
+the image keeps its original creation date while taking a fresh tag. Judge it
+by the label and the version string, never by the date.
 
 ## Pinning the 2.6 pair
 

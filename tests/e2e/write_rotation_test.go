@@ -141,6 +141,35 @@ var _ = Describe("ADR-037: the write endpoint rotates",
 				}
 			})
 
+			// The cluster was on the chart's production-shaped grid until the
+			// line above (6h, next rotation at midnight), and the operator
+			// adopts the 20s one on its next pass. Until it has, the Service
+			// still names whichever pod the OLD grid chose — which is a
+			// perfectly valid selector for a grid that is no longer in force,
+			// and sampling it reads as a rotation pointing at the wrong pod.
+			//
+			// Measured: the operator repointed to slapd-2 for slot 1 at
+			// 21:02:29.0 and the first sample read slapd-0 — the 6h grid's
+			// answer — at 21:02:29.022.
+			//
+			// So wait for ONE coherent reading before anything samples. This
+			// is a precondition, not an assertion weakened: every strict
+			// per-sample check below still runs, and still runs four times.
+			By("waiting for the operator to adopt the new grid before anything samples it")
+			Eventually(ctx, func() string {
+				now := time.Now()
+				want := fmt.Sprintf("slapd-%d", (slotAt(now)+1)%replicas)
+				if got := writeSelector(ctx); got == want {
+					return want
+				}
+				return fmt.Sprintf("selector=%s grid wants %s", writeSelector(ctx), want)
+			}).WithTimeout(4*slotLength).WithPolling(time.Second).Should(HavePrefix("slapd-"),
+				"the write endpoint never agreed with the %s grid. Either the operator has not "+
+					"adopted the new slotLength (it requeues at every boundary, so one pass is "+
+					"all it should take), or the writer displacement is wrong: with "+
+					"slotsFromWriteToPurge unset the default is +1, so the endpoint must name "+
+					"the pod that purges in the NEXT slot", slotLength)
+
 			By("mapping each pod's olcServerID to its ordinal, so a CSN names a pod")
 			// An entryCSN carries the sid of the server that accepted the write
 			// (#sid# field), and that is the only in-band way to tell which pod a

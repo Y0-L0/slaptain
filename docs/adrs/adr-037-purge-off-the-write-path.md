@@ -986,3 +986,43 @@ been produced by a running pod — reaching it needs a 2.6 image, and the LMDB
 verified against the real binary and the branch is unit-tested, which is not
 the same as having seen it. And this is a `cn=config` change on the
 replication path validated on one site: **multi-site is unvalidated.**
+
+## Amendment, 2026-10-18 (seventh): the connection lifetime is a precondition, not a risk
+
+Decision 2 carries a paragraph headed "Unverified, and load-bearing", which
+reads as though the design's validity waits on measuring what share of write
+traffic follows a selector change. That framing is withdrawn. It conflates a
+property of Kubernetes with an open question about this feature.
+
+A Service does not re-wire established connections. kube-proxy steers new
+ones; existing conntrack flows continue to the old endpoint. This is not a
+finding, it is how the mechanism works, and it was known when the rotation was
+chosen.
+
+**So the scope is a precondition, stated positively.** This feature is for
+deployments whose clients open short-lived connections, or whose pooling
+clients cap connection lifetime short enough relative to the slot length for a
+rotation to reach them. A client holding a very long-lived connection keeps
+writing to the pod it is already connected to and does not benefit. That is a
+property of the deployment, not a defect in the operator, and no amount of
+operator-side work changes it — short of refusing writes at the old endpoint,
+which decision 2 rules out in its own first sentence.
+
+**Success is therefore defined as: the rotation works for short-lived
+connections.** That is what the e2e asserts and that is the bar. A new
+connection opened after a rotation must reach the new write target. The
+companion observation — that an open connection keeps talking to the old pod —
+is expected behaviour and is recorded as confirmation of this precondition,
+never as a caveat on whether the design works.
+
+Open question 1 is closed accordingly: answered by scope rather than by
+measurement. The quantity it proposed to measure — the share of traffic that
+follows, and how fast — is a property of a particular client population, so it
+belongs to a deployment sizing its own rotation, next to the write rate and
+the delete rate it is already asked to measure. It is not a gate on this
+decision.
+
+What this does not excuse: the sizing guidance has to say so. A deployment
+cannot be expected to infer the connection-lifetime requirement from the
+absence of a warning, and `docs/TUNING.md` states it as a prerequisite rather
+than as a risk.

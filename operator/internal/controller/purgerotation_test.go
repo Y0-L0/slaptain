@@ -600,11 +600,13 @@ func TestComposePurgeKeepsThePhaseBelowTheInterval(t *testing.T) {
 // purges in slot p, so pod p writes in slot p−v, and at slot s the writer is
 // the pod that purges v slots from now: (s+v) mod n.
 //
-// The walk is ASCENDING — v, v+1, … n−1 — so the pod purging THIS slot falls
-// off the end of the range instead of needing a rule to exclude it. Under the
-// superseded descending parameterisation "never offset 0" was a doc comment
-// plus a property test; here it is the loop bound, and the property test below
-// stays as the guard against someone reintroducing the rule.
+// The walk DEGRADES IN THE DIRECTION OF THE SIGN (tenth amendment): candidates
+// are (v + k·sign(v)) mod n for increasing k, skipping ≡ 0, until all n−1
+// non-zero offsets have been offered. The ninth amendment's ascending
+// `v … n−1` is withdrawn — it had ONE candidate at v = −1, which handed the
+// writes to the purging pod with pods to spare — and with it the claim that
+// offset 0 needs no rule to exclude it. TestWriteTargetWalkOrder pins the
+// order; the property tests below pin that offset 0 is never offered.
 //
 // v is a tunable with a measured range, not a fixed choice: it is bounded by
 // the purge duration at one end and the drain time at the other, and the drain
@@ -748,10 +750,11 @@ func TestWriteTarget(t *testing.T) {
 // offset 0 while another pod is available does not merely degrade the feature,
 // it removes it, and every health signal stays green while it does.
 //
-// The ascending walk makes the property fall out of the loop bound, and the
-// test is KEPT anyway: it is the guard against someone reintroducing a walk
-// that can reach offset 0 — which is exactly what the superseded descending
-// parameterisation could do, and had to be forbidden by a comment.
+// This is the WEAK half of the property, kept for the healthy fleet it sweeps.
+// The clause that does the work since ADR-037's tenth amendment — never the
+// purging pod while ANY other pod is eligible — lives in
+// TestWriteTargetPrefersAnyEligiblePodOverThePurgingOne, because the ninth
+// amendment's walk satisfied this form and still had the hole.
 //
 // The legal range of v is "every int32 whose residue mod n is non-zero", so the
 // sweep covers both signs rather than only the positive half the old

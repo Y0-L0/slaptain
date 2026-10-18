@@ -215,12 +215,34 @@ func composePurge(retention, interval time.Duration, phase *time.Duration) strin
 // (that is what purgePhase says), so pod p writes in slot p−v, and at slot s
 // the writer is therefore the pod that purges v slots from now: (s+v) mod n.
 //
-// The walk is ASCENDING — v, v+1, … n−1 — reading as "the pod that purges v
-// slots from now; if it is not eligible, one that purges a little later".
-// Offset 0 is the pod purging THIS slot, and it falls off the end of the range
-// rather than needing a rule to exclude it. Under the superseded descending
-// parameterisation "never offset 0" was a doc comment plus a property test;
-// here it is the loop bound.
+// The walk DEGRADES IN THE DIRECTION OF THE SIGN (ADR-037, tenth amendment):
+// candidates are (v + k·sign(v)) mod n for increasing k, skipping ≡ 0, until
+// all n−1 non-zero offsets have been offered — preferred first, each exactly
+// once. It reads as "the pod that purges v slots from now; if it is not
+// eligible, one a little further in the same direction".
+//
+// The ninth amendment's ascending `v … n−1` is withdrawn, and so is its claim
+// that offset 0 falls off the end of the range rather than needing a rule.
+// That elegance held only because the range stopped short, and stopping short
+// is the defect: at v = −1 the walk had ONE candidate, so a single ineligible
+// pod handed the writes to the purging pod with n−2 pods unexamined. The
+// explicit skip is the cheap price for never doing that.
+//
+// Two properties the direction buys, neither cosmetic:
+//
+//   - degradation stays near the intent. A purely ascending walk degrades −1
+//     to offset 1 — from "just before the purge" to "just after it", the
+//     opposite end of the meaning. Stepping by the sign gives −2: still before
+//     the purge, one slot further out.
+//   - the sign is read BEFORE the value is normalised mod n, so −1 and n−1
+//     select the same pod and degrade in opposite directions. That divergence
+//     is deliberate. The signed form is the one ADR-037 recommends — n−1 means
+//     n−1 only until somebody adds a pod — and the degradation direction is a
+//     second thing the sign legitimately expresses.
+//
+// The wrap is what stepping alone cannot give: at |v| >= 2 stepping exhausts
+// the range before covering it (n = 4, v = +2 offers 2, 3 and never 1), which
+// is the same hole in a new place.
 //
 // eligible carries everything the grid does not know: Ready, not read-only
 // under ADR-036's authorship gate, not working off purge backlog, lag or a
@@ -228,27 +250,26 @@ func composePurge(retention, interval time.Duration, phase *time.Duration) strin
 //
 // Two decided edges, neither of them a fallthrough:
 //
-//   - degenerate fallback. If no offset in [v, n−1] is eligible, the purging
-//     pod itself is taken when it is eligible. ADR-037: with n = 2 and one pod
-//     down the only candidate is the purging pod — "take it and accept the
-//     stall: writes continuing badly beats writes not continuing".
+//   - degenerate fallback. Only when NO non-zero offset is eligible is the
+//     purging pod itself taken. ADR-037: with n = 2 and one pod down the only
+//     candidate is the purging pod — "take it and accept the stall: writes
+//     continuing badly beats writes not continuing". With the walk now
+//     covering every non-zero offset, this is reached exactly when the fleet
+//     really has nothing else left.
 //   - nothing eligible at all returns (0, false). The false means "no writer
 //     could be chosen", and the caller must then leave the Service selector
 //     where it is: the write Service must not be left selecting nothing.
 //
 // Defined behaviour for inputs the gate should never produce:
 //
-//   - v is read modulo n, so −1 and n−1 are the same answer. That is the point
-//     of the sign convention and is what makes a declared value survive a
-//     scale event.
 //   - v ≡ 0 (mod n) reads as 1. Zero and every multiple of n put the write on
 //     the pod that is purging; the rotation gate refuses such a value with a
 //     condition (reasonWriteSlotCollidesWithPurge) and withholds the whole
 //     feature, so this is the defensive end of a path that should not be
 //     walked — and 1 is the one answer that cannot silently invert the
 //     rotation. n = 1 is the exception the rule cannot cover: with one pod
-//     every v is a multiple of n, the single pod is both purger and writer,
-//     and it is reached through the degenerate fallback.
+//     every offset is ≡ 0, the walk offers nothing, and the single pod is
+//     reached through the degenerate fallback as both purger and writer.
 //   - n <= 0 has no writer. A slot outside [0, n) is read modulo n.
 func writeTarget(slot, n, v int32, eligible func(int32) bool) (int32, bool) {
 	if n <= 0 {
@@ -256,16 +277,31 @@ func writeTarget(slot, n, v int32, eligible func(int32) bool) (int32, bool) {
 	}
 	slot = (slot%n + n) % n
 
-	// Modulo first — the whole point of a signed displacement is that −1 and
-	// n−1 are one answer. Only then the defensive floor: v ≡ 0 is the purging
-	// pod, which is the one selection this feature exists to forbid.
+	// The sign FIRST, before the modulo erases it: it is the direction the
+	// choice degrades, and −1 and n−1 are the same selection with opposite
+	// degradations. A zero v degrades upward, matching its defensive floor.
+	step := int32(1)
+	if v < 0 {
+		step = -1
+	}
+
+	// Then the modulo — a signed displacement means −1 and n−1 pick one pod —
+	// and the defensive floor: v ≡ 0 is the purging pod, the one selection
+	// this feature exists to forbid.
 	v = (v%n + n) % n
 	if v == 0 {
 		v = 1
 	}
 
-	// The ascending preference walk. Offset 0 is not in the range.
-	for j := v; j <= n-1; j++ {
+	// The preference walk, stepping in the direction of the sign and wrapping
+	// within the period. n steps cover every residue exactly once, so skipping
+	// ≡ 0 offers all n−1 non-zero offsets, preferred first.
+	for k := int32(0); k < n; k++ {
+		j := ((v+k*step)%n + n) % n
+		if j == 0 {
+			// The pod purging this slot. Never offered by the walk.
+			continue
+		}
 		if ord := (slot + j) % n; eligible(ord) {
 			return ord, true
 		}

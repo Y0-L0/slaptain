@@ -6,6 +6,72 @@ needs this file.
 
 ---
 
+## Unreleased — ADR-024 R6: `accesslogPurge` becomes an object, and a stored string stops the operator
+
+`SlapdDatabase.spec.replication.accesslogPurge` was a two-token string,
+`"7+00:00 1+00:00"`. It is now an object — `{enabled, retention}` — because the
+interval half of that string belongs to the cluster, not the database (ADR-024 R6,
+ADR-037). The new form is documented in [TUNING.md](TUNING.md).
+
+**Clear the old value on every stored object BEFORE you upgrade.** A new apply of
+the string form is refused with a clear message. An object *already in etcd* is not,
+and that is the hazard: the CRD upgrade is accepted without a word, and the stored
+string then fails to decode into the Go type.
+
+The failure does not stay with the object that caused it. Measured against a real API
+server (envtest, k8s 1.37, the pre-change CRD upgraded in place, one legacy object
+alongside healthy ones):
+
+- a typed **read** of the legacy object fails —
+  `json: cannot unmarshal string into Go struct field
+  DatabaseReplicationConfig.spec.replication.accesslogPurge of type
+  v1alpha1.AccesslogPurgeConfig`;
+- a typed **list** fails with the same error — per namespace and cluster-wide — so
+  every healthy `SlapdDatabase` in the result set goes with it;
+- the operator's **cache never syncs** `SlapdDatabase` (`WaitForCacheSync` still
+  false after 20 s);
+- `kubectl` and any unstructured read keep working throughout, showing the stored
+  string verbatim.
+
+The operator's informer lists `SlapdDatabase` cluster-wide, so **one un-rewritten CR
+in any namespace stops `SlapdDatabase` reconciliation for the whole cluster**, and
+nothing in the symptom points at the CR responsible.
+
+### The order
+
+```bash
+# 1. Find every SlapdDatabase still storing the string form, at EVERY site.
+kubectl get slapddatabases -A -o yaml | yq '
+  .items[] | select(.spec.replication.accesslogPurge | tag == "!!str")
+  | .metadata.namespace + "/" + .metadata.name + "  " + .spec.replication.accesslogPurge'
+
+# 2. Clear the field on each one. Clearing, not rewriting: under the OLD CRD the
+#    field is still typed string, so patching in the object form is rejected
+#    ("spec.replication.accesslogPurge in body must be of type string").
+kubectl patch slapddatabase <name> -n <namespace> --type=merge \
+  -p '{"spec":{"replication":{"accesslogPurge":null}}}'
+
+# 3. Upgrade the CRDs and the operator as usual.
+
+# 4. Set the retention you want, now that the schema can hold it. Unset is the
+#    operator's 7-day default, so step 4 is optional.
+kubectl patch slapddatabase <name> -n <namespace> --type=merge \
+  -p '{"spec":{"replication":{"accesslogPurge":{"retention":"168h"}}}}'
+```
+
+Also move the interval, if you were relying on the one the string carried: it is now
+`SlapdCluster.spec.accesslogPurge.interval` (or derived from `spec.rotation`), and an
+unset one means the operator's 24h default.
+
+### If you upgraded first
+
+Nothing needs restoring and no data is at risk. The repair is step 1 followed
+directly by step 4 — `kubectl` still reads and writes these objects, only the typed
+decode fails, and the merge patch into the object form is accepted and clears the
+decode immediately (measured: the typed list was clean on the very next call).
+
+---
+
 ## v0.3.0 — ADR-028 amendment: the serverID stride becomes hex (100 → 16)
 
 **There is no upgrade path, and this is the one entry in this file that says

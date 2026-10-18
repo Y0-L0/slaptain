@@ -157,10 +157,63 @@ put a millisecond. The API server checks only the *grammar* — `0s` and `500ms`
 parse — so the operator reports the rest and writes its default rather than leaving a
 journal unbounded.
 
-**Migration.** The old `accesslogPurge` was a two-token string, `"7+00:00 1+00:00"`.
-It is **refused, never reinterpreted**: silently re-reading an old value as a
-retention would be undebuggable. Rewrite it as `retention:`, and move the interval to
-the cluster if you meant to keep it.
+**Migration — do this BEFORE you upgrade the operator.** The old `accesslogPurge`
+was a two-token string, `"7+00:00 1+00:00"`. It is **refused, never reinterpreted**:
+silently re-reading an old value as a retention would be undebuggable. Rewrite it as
+`retention:`, and move the interval to the cluster if you meant to keep it.
+
+That sentence covers a *new* apply. It says nothing about the `SlapdDatabase` objects
+already **stored** in your API server, and those are the dangerous ones. A stored
+string does not decode against the object schema, and the damage is not confined to
+the object carrying it. Measured against a real API server (envtest, k8s 1.37, the
+pre-M7 CRD upgraded in place to the current one, one legacy object and two healthy
+ones):
+
+| what | result |
+|---|---|
+| applying the new CRD over the old one | **accepted** — nothing warns, nothing refuses |
+| typed read of the legacy object | fails: `json: cannot unmarshal string into Go struct field DatabaseReplicationConfig.spec.replication.accesslogPurge of type v1alpha1.AccesslogPurgeConfig` |
+| typed read of a healthy object | fine |
+| typed **list** of the namespace, and cluster-wide | **fails, with the same error** — the healthy objects are collateral |
+| typed list of a namespace holding no legacy object | fine |
+| the operator's **cache syncing** `SlapdDatabase` | **never syncs** (`WaitForCacheSync` still false after 20 s) |
+| `kubectl get` / any unstructured read | fine, and shows the stored string verbatim |
+
+So the blast radius is **every list whose result set contains the object**, and the
+operator's informer lists `SlapdDatabase` cluster-wide. One un-rewritten CR, in any
+namespace, is enough to stop the operator reconciling **every** `SlapdDatabase` in
+the cluster — not just its own, and not just its namespace. Nothing about the symptom
+points at the CR that caused it.
+
+Before upgrading, find them and clear the field — the cluster now owns the interval
+anyway, and an unset retention is the 7-day default:
+
+```bash
+# find every SlapdDatabase still storing the string form
+kubectl get slapddatabases -A -o yaml | yq '
+  .items[] | select(.spec.replication.accesslogPurge | tag == "!!str")
+  | .metadata.namespace + "/" + .metadata.name + "  " + .spec.replication.accesslogPurge'
+
+# clear it, one per line of that output
+kubectl patch slapddatabase <name> -n <namespace> --type=merge \
+  -p '{"spec":{"replication":{"accesslogPurge":null}}}'
+```
+
+Clearing is the pre-upgrade move, not rewriting: under the **old** CRD the field is
+still typed `string`, so patching in the object form is rejected outright
+(`spec.replication.accesslogPurge in body must be of type string`). Set the retention
+you want after the upgrade, when the schema can hold it.
+
+If you upgraded first and the operator has gone quiet, you are not stuck and nothing
+needs restoring. `kubectl` still reads and writes these objects — only the *typed*
+decode fails — so the same `yq` sweep still finds them, and a merge patch into the
+new object form is accepted and repairs the decode immediately (measured: the typed
+list went back to clean on the next call):
+
+```bash
+kubectl patch slapddatabase <name> -n <namespace> --type=merge \
+  -p '{"spec":{"replication":{"accesslogPurge":{"retention":"168h"}}}}'
+```
 
 `spec.replication.syncprovSessionlogSource` chooses *where* the data database's
 syncprov session log lives. `InMemory` (the default, and what an unset field means)

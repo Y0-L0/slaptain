@@ -296,7 +296,7 @@ func writeTarget(slot, n, v int32, eligible func(int32) bool) (int32, bool) {
 	// The preference walk, stepping in the direction of the sign and wrapping
 	// within the period. n steps cover every residue exactly once, so skipping
 	// ≡ 0 offers all n−1 non-zero offsets, preferred first.
-	for k := int32(0); k < n; k++ {
+	for k := range n {
 		j := ((v+k*step)%n + n) % n
 		if j == 0 {
 			// The pod purging this slot. Never offered by the walk.

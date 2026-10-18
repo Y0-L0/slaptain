@@ -540,8 +540,10 @@ next purge is `now + interval` computed at dispatch. We now carry a local patch
 that adds an optional third value — `olcAccessLogPurge: <age> <interval>
 [<phase>]` — firing the task at `phase + k*interval` counted from the epoch
 (`images/openldap-deb/local-patches/accesslog-purge-phase.patch`, built by
-`images/openldap-deb/Containerfile.ol26src`). It is ours, not upstream's, and
-it is deliberately absent from the 2.7.1 packaging fork's series.
+`images/openldap-deb/Containerfile.ol26src`). It is ours, not upstream's. It
+was deliberately absent from the 2.7.1 packaging fork's series when this
+amendment was written; the fifth amendment reverses that, because a phase the
+default image cannot express is a feature no cluster can use.
 
 **5a is retired where the patch runs.** All three drift sources it describes
 come from deriving the next run from the moment of dispatch; deriving it from
@@ -848,3 +850,68 @@ overridden — ADR-024's rule that a field which cannot be honoured is rejected
 or converged, never ignored. No admission marker enforces this, because the
 two-field form must stay legal for every cluster not using rotation; all five
 shipped samples carry one.
+
+## Amendment, 2026-10-18 (fifth): the phase reaches the default image
+
+The first amendment recorded the patch as deliberately absent from the 2.7.1
+packaging fork's series, carried only by the `-ol26src` pair. That is now
+reversed, and the reason is simply that every cluster runs 2.7.1: a phase the
+default image cannot express is a feature with no deployment to run in.
+
+The patch is in `images/openldap-deb/debian/patches/` and last in the vendored
+series, which is where the build can see it — `Containerfile` copies only
+`debian/`, and `local-patches/` is on the `-ol26src` path alone. The two copies
+are byte-identical and the 2.6 path still builds from the latter.
+
+**It compiled against 2.7.1 unchanged.** Nine hunks across three files, offsets
+only, no fuzz. It also passed the unrelaxed `DPKG_GENSYMBOLS_CHECK_LEVEL`
+gate: the `re_t` additions export no new symbol, so `libldap2.symbols` is
+unaffected — hoped for when the patch was written, now shown.
+
+The package revision moves to `2.7.1-0+slaptain2`. After this change a patched
+and an unpatched default 2.7 image are binary-different with nothing else to
+tell them apart — the `-ol26src` images carry a local-patches label and the
+default ones do not — so the revision is the only discriminator and it has to
+move. It is what `slapd -VV` prints.
+
+### The build asserts the parser's arity
+
+A dropped patch has no other symptom. The two-value form keeps working, slapd
+keeps starting, and only the rotation quietly stops rotating — the same silent
+class the third amendment ran into when it measured a stagger that had never
+happened. So the package build now runs three assertions against the binaries
+it just produced, in the spirit of the `quilt push -a` applicability check:
+the three-value form is accepted, a **four**-value form is still cruft, and a
+phase not less than the interval is refused by the patch's own bound. A parser
+that accepted everything fails two of the three.
+
+No stock slapd is fetched for an A/B. The only stock 2.7.1 available is one we
+build ourselves, and a network fetch would make a build gate depend on what a
+distro currently ships. The rejections carry the teeth instead.
+
+### What tool mode does to a phase, measured
+
+`li_phased` is set only under `SLAP_SERVER_MODE`, and `SLAP_CONFIG_EMIT` emits
+the third value only when it is set. The consequence is live, not theoretical:
+a three-value `logpurge` converted offline with `slaptest -f … -F …` lands in
+`slapd.d` as **two** values, and a slapd started from that directory schedules
+unaligned.
+
+Two things follow. The operator's path is unaffected — it writes the attribute
+over LDAP to a running slapd, and a running slapd emits all three values on
+read-back. But **nothing may ever persist a phase through an offline
+conversion**, which forecloses putting it in the bootstrap `slapd.conf`, and
+means ADR-034's offline converger would misreport this attribute if it ever
+came to manage it.
+
+### Alignment, demonstrated
+
+Age 30 s, interval 60 s, phase 20 s, one write per second, purges observed as
+drops in the accesslog entry count: three fires, 60 s apart, each at the
+configured second of the minute. One of them landed during a concurrent
+container build, which is the point — the grid is absolute, so dispatch
+latency does not walk it. That is the property decision 5a was a workaround
+for, now a property of the scheduler rather than of a re-assertion loop.
+
+What this does not show is multi-pod behaviour, which needs a cluster and
+belongs to the milestones that write the attribute and move the endpoint.

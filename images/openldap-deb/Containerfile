@@ -110,6 +110,71 @@ RUN set -eux; \
     export DEB_BUILD_OPTIONS="${opts}"; \
     dpkg-buildpackage -us -uc -b
 
+# ── logpurge phase gate ─────────────────────────────────────────────────────
+# accesslog-purge-phase.patch gives `logpurge` an optional third value, the
+# phase (ADR-037). Everything downstream — the operator writing a per-pod phase,
+# the rotation that depends on it — is silently useless against a slapd that
+# dropped the patch, and a dropped patch has no other symptom: the two-value
+# form keeps working, slapd keeps starting, and only the rotation stops being a
+# rotation. So the build asserts the parser's arity here, on the binaries it
+# just produced, the way `quilt push -a` asserts applicability.
+#
+# No second (stock) slapd is fetched for an A/B. The teeth come from the two
+# rejections instead: a FOUR-value logpurge must still be refused, and a phase
+# that is not less than the interval must be refused by the patch's own check.
+# A parser that accepted everything would fail both. That keeps the gate free of
+# a network fetch and of any dependency on what a distro currently ships.
+#
+# What it proves is acceptance, not scheduling. slaptest runs in tool mode,
+# where the patch deliberately does not record that a value carries a phase, so
+# an offline read-back shows two values whatever was configured (see README.md).
+# That the aligned grid is actually used is a property of a RUNNING slapd and is
+# not observable from here.
+#
+# Skipped under asan: a sanitized binary can exit non-zero for reasons that have
+# nothing to do with the parser, and it is not the artifact this gate protects —
+# the same reasoning as the DPKG_GENSYMBOLS_CHECK_LEVEL relaxation above.
+RUN set -eux; \
+    if [ "${BUILD_VARIANT}" = "asan" ]; then \
+        echo "logpurge phase gate: skipped for BUILD_VARIANT=asan"; exit 0; \
+    fi; \
+    root=/tmp/purgephase; \
+    install -d "$root" "$root/db" "$root/alog"; \
+    for f in /build/slapd_*.deb /build/libldap2_*.deb /build/libldap-common_*.deb; do \
+        dpkg-deb -x "$f" "$root/pkg"; \
+    done; \
+    export LD_LIBRARY_PATH="$root/pkg/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)"; \
+    slaptest="$root/pkg/usr/sbin/slaptest"; \
+    conf() { \
+        printf 'include %s\nmodulepath %s\nmoduleload back_mdb\nmoduleload accesslog\n\ndatabase mdb\nsuffix "cn=accesslog"\ndirectory %s\n\ndatabase mdb\nsuffix "dc=example,dc=com"\ndirectory %s\noverlay accesslog\nlogdb cn=accesslog\nlogops writes\nlogpurge %s\n' \
+            "$root/pkg/etc/ldap/schema/core.schema" "$root/pkg/usr/lib/ldap" \
+            "$root/alog" "$root/db" "$1" > "$root/slapd.conf"; \
+    }; \
+    # 1. the three-value form the operator emits must be accepted.
+    conf '0+00:15 0+00:05 0+00:02'; \
+    "$slaptest" -f "$root/slapd.conf" -u > "$root/out" 2>&1 || { \
+        echo "logpurge phase gate: a three-value logpurge was REJECTED" >&2; \
+        cat "$root/out" >&2; exit 1; }; \
+    grep -q 'config file testing succeeded' "$root/out"; \
+    cat "$root/out"; \
+    # 2. a fourth value must still be cruft — the arity check is live.
+    conf '0+00:15 0+00:05 0+00:02 0+00:01'; \
+    if "$slaptest" -f "$root/slapd.conf" -u > "$root/out" 2>&1; then \
+        echo "logpurge phase gate: a FOUR-value logpurge was accepted" >&2; \
+        cat "$root/out" >&2; exit 1; \
+    fi; \
+    grep -q 'extra cruft' "$root/out"; \
+    cat "$root/out"; \
+    # 3. the patch's own bound: a phase outside the interval is not a phase.
+    conf '0+00:15 0+00:05 0+00:05'; \
+    if "$slaptest" -f "$root/slapd.conf" -u > "$root/out" 2>&1; then \
+        echo "logpurge phase gate: phase >= interval was accepted" >&2; \
+        cat "$root/out" >&2; exit 1; \
+    fi; \
+    grep -q 'phase must be less than interval' "$root/out"; \
+    cat "$root/out"; \
+    echo "logpurge phase gate: OK"
+
 # Collect only the packages the images install. The -dev and slapd-contrib
 # packages are build by-products we do not ship — the 2.6 images never carried
 # contrib either, and 2.7's `slapd` module set is a superset of what Debian's

@@ -19,14 +19,15 @@ for the user-facing version/tag contract.
 | Forked on | 2026-09-11 |
 | Upstream source | `openldap-2.7.1.tgz` from <https://www.openldap.org/software/download/OpenLDAP/openldap-release/> |
 | Upstream sha256 | `253db80f301258ea69cda1184766d57395b836aaabf41157eb0316eb0fac1341` (pinned in `Containerfile`, verified at build time) |
-| Package version | `2.7.1-0+slaptain1` |
+| Package version | `2.7.1-0+slaptain2` |
 
 Upstream packaging: <https://salsa.debian.org/openldap-team/openldap>
 
 ## The delta vs. Debian's packaging
 
-1. **`debian/changelog`** — one `2.7.1-0+slaptain1` entry on top recording
-   everything below.
+1. **`debian/changelog`** — our own entries on top of Debian's, recording
+   everything below: `2.7.1-0+slaptain1` for the rebase onto 2.7.1,
+   `2.7.1-0+slaptain2` for the local patch in item 8.
 2. **`debian/configure.options`** — dropped `--enable-perl=mod`,
    `--enable-sql=mod`, `--with-odbc=unixodbc`. `back-perl` and `back-sql` were
    removed upstream in 2.7; configure rejects the options.
@@ -46,16 +47,40 @@ Upstream packaging: <https://salsa.debian.org/openldap-team/openldap>
    and `ldap_pvt_thread_detach@OPENLDAP_2.200`. The build does **not** relax
    `DPKG_GENSYMBOLS_CHECK_LEVEL`, so any further ABI change fails it.
 
-That is 15 of Debian's 17 patches applying unchanged, one refreshed, two
-retired — the reason a packaging fork beat a raw source build (ADR-021).
+8. **`debian/patches/accesslog-purge-phase.patch`** — ours, not Debian's, and
+   the only patch here that adds a feature rather than adapting one. `logpurge`
+   takes an optional third value, the phase, and the purge task then fires at
+   `phase + k*interval` counted from the epoch instead of at `now + interval`
+   counted from each dispatch, so a purge can be *placed* — see
+   [ADR-037](../../docs/adrs/adr-037-purge-off-the-write-path.md). Appended last
+   in `series`; it touches `include/ldap_rq.h`, `libraries/libldap/rq.c` and
+   `servers/slapd/overlays/accesslog.c`, which no Debian patch touches, so the
+   position is a convention rather than a constraint.
+
+   The same patch is also applied to the 2.6 source build by
+   `Containerfile.ol26src`, which copies everything in `local-patches/` onto
+   Debian's own series. **`local-patches/` is the source of truth**: the copy
+   under `debian/patches/` exists because the 2.7 build only ever sees
+   `debian/`, and the two must stay byte-identical.
+
+That is 14 of Debian's 17 patches applying unchanged, one refreshed and two
+retired — 15 entries in `series`, plus one of ours at the end, which is the
+reason a packaging fork beat a raw source build (ADR-021). (The count read "15
+unchanged" before; 15 was the surviving series length, not the unchanged
+count.)
 
 ## Version scheme — do not use a `~` revision
 
 The package version must **not** sort below a plain `2.7.1`. `slapd` carries a
 generated self-dependency `slapd (>= 2.7.1)` via `libslapi`'s shlibs, so a
 `2.7.1-0~slaptain1`-style revision makes the package uninstallable against
-itself. `2.7.1-0+slaptain1` sorts *above* `2.7.1` and *below* Debian's eventual
+itself. `2.7.1-0+slaptainN` sorts *above* `2.7.1` and *below* Debian's eventual
 `2.7.1-1`, so a future distro package supersedes ours cleanly.
+
+Bump `N` whenever the built packages change in a way nothing else records. The
+default 2.7 images carry no label saying which patches went in — unlike the
+`-ol26src` pair, which is labelled — so the package version `slapd -VV` prints
+is the only discriminator between two builds of the same upstream release.
 
 ## Building
 
@@ -71,6 +96,28 @@ so the package build runs once per tag and feeds both runtime images.
 tarball, so `debian/rules` must skip both its DFSG-freeness assertion and the
 schema substitution that expects the `+dfsg`-repacked layout. The shipped
 schema files are therefore upstream's, not Debian's stripped copies.
+
+### The logpurge phase gate
+
+The build asserts, on the binaries it just produced, that `logpurge` takes three
+values: a three-value value is accepted, a four-value one is still `extra
+cruft`, and a phase that is not less than the interval is refused by the patch's
+own check. A dropped patch has no other symptom — the two-value form keeps
+working and slapd keeps starting, so the rotation would quietly stop rotating.
+The gate is skipped for `BUILD_VARIANT=asan`, where a non-zero exit says nothing
+about the parser.
+
+**One thing the phase does not survive: offline tooling.** `slaptest`,
+`slapcat -n 0`, `slapadd` and `slapmodify` parse and validate a three-value
+`logpurge` but re-emit it with two — the patch records "this value carries a
+phase" only under `SLAP_SERVER_MODE`. Verified on 2.7.1-0+slaptain2:
+`logpurge 0+00:15 0+00:05 0+00:02` in a `slapd.conf` converted with
+`slaptest -f … -F …` lands in `slapd.d` as `olcAccessLogPurge: 00:15 00:05`.
+Nothing writes the attribute that way today — the operator sets it over LDAP on
+a running slapd — but an offline *read* of the value will under-report, which
+matters to anything in the shape of
+[ADR-034](../../docs/adrs/adr-034-startup-only-configuration.md)'s
+converger.
 
 ### Upstream test suite
 
@@ -96,5 +143,10 @@ Symas 2.7 build we are willing to depend on):
    `OPENLDAP_DEB_IMAGE` plumbing.
 3. Supersede ADR-021 and note the version the distro package carries.
 
-Nothing outside `images/` and the Makefile depends on the fork — no operator
-code, no chart, no CRD field.
+The packaging is confined to `images/` and the Makefile — no chart and no CRD
+field names it. One behaviour does leave that boundary: the `logpurge` phase in
+item 8 is a feature of these packages and of nothing a distribution ships, so
+operator code that emits a three-value purge value (ADR-037) stops working the
+moment slapd comes from somewhere else. Re-adopting a distro build therefore
+means either carrying the patch forward, getting it upstream, or giving up the
+rotation — decide that in step 3 rather than discovering it in production.

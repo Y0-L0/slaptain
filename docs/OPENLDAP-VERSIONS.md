@@ -10,9 +10,16 @@ local patches applied. The decision and its reasoning are in
 
 | Image tag | OpenLDAP | Use it for |
 |---|---|---|
-| `<registry>/slaptain/slapd:<tag>` + `slapd-init:<tag>` | 2.7.1 (`2.7.1-0+slaptain1`) | everything — this is the default |
+| `<registry>/slaptain/slapd:<tag>` + `slapd-init:<tag>` | 2.7.1 (`2.7.1-0+slaptain2`) | everything — this is the default |
 | `<registry>/slaptain/slapd:<tag>-ol26` + `slapd-init:<tag>-ol26` | 2.6.x (Debian trixie binary) | legacy interop and hot-migration clusters that must match a 2.6 source (ADR-011) |
-| `<registry>/slaptain/slapd:<tag>-ol26src` + `slapd-init:<tag>-ol26src` | 2.6.x (Debian trixie **source** + local patches) | anything needing a patch that only exists here — today, the `logpurge` phase parameter |
+| `<registry>/slaptain/slapd:<tag>-ol26src` + `slapd-init:<tag>-ol26src` | 2.6.x (Debian trixie **source** + local patches) | a **2.6** build carrying the local patches — measurement arms against `-ol26`, and 2.6 clusters that need a patched feature |
+
+The local patches are **not** exclusive to `-ol26src`. The default 2.7 pair
+carries them too, from `2.7.1-0+slaptain2` onward — that is what makes the
+`logpurge` phase (ADR-037) usable on the images clusters actually run. What
+`-ol26src` is for is having the same patches on **2.6**, which the plain tag
+cannot give you. Within the 2.7 pair, the package revision in `slapd -VV` is
+what tells two of our builds apart; there is no image label.
 
 `<tag>` is the same release tag for all three pairs — the suffixes are only
 suffixes, never separate version lines. `slapd-toolkit` and `operator` have one tag each and
@@ -98,7 +105,8 @@ Local build and delivery targets:
 ```bash
 make build-ol26          # both -ol26 images
 make import-ol26         # import them into the nodes' CRI
-make push                # pushes all six images (both pairs, toolkit, operator)
+make push                # pushes all nine images (both 2.7 and both 2.6 pairs, the
+                         # ol26src pair, toolkit, operator, exporter)
 ```
 
 To run the e2e suite against the 2.6 pair (the operator image stays on the plain

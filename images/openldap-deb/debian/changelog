@@ -1,3 +1,21 @@
+openldap (2.7.1-0+slaptain2) UNRELEASED; urgency=medium
+
+  * Add patches/accesslog-purge-phase.patch: slapo-accesslog's `logpurge`
+    takes an optional third value, the phase, and the purge task then fires
+    at phase + k*interval counted from the epoch instead of at
+    now + interval counted from each dispatch. Two-value values are
+    unaffected and the arithmetic they take is untouched; the alignment is
+    opt-in per runqueue task, so every other user of the runqueue stays on
+    the existing path. Needed to place each provider's purge away from the
+    others — see ADR-037. The same patch has been in the locally built 2.6
+    packages since it was written; this is what puts it in the default
+    2.7.1 ones.
+  * The package revision moves because a patched and an unpatched 2.7.1
+    build are otherwise indistinguishable from outside: `slapd -VV` prints
+    this version and nothing else names the patch.
+
+ -- slaptain <noreply@chuck-chuck-chuck.net>  Sun, 18 Oct 2026 12:00:00 +0200
+
 openldap (2.7.1-0+slaptain1) UNRELEASED; urgency=medium
 
   * Non-maintainer fork of the Debian openldap packaging, rebased from

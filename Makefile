@@ -86,6 +86,14 @@ EXPORTER_IMAGE   = $(REGISTRY)/$(PROJECT)/slapd-exporter:$(EXPORTER_IMAGE_TAG)
 INIT_IMAGE_OL26  = $(REGISTRY)/$(PROJECT)/slapd-init:$(IMAGE_TAG)-ol26
 SLAPD_IMAGE_OL26 = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)-ol26
 
+# The 2.6 pair built from DEBIAN'S SOURCE package plus the local patches in
+# images/openldap-deb/local-patches/ — a third pair, not a replacement for
+# either of the two above. The -ol26 pair installs Debian's prebuilt binary and
+# so has nowhere to carry a patch; this one builds the same 2.6 from source and
+# does. Pin both images or neither, exactly as with -ol26.
+INIT_IMAGE_OL26SRC  = $(REGISTRY)/$(PROJECT)/slapd-init:$(IMAGE_TAG)-ol26src
+SLAPD_IMAGE_OL26SRC = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)-ol26src
+
 # Tag suffix applied to the slapd/slapd-init image tags when DEPLOYING (only —
 # the operator and toolkit tags are untouched). Empty = OpenLDAP 2.7.1;
 # SLAPD_TAG_SUFFIX=-ol26 deploys the legacy 2.6 pair:
@@ -109,6 +117,9 @@ OPENLDAP_DEB_IMAGE = localhost/$(PROJECT)/openldap-deb:$(IMAGE_TAG)
 # the .debs, so the carrier image cannot be shared with the release build.
 OPENLDAP_DEB_IMAGE_DEBUG = localhost/$(PROJECT)/openldap-deb:$(IMAGE_TAG)-debug
 OPENLDAP_DEB_IMAGE_ASAN  = localhost/$(PROJECT)/openldap-deb:$(IMAGE_TAG)-asan
+# Carrier for the patched 2.6 build. Its own image because the .debs differ:
+# different upstream version, and the local patches are in them.
+OPENLDAP_DEB_IMAGE_OL26SRC = localhost/$(PROJECT)/openldap-deb:$(IMAGE_TAG)-ol26src
 # Set RUN_UPSTREAM_TESTS=1 to run OpenLDAP's own test suite during the package
 # build (slow; off by default — see images/openldap-deb/README.md).
 RUN_UPSTREAM_TESTS ?= 0
@@ -185,11 +196,11 @@ define import-if-needed
 	fi
 endef
 
-.PHONY: all build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-openldap-deb-debug build-slapd-debug build-openldap-deb-asan build-slapd-asan import-slapd-debug import-slapd-asan push-slapd-debug push-slapd-asan build-toolkit build-operator build-exporter build-slctl install-slctl push gencert helm-deploy cluster-helm-install cluster-helm-uninstall mesh-helm-install mesh-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-exporter import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag helm-lint verify-generated test-init
+.PHONY: all build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-openldap-deb-ol26src build-init-ol26src build-slapd-ol26src build-ol26src import-init-ol26src import-slapd-ol26src import-ol26src build-openldap-deb-debug build-slapd-debug build-openldap-deb-asan build-slapd-asan import-slapd-debug import-slapd-asan push-slapd-debug push-slapd-asan build-toolkit build-operator build-exporter build-slctl install-slctl push gencert helm-deploy cluster-helm-install cluster-helm-uninstall mesh-helm-install mesh-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-exporter import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag helm-lint verify-generated test-init
 
 ## all: the seven pushable images plus slctl. build-ol26 is included so a
 ## release build carries the legacy OpenLDAP 2.6 pair too (ADR-021).
-all: build-init build-slapd build-ol26 build-toolkit build-operator build-exporter build-slctl
+all: build-init build-slapd build-ol26 build-ol26src build-toolkit build-operator build-exporter build-slctl
 
 ## Stamp-file backed build targets (incremental)
 
@@ -238,6 +249,30 @@ $(STAMPS)/init-ol26: $(INIT_OL26_SRCS) $(STAMPS)/tag | $(STAMPS)
 $(STAMPS)/slapd-ol26: $(SLAPD_OL26_SRCS) $(STAMPS)/tag | $(STAMPS)
 	$(CONTAINER_ENGINE) build -f images/slapd/Containerfile.ol26 \
 		-t $(SLAPD_IMAGE_OL26) images/slapd/
+	@touch $@
+
+# The patched 2.6 pair. The package build is its own stamp — it compiles
+# OpenLDAP from source and takes minutes, so it must not re-run per image.
+# OPENLDAP_DEB_SRCS globs the whole directory, so editing a file in
+# local-patches/ rebuilds the .debs and both images below.
+$(STAMPS)/openldap-deb-ol26src: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
+	$(CONTAINER_ENGINE) build -f images/openldap-deb/Containerfile.ol26src \
+		-t $(OPENLDAP_DEB_IMAGE_OL26SRC) images/openldap-deb/
+	@touch $@
+
+# Both images consume the .debs through the ordinary (2.7) Containerfiles —
+# those install whatever /debs holds, so they are version-agnostic. The .ol26
+# Containerfiles are NOT used here: they apt-install Debian's binary.
+$(STAMPS)/init-ol26src: $(INIT_SRCS) $(STAMPS)/openldap-deb-ol26src $(STAMPS)/tag | $(STAMPS)
+	$(CONTAINER_ENGINE) build \
+		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_OL26SRC) \
+		-t $(INIT_IMAGE_OL26SRC) images/slapd-init/
+	@touch $@
+
+$(STAMPS)/slapd-ol26src: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-ol26src $(STAMPS)/tag | $(STAMPS)
+	$(CONTAINER_ENGINE) build \
+		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_OL26SRC) \
+		-t $(SLAPD_IMAGE_OL26SRC) images/slapd/
 	@touch $@
 
 # ── Debug variants (ADR-free: a diagnostic build, not a shipped artifact) ───
@@ -291,6 +326,10 @@ build-slapd: $(STAMPS)/slapd
 build-init-ol26: $(STAMPS)/init-ol26
 build-slapd-ol26: $(STAMPS)/slapd-ol26
 build-ol26: build-init-ol26 build-slapd-ol26
+build-openldap-deb-ol26src: $(STAMPS)/openldap-deb-ol26src
+build-init-ol26src: $(STAMPS)/init-ol26src
+build-slapd-ol26src: $(STAMPS)/slapd-ol26src
+build-ol26src: build-init-ol26src build-slapd-ol26src
 build-toolkit: $(STAMPS)/toolkit
 build-operator: $(STAMPS)/operator
 build-exporter: $(STAMPS)/exporter
@@ -311,11 +350,13 @@ install-slctl: build-slctl
 ## 2.6 pair (-ol26), toolkit, operator, and the slapd exporter at its own
 ## EXPORTER_IMAGE_TAG. The openldap-deb build artifact carrier is local-only and
 ## deliberately not pushed.
-push: build-init build-slapd build-ol26 build-toolkit build-operator build-exporter
+push: build-init build-slapd build-ol26 build-ol26src build-toolkit build-operator build-exporter
 	$(CONTAINER_ENGINE) push $(INIT_IMAGE)
 	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE)
 	$(CONTAINER_ENGINE) push $(INIT_IMAGE_OL26)
 	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE_OL26)
+	$(CONTAINER_ENGINE) push $(INIT_IMAGE_OL26SRC)
+	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE_OL26SRC)
 	$(CONTAINER_ENGINE) push $(TOOLKIT_IMAGE)
 	$(CONTAINER_ENGINE) push $(OPERATOR_IMAGE)
 	$(CONTAINER_ENGINE) push $(EXPORTER_IMAGE)
@@ -350,6 +391,14 @@ import-slapd-ol26: build-slapd-ol26
 	$(call import-if-needed,$(SLAPD_IMAGE_OL26))
 
 import-ol26: import-init-ol26 import-slapd-ol26
+
+import-init-ol26src: build-init-ol26src
+	$(call import-if-needed,$(INIT_IMAGE_OL26SRC))
+
+import-slapd-ol26src: build-slapd-ol26src
+	$(call import-if-needed,$(SLAPD_IMAGE_OL26SRC))
+
+import-ol26src: import-init-ol26src import-slapd-ol26src
 
 ## Debug variants: deliver the one slapd image, leave slapd-init on the plain
 ## tag. Same OpenLDAP version, so the two images still agree on everything the

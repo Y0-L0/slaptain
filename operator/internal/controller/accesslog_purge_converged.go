@@ -250,8 +250,13 @@ func aggregateAccesslogPurgeConverged(
 			"the cluster's spec.rotation is off, so olcAccessLogPurge carries this database's " +
 				"own age and interval and every pod purges on its own schedule (ADR-037)"
 
+	// The withhold is decided from the SPEC, not from any pod, so the
+	// unread-pod note is omitted here: it is true but irrelevant, and reading
+	// "not assessed: slapd-0, slapd-1, slapd-2" under a refusal suggests the
+	// pods were unreachable when in fact the operator deliberately wrote
+	// nothing to them. Measured on a live three-pod cluster.
 	case withheld != nil:
-		return metav1.ConditionFalse, withheld.Reason, withheld.Message + unreadNote
+		return metav1.ConditionFalse, withheld.Reason, withheld.Message
 
 	case len(unsupported) > 0:
 		return metav1.ConditionFalse, reasonPurgePhaseUnsupported,

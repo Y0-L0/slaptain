@@ -313,6 +313,7 @@ func TestAggregateAccesslogPurgeConverged(t *testing.T) {
 		wantStatus metav1.ConditionStatus
 		wantReason string
 		mustSay    []string
+		mustNotSay []string
 	}{
 		{
 			name:       "rotation off: nothing to say, and True is the honest answer",
@@ -337,6 +338,20 @@ func TestAggregateAccesslogPurgeConverged(t *testing.T) {
 			wantStatus: metav1.ConditionFalse,
 			wantReason: reasonPurgeIntervalDeclared,
 			mustSay:    []string{"accesslogPurge"},
+		},
+		{
+			// Measured on a live three-pod cluster: a withhold writes nothing,
+			// so NO pod is ever assessed, and appending the unread-pod note
+			// made the refusal read as "the pods were unreachable". The
+			// withhold is decided from the spec; the pods have nothing to do
+			// with it.
+			name:       "a withhold does not blame the pods it never wrote to",
+			active:     true,
+			withheld:   withheld,
+			obs:        []purgePhaseObservation{{pod: testPod0}, {pod: testPod1}},
+			wantStatus: metav1.ConditionFalse,
+			wantReason: reasonPurgeIntervalDeclared,
+			mustNotSay: []string{"not assessed", testPod0},
 		},
 		{
 			name:   "an unpatched image names the pod that refused the phase",
@@ -391,6 +406,11 @@ func TestAggregateAccesslogPurgeConverged(t *testing.T) {
 			for _, want := range tc.mustSay {
 				if !strings.Contains(msg, want) {
 					t.Fatalf("message %q does not mention %q", msg, want)
+				}
+			}
+			for _, unwanted := range tc.mustNotSay {
+				if strings.Contains(msg, unwanted) {
+					t.Fatalf("message %q mentions %q, which misdirects the reader", msg, unwanted)
 				}
 			}
 		})

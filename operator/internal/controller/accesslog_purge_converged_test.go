@@ -20,24 +20,24 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// ADR-037, second amendment, "Where the configuration lives": olcAccessLogPurge
-// gains a second owner under rotation. <age> is per-database retention and
-// stays on SlapdDatabase; <interval> and <phase> are a schedule over pods and
-// come from the cluster. This file holds the split, the per-(pod, database)
-// composition, and the condition that reports what could not be honoured.
+// ADR-024 R6 and ADR-037's ninth amendment: olcAccessLogPurge is one slapd
+// directive with THREE owners, and this file holds the composition and the
+// condition that reports it.
+//
+//	<retention>   the database's   — how far behind a consumer may fall
+//	<interval>    the cluster's    — how often the cost is paid, by the POD
+//	<phase>       derived          — which pod pays it when; nobody declares it
+//
+// The milestone that wrote this file removed a withhold, and the absence is the
+// point: with no declared interval on a database there is nothing to refuse, so
+// there is no way for a database to come out of a pass unpurged.
 
 const (
-	// defaultPurgeAge is the age half of defaultAccesslogPurge, spelled out
-	// here rather than derived, so the drift guard below has something
-	// independent to compare against.
-	defaultPurgeAge = "7+00:00"
-	// twoFieldPurge is a user-supplied value carrying an interval — the one
-	// rotation refuses rather than silently overriding.
-	twoFieldPurge = "2+00:00 1+00:00"
-	// ageOnlyPurge is the shape a rotating cluster wants from the CR.
-	ageOnlyPurge = "2+00:00"
-	// noneMixedCase is the opt-out spelled the way a user might.
-	noneMixedCase = "None"
+	// wantDefaultRetentionRendered pins defaultPurgeRetention's rendering,
+	// spelled out rather than derived from the formatter it checks.
+	wantDefaultRetentionRendered = "7+00:00:00"
+	// wantDefaultIntervalRendered pins defaultPurgeInterval's.
+	wantDefaultIntervalRendered = "1+00:00:00"
 )
 
 func activePlan(slot time.Duration, replicas int32) rotationPlan {
@@ -49,154 +49,264 @@ func activePlan(slot time.Duration, replicas int32) rotationPlan {
 	}
 }
 
-func TestSplitPurgeAge(t *testing.T) {
+// flatPlan is form A: one interval, every pod purging together, no phase.
+func flatPlan(interval time.Duration) rotationPlan {
+	return rotationPlan{Interval: interval, Replicas: 3}
+}
+
+// The defaults are the whole point of R5's half of this: an unpurged journal
+// grows to its map ceiling and then stops taking writes — and because the
+// accesslog overlay sits in the DATA write path, data writes stop with it.
+//
+// Decomposing the field must not MOVE either default. The old two-token default
+// was "7+00:00 1+00:00", and the two typed constants must still render it.
+func TestThePurgeDefaultsDidNotMoveWhenTheFieldWasDecomposed(t *testing.T) {
+	if got := formatLogAge(defaultPurgeRetention); got != wantDefaultRetentionRendered {
+		t.Errorf("defaultPurgeRetention renders as %q, want %q — the old default kept 7 days",
+			got, wantDefaultRetentionRendered)
+	}
+	if got := formatLogAge(defaultPurgeInterval); got != wantDefaultIntervalRendered {
+		t.Errorf("defaultPurgeInterval renders as %q, want %q — the old default swept daily",
+			got, wantDefaultIntervalRendered)
+	}
+	if defaultPurgeRetention <= 0 || defaultPurgeInterval <= 0 {
+		t.Fatal("a non-positive default would mean no purge at all, which is a slow-motion outage")
+	}
+}
+
+func TestResolveRetention(t *testing.T) {
 	cases := []struct {
-		name      string
-		in        string
-		wantAge   string
-		wantExtra bool
+		name       string
+		sd         *slapdDatabaseFixture
+		want       time.Duration
+		wantDefect bool
+		mustSay    string
 	}{
-		{"the shipped default splits into its age", defaultAccesslogPurge, defaultPurgeAge, true},
-		{"an age alone carries no interval", ageOnlyPurge, ageOnlyPurge, false},
-		{"an age and an interval", twoFieldPurge, ageOnlyPurge, true},
-		{"an already-phased value is an age plus extras", ageOnlyPurge + " 06:00:00 02:00:00", ageOnlyPurge, true},
-		{"surrounding whitespace is not a field", "  " + ageOnlyPurge + "  ", ageOnlyPurge, false},
-		{"slapd's internal respacing is not a field count", ageOnlyPurge + "\t1+00:00", ageOnlyPurge, true},
-		{"empty in, empty out", "", "", false},
-		{"whitespace-only in, empty out", testBlank, "", false},
+		{
+			name: "a nil database takes the operator's default",
+			sd:   nil,
+			want: defaultPurgeRetention,
+		},
+		{
+			name: "an unset block takes the operator's default",
+			sd:   &slapdDatabaseFixture{},
+			want: defaultPurgeRetention,
+		},
+		{
+			name: "a block with no retention takes the operator's default",
+			sd:   &slapdDatabaseFixture{enabled: new(true)},
+			want: defaultPurgeRetention,
+		},
+		{
+			name: "enabled false means never purge, and is NOT a defect",
+			sd:   &slapdDatabaseFixture{enabled: new(false)},
+			want: 0,
+		},
+		{
+			// The inversion `enabled` exists to avoid: if it had been named
+			// for the retention, `enabled: false` would read as "purge
+			// everything". It is named for the ACTION, so false means never.
+			name: "enabled false wins over a declared retention",
+			sd:   &slapdDatabaseFixture{enabled: new(false), retention: 48 * time.Hour},
+			want: 0,
+		},
+		{
+			name: "a declared retention is used as declared",
+			sd:   &slapdDatabaseFixture{retention: 48 * time.Hour},
+			want: 48 * time.Hour,
+		},
+		{
+			name:       "a zero retention is reported, and the DEFAULT is written anyway",
+			sd:         &slapdDatabaseFixture{retention: 0, retentionSet: true},
+			want:       defaultPurgeRetention,
+			wantDefect: true,
+			mustSay:    "enabled: false",
+		},
+		{
+			name:       "a negative retention is reported, and the default is written anyway",
+			sd:         &slapdDatabaseFixture{retention: -time.Hour, retentionSet: true},
+			want:       defaultPurgeRetention,
+			wantDefect: true,
+		},
+		{
+			// olcAccessLogPurge's fields are [ddd+]hh:mm[:ss]. "500ms" passes
+			// the API server's grammar rule and has no representation on the
+			// server, which is the half of the check the CEL rule cannot make.
+			name:       "a sub-second retention is reported, and the default is written anyway",
+			sd:         &slapdDatabaseFixture{retention: 1500 * time.Millisecond, retentionSet: true},
+			want:       defaultPurgeRetention,
+			wantDefect: true,
+			mustSay:    "whole number of seconds",
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			age, extra := splitPurgeAge(tc.in)
-			if age != tc.wantAge {
-				t.Fatalf("splitPurgeAge(%q) age = %q, want %q", tc.in, age, tc.wantAge)
+			got, defect := resolveRetention(tc.sd.build())
+			if got != tc.want {
+				t.Fatalf("retention = %v, want %v", got, tc.want)
 			}
-			if extra != tc.wantExtra {
-				t.Fatalf("splitPurgeAge(%q) extra = %v, want %v", tc.in, extra, tc.wantExtra)
+			if (defect != nil) != tc.wantDefect {
+				t.Fatalf("defect = %v, want defect = %v", defect, tc.wantDefect)
+			}
+			if defect == nil {
+				return
+			}
+			if defect.Reason != reasonRetentionNotUsable {
+				t.Fatalf("Reason = %q, want %q", defect.Reason, reasonRetentionNotUsable)
+			}
+			if !strings.Contains(defect.Message, "accesslogPurge.retention") {
+				t.Fatalf("message %q does not name the field at fault", defect.Message)
+			}
+			if tc.mustSay != "" && !strings.Contains(defect.Message, tc.mustSay) {
+				t.Fatalf("message %q does not mention %q", defect.Message, tc.mustSay)
 			}
 		})
 	}
 }
 
-// The drift guard the milestone that wrote composePurge could not write: the
-// age this file extracts from defaultAccesslogPurge must be the same string the
-// composition then hands to composePurge. If somebody retunes the default
-// window and the splitter stops agreeing with it, a rotating cluster silently
-// starts purging on a different retention than a non-rotating one.
-func TestSplitPurgeAge_AgreesWithTheShippedDefault(t *testing.T) {
-	age, extra := splitPurgeAge(defaultAccesslogPurge)
-	if !extra {
-		t.Fatalf("defaultAccesslogPurge = %q carries no interval; the split has nothing to do",
-			defaultAccesslogPurge)
+// THE DEFECT, AS A REGRESSION GUARD. Measured on a fresh three-site mesh: a
+// database declaring an interval, on a cluster CREATED with rotation already
+// on, ended up with NO olcAccessLogPurge at all on every pod at every site. The
+// withhold assumed there was an existing value to keep.
+//
+// The decomposition dissolves it rather than patching it — there is no declared
+// interval to refuse — and this is the assertion that says so, over every state
+// a database and a cluster can be in together. The one exception is the
+// explicit opt-out, which is a user decision rather than an accident.
+func TestEveryPurgingDatabaseAlwaysGetsAPurgeValue(t *testing.T) {
+	plans := map[string]rotationPlan{
+		"rotation off, default interval": flatPlan(defaultPurgeInterval),
+		"form A, declared interval":      flatPlan(6 * time.Hour),
+		"form B, rotating":               activePlan(6*time.Hour, 3),
+		"form B, two pods":               activePlan(90*time.Minute, 2),
 	}
-	if age != defaultPurgeAge {
-		t.Fatalf("age half of defaultAccesslogPurge = %q, want %q", age, defaultPurgeAge)
+	dbs := map[string]*slapdDatabaseFixture{
+		"nothing declared":        {},
+		"retention declared":      {retention: 48 * time.Hour},
+		"enabled true explicitly": {enabled: new(true)},
+		"a retention it cannot have": {
+			retention: 500 * time.Millisecond, retentionSet: true,
+		},
+		"a zero retention": {retention: 0, retentionSet: true},
 	}
-	composed := composePurge(age, 3*time.Hour, time.Hour)
-	if !strings.HasPrefix(composed, defaultPurgeAge+" ") {
-		t.Fatalf("composePurge(%q, …) = %q, which does not start with the extracted age",
-			age, composed)
-	}
-	if want := defaultPurgeAge + " 03:00:00 01:00:00"; composed != want {
-		t.Fatalf("composePurge = %q, want %q", composed, want)
+
+	for pn, plan := range plans {
+		for dn, db := range dbs {
+			t.Run(pn+"/"+dn, func(t *testing.T) {
+				for ord := range max(plan.Replicas, 1) {
+					got := planPodPurge(plan, db.build(), ord)
+					if got.Value == "" {
+						t.Fatalf("pod %d got NO purge value. An unpurged journal grows to its "+
+							"map ceiling and then stops DATA writes — the outage ADR-024 R4 "+
+							"exists to prevent, and the one this milestone removed", ord)
+					}
+					if n := len(strings.Fields(got.Value)); n < 2 {
+						t.Fatalf("pod %d: %q has %d field(s); slapd needs at least "+
+							"<retention> <interval>", ord, got.Value, n)
+					}
+				}
+			})
+		}
 	}
 }
 
 func TestPlanPodPurge(t *testing.T) {
+	const (
+		dayRetention = "2+00:00:00"
+		weekRetained = wantDefaultRetentionRendered
+	)
 	cases := []struct {
 		name         string
 		plan         rotationPlan
-		field        string
+		sd           *slapdDatabaseFixture
 		ordinal      int32
 		wantValue    string
 		wantFallback string
-		wantWithheld bool
 	}{
 		{
-			name:      "rotation off: byte-identical to today, the operator default",
-			plan:      rotationPlan{},
-			field:     "",
+			name:      "form A default: the shape every cluster has always run",
+			plan:      flatPlan(defaultPurgeInterval),
+			sd:        &slapdDatabaseFixture{},
 			ordinal:   1,
-			wantValue: defaultAccesslogPurge,
+			wantValue: weekRetained + " " + wantDefaultIntervalRendered,
 		},
 		{
-			name:      "rotation off: an explicit two-field value passes through verbatim",
-			plan:      rotationPlan{},
-			field:     twoFieldPurge,
+			name:      "form A, a declared interval and a declared retention",
+			plan:      flatPlan(6 * time.Hour),
+			sd:        &slapdDatabaseFixture{retention: 48 * time.Hour},
 			ordinal:   2,
-			wantValue: twoFieldPurge,
+			wantValue: dayRetention + " 06:00:00",
 		},
 		{
-			name:      "rotation off: none still opts out",
-			plan:      rotationPlan{},
-			field:     noneSentinel,
+			name:      "form A carries NO phase: every pod purges together",
+			plan:      flatPlan(6 * time.Hour),
+			sd:        &slapdDatabaseFixture{},
+			ordinal:   2,
+			wantValue: weekRetained + " 06:00:00",
+		},
+		{
+			name:      "purging off: no attribute at all, whatever the schedule says",
+			plan:      flatPlan(6 * time.Hour),
+			sd:        &slapdDatabaseFixture{enabled: new(false)},
 			ordinal:   0,
 			wantValue: "",
 		},
 		{
-			name:         "rotation on, unset field: the default age on the cluster's grid, pod 0",
+			name:         "form B, pod 0 sits on the anchor",
 			plan:         activePlan(6*time.Hour, 3),
-			field:        "",
+			sd:           &slapdDatabaseFixture{},
 			ordinal:      0,
-			wantValue:    defaultPurgeAge + " 18:00:00 00:00:00",
-			wantFallback: defaultPurgeAge + " 18:00:00",
+			wantValue:    weekRetained + " 18:00:00 00:00:00",
+			wantFallback: weekRetained + " 18:00:00",
 		},
 		{
-			name:         "rotation on, pod 1 sits one slot along",
+			name:         "form B, pod 1 sits one slot along",
 			plan:         activePlan(6*time.Hour, 3),
-			field:        "",
+			sd:           &slapdDatabaseFixture{},
 			ordinal:      1,
-			wantValue:    defaultPurgeAge + " 18:00:00 06:00:00",
-			wantFallback: defaultPurgeAge + " 18:00:00",
+			wantValue:    weekRetained + " 18:00:00 06:00:00",
+			wantFallback: weekRetained + " 18:00:00",
 		},
 		{
-			name:         "rotation on, pod 2 sits two slots along",
+			name:         "form B, pod 2 sits two slots along",
 			plan:         activePlan(6*time.Hour, 3),
-			field:        "",
+			sd:           &slapdDatabaseFixture{},
 			ordinal:      2,
-			wantValue:    defaultPurgeAge + " 18:00:00 12:00:00",
-			wantFallback: defaultPurgeAge + " 18:00:00",
+			wantValue:    weekRetained + " 18:00:00 12:00:00",
+			wantFallback: weekRetained + " 18:00:00",
 		},
 		{
-			name:         "rotation on, an age-only field is the shape the CR should carry",
+			name:         "form B with a declared retention",
 			plan:         activePlan(time.Hour, 2),
-			field:        ageOnlyPurge,
+			sd:           &slapdDatabaseFixture{retention: 48 * time.Hour},
 			ordinal:      1,
-			wantValue:    ageOnlyPurge + " 02:00:00 01:00:00",
-			wantFallback: ageOnlyPurge + " 02:00:00",
+			wantValue:    dayRetention + " 02:00:00 01:00:00",
+			wantFallback: dayRetention + " 02:00:00",
 		},
 		{
-			name:      "rotation on, none still opts out: a schedule must not resurrect a purge",
+			name:      "form B, purging off: a schedule must not resurrect a purge",
 			plan:      activePlan(time.Hour, 2),
-			field:     noneSentinel,
+			sd:        &slapdDatabaseFixture{enabled: new(false)},
 			ordinal:   1,
 			wantValue: "",
 		},
 		{
-			name:         "rotation on, a declared interval is refused rather than overridden",
+			// The defect's negation, in one row. This database used to be
+			// WITHHELD; now it is written, from the operator's default
+			// retention, with the fault reported on the condition.
+			name:         "form B with an unusable retention: written anyway, from the default",
 			plan:         activePlan(time.Hour, 2),
-			field:        twoFieldPurge,
+			sd:           &slapdDatabaseFixture{retention: 0, retentionSet: true},
 			ordinal:      1,
-			wantWithheld: true,
+			wantValue:    weekRetained + " 02:00:00 01:00:00",
+			wantFallback: weekRetained + " 02:00:00",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := planPodPurge(tc.plan, sdWithPurge(tc.field), tc.ordinal)
-			if got.Withheld != tc.wantWithheld {
-				t.Fatalf("Withheld = %v, want %v", got.Withheld, tc.wantWithheld)
-			}
-			if tc.wantWithheld {
-				if got.Reason != reasonPurgeIntervalDeclared {
-					t.Fatalf("Reason = %q, want %q", got.Reason, reasonPurgeIntervalDeclared)
-				}
-				if !strings.Contains(got.Message, "accesslogPurge") {
-					t.Fatalf("message %q does not name the field at fault", got.Message)
-				}
-				return
-			}
+			got := planPodPurge(tc.plan, tc.sd.build(), tc.ordinal)
 			if got.Value != tc.wantValue {
 				t.Fatalf("Value = %q, want %q", got.Value, tc.wantValue)
 			}
@@ -204,6 +314,31 @@ func TestPlanPodPurge(t *testing.T) {
 				t.Fatalf("Fallback = %q, want %q", got.Fallback, tc.wantFallback)
 			}
 		})
+	}
+}
+
+// A fallback exists exactly when there is a phase to fall back FROM. Writing
+// one where the value carries no phase would let the fallback path fire on a
+// failure it does not explain; omitting one where the value does carry a phase
+// would leave an unpatched pod with no olcAccessLogPurge at all — the
+// unpurged-journal failure again, by another route.
+func TestPlanPodPurge_FallbackExistsExactlyWhenThereIsAPhase(t *testing.T) {
+	for _, plan := range []rotationPlan{
+		flatPlan(defaultPurgeInterval), flatPlan(6 * time.Hour),
+		activePlan(6*time.Hour, 3), activePlan(time.Minute, 2),
+	} {
+		for ord := range int32(3) {
+			got := planPodPurge(plan, (&slapdDatabaseFixture{}).build(), ord)
+			hasPhase := len(strings.Fields(got.Value)) == 3
+			if hasPhase != (got.Fallback != "") {
+				t.Fatalf("plan %+v pod %d: Value = %q (phase: %v) but Fallback = %q",
+					plan, ord, got.Value, hasPhase, got.Fallback)
+			}
+			if hasPhase && got.Fallback != strings.Join(strings.Fields(got.Value)[:2], " ") {
+				t.Fatalf("plan %+v pod %d: Fallback %q is not Value %q without its phase",
+					plan, ord, got.Fallback, got.Value)
+			}
+		}
 	}
 }
 
@@ -215,10 +350,11 @@ func TestPlanPodPurge_EveryPodGetsItsOwnPhase(t *testing.T) {
 	plan := activePlan(90*time.Minute, n)
 	seen := map[string]int32{}
 	for ord := range int32(n) {
-		v := planPodPurge(plan, sdWithPurge(""), ord).Value
+		v := planPodPurge(plan, (&slapdDatabaseFixture{}).build(), ord).Value
 		fields := strings.Fields(v)
 		if len(fields) != 3 {
-			t.Fatalf("pod %d: %q has %d fields, want 3 (<age> <interval> <phase>)", ord, v, len(fields))
+			t.Fatalf("pod %d: %q has %d fields, want 3 (<retention> <interval> <phase>)",
+				ord, v, len(fields))
 		}
 		if fields[1] != "06:00:00" {
 			t.Fatalf("pod %d: interval = %q, want 06:00:00 (replicas × slotLength)", ord, fields[1])
@@ -236,9 +372,9 @@ func TestPlanPodPurge_EveryPodGetsItsOwnPhase(t *testing.T) {
 // into the one window where it is not taking writes.
 func TestPlanPodPurge_DatabasesAlignOnOnePodsPhase(t *testing.T) {
 	plan := activePlan(time.Hour, 3)
-	dbA := sdWithPurge("")
+	dbA := (&slapdDatabaseFixture{}).build()
 	dbA.Name = "alpha"
-	dbB := sdWithPurge(ageOnlyPurge)
+	dbB := (&slapdDatabaseFixture{retention: 48 * time.Hour}).build()
 	dbB.Name = "beta"
 
 	for ord := range int32(3) {
@@ -311,14 +447,15 @@ func TestIsPurgeArityRejection(t *testing.T) {
 }
 
 func TestAggregateAccesslogPurgeConverged(t *testing.T) {
-	withheld := &purgeWithhold{
-		Reason:  reasonPurgeIntervalDeclared,
-		Message: "spec.replication.accesslogPurge carries an interval",
+	defect := &purgeDefect{
+		Reason:  reasonRetentionNotUsable,
+		Message: "spec.replication.accesslogPurge.retention is 0s",
 	}
 	cases := []struct {
 		name       string
-		active     bool
-		withheld   *purgeWithhold
+		plan       rotationPlan
+		defect     *purgeDefect
+		purging    bool
 		obs        []purgePhaseObservation
 		wantStatus metav1.ConditionStatus
 		wantReason string
@@ -326,46 +463,59 @@ func TestAggregateAccesslogPurgeConverged(t *testing.T) {
 		mustNotSay []string
 	}{
 		{
-			name:       "rotation off: nothing to say, and True is the honest answer",
-			active:     false,
+			name:       "purging switched off: True, and the message says the journal grows",
+			plan:       flatPlan(defaultPurgeInterval),
+			purging:    false,
 			obs:        []purgePhaseObservation{{pod: testPod0, assessed: true}},
 			wantStatus: metav1.ConditionTrue,
-			wantReason: reasonRotationDisabled,
+			wantReason: reasonPurgeDisabled,
+			mustSay:    []string{"enabled is false", "unbounded"},
+		},
+		{
+			name:       "rotation off: every pod purges together, and that is a good state",
+			plan:       flatPlan(defaultPurgeInterval),
+			purging:    true,
+			obs:        []purgePhaseObservation{{pod: testPod0, assessed: true}},
+			wantStatus: metav1.ConditionTrue,
+			wantReason: reasonConverged,
+			mustSay:    []string{wantDefaultIntervalRendered, "together"},
 		},
 		{
 			name:       "rotation on and every pod took its phase",
-			active:     true,
+			plan:       activePlan(6*time.Hour, 2),
+			purging:    true,
 			obs:        []purgePhaseObservation{{pod: testPod0, assessed: true}, {pod: testPod1, assessed: true}},
 			wantStatus: metav1.ConditionTrue,
 			wantReason: reasonConverged,
-			mustSay:    []string{"2"},
+			mustSay:    []string{"2", "06:00:00"},
 		},
 		{
-			name:       "a declared interval withholds the whole database",
-			active:     true,
-			withheld:   withheld,
+			name:       "an unusable retention is reported against the field, not the pods",
+			plan:       activePlan(6*time.Hour, 2),
+			defect:     defect,
+			purging:    true,
 			obs:        []purgePhaseObservation{{pod: testPod0, assessed: true}},
 			wantStatus: metav1.ConditionFalse,
-			wantReason: reasonPurgeIntervalDeclared,
-			mustSay:    []string{"accesslogPurge"},
+			wantReason: reasonRetentionNotUsable,
+			mustSay:    []string{"accesslogPurge.retention"},
 		},
 		{
-			// Measured on a live three-pod cluster: a withhold writes nothing,
-			// so NO pod is ever assessed, and appending the unread-pod note
-			// made the refusal read as "the pods were unreachable". The
-			// withhold is decided from the spec; the pods have nothing to do
-			// with it.
-			name:       "a withhold does not blame the pods it never wrote to",
-			active:     true,
-			withheld:   withheld,
+			// The same lesson the withhold taught, carried forward: a defect
+			// is decided from the SPEC, so appending "not assessed: slapd-0,
+			// slapd-1" would make a field fault read as unreachable pods.
+			name:       "a spec defect does not blame the pods",
+			plan:       activePlan(6*time.Hour, 2),
+			defect:     defect,
+			purging:    true,
 			obs:        []purgePhaseObservation{{pod: testPod0}, {pod: testPod1}},
 			wantStatus: metav1.ConditionFalse,
-			wantReason: reasonPurgeIntervalDeclared,
+			wantReason: reasonRetentionNotUsable,
 			mustNotSay: []string{"not assessed", testPod0},
 		},
 		{
-			name:   "an unpatched image names the pod that refused the phase",
-			active: true,
+			name:    "an unpatched image names the pod that refused the phase",
+			plan:    activePlan(6*time.Hour, 2),
+			purging: true,
 			obs: []purgePhaseObservation{
 				{pod: testPod0, assessed: true},
 				{pod: testPod1, assessed: true, unsupported: true},
@@ -375,8 +525,9 @@ func TestAggregateAccesslogPurgeConverged(t *testing.T) {
 			mustSay:    []string{testPod1},
 		},
 		{
-			name:   "an unread pod is noted and never indicted (ADR-025)",
-			active: true,
+			name:    "an unread pod is noted and never indicted (ADR-025)",
+			plan:    activePlan(6*time.Hour, 2),
+			purging: true,
 			obs: []purgePhaseObservation{
 				{pod: testPod0, assessed: true},
 				{pod: testPod1},
@@ -387,14 +538,16 @@ func TestAggregateAccesslogPurgeConverged(t *testing.T) {
 		},
 		{
 			name:       "no pod could be read at all: Unknown, never False",
-			active:     true,
+			plan:       activePlan(6*time.Hour, 2),
+			purging:    true,
 			obs:        []purgePhaseObservation{{pod: testPod0}, {pod: testPod1}},
 			wantStatus: metav1.ConditionUnknown,
 			wantReason: reasonNoReachablePod,
 		},
 		{
 			name:       "rotation on and no pods visited yet",
-			active:     true,
+			plan:       activePlan(6*time.Hour, 2),
+			purging:    true,
 			obs:        nil,
 			wantStatus: metav1.ConditionUnknown,
 			wantReason: reasonNoReachablePod,
@@ -403,7 +556,7 @@ func TestAggregateAccesslogPurgeConverged(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			status, reason, msg := aggregateAccesslogPurgeConverged(tc.active, tc.withheld, tc.obs)
+			status, reason, msg := aggregateAccesslogPurgeConverged(tc.plan, tc.defect, tc.purging, tc.obs)
 			if status != tc.wantStatus {
 				t.Fatalf("status = %v, want %v", status, tc.wantStatus)
 			}
@@ -428,9 +581,9 @@ func TestAggregateAccesslogPurgeConverged(t *testing.T) {
 }
 
 func TestAccesslogPurgeConvergedFor(t *testing.T) {
-	sd := sdWithPurge("")
+	sd := (&slapdDatabaseFixture{}).build()
 	sd.Generation = 4
-	cond := accesslogPurgeConvergedFor(sd, true, nil,
+	cond := accesslogPurgeConvergedFor(sd, activePlan(6*time.Hour, 1),
 		[]purgePhaseObservation{{pod: testPod0, assessed: true, unsupported: true}})
 
 	if cond.Type != accesslogPurgeConvergedCondition {
@@ -444,31 +597,22 @@ func TestAccesslogPurgeConvergedFor(t *testing.T) {
 	}
 }
 
-// Rotation off must change nothing at all about the value written — the
-// milestone's one hard compatibility requirement, asserted against the resolver
-// the pre-rotation code used directly.
-func TestPlanPodPurge_RotationOffIsByteIdenticalToTheOldResolution(t *testing.T) {
-	for _, field := range []string{"", testBlank, noneSentinel, noneMixedCase, twoFieldPurge, ageOnlyPurge} {
-		sd := sdWithPurge(field)
-		for ord := range int32(4) {
-			got := planPodPurge(rotationPlan{}, sd, ord)
-			if got.Withheld {
-				t.Fatalf("field %q, pod %d: withheld with rotation off", field, ord)
-			}
-			if want := desiredAccesslogPurge(sd); got.Value != want {
-				t.Fatalf("field %q, pod %d: Value = %q, want %q", field, ord, got.Value, want)
-			}
-			if got.Fallback != "" {
-				t.Fatalf("field %q, pod %d: Fallback = %q, want none with rotation off",
-					field, ord, got.Fallback)
-			}
-		}
+// accesslogPurgeConvergedFor resolves `purging` from the CR itself, so the
+// opt-out must reach the condition without the caller passing it separately.
+func TestAccesslogPurgeConvergedFor_ReadsTheOptOutFromTheCR(t *testing.T) {
+	cond := accesslogPurgeConvergedFor(sdPurgeDisabled(), activePlan(6*time.Hour, 1),
+		[]purgePhaseObservation{{pod: testPod0, assessed: true}})
+	if cond.Status != metav1.ConditionTrue || cond.Reason != reasonPurgeDisabled {
+		t.Fatalf("condition = %v/%q, want True/%s", cond.Status, cond.Reason, reasonPurgeDisabled)
 	}
 }
 
-// A nil database is the shape every other resolver in this package tolerates.
+// A nil database is the shape every other resolver in this package tolerates,
+// and it must still produce a purge value rather than nothing.
 func TestPlanPodPurge_NilDatabase(t *testing.T) {
-	if got := planPodPurge(rotationPlan{}, nil, 0); got.Value != defaultAccesslogPurge {
-		t.Fatalf("Value = %q, want %q", got.Value, defaultAccesslogPurge)
+	got := planPodPurge(flatPlan(defaultPurgeInterval), nil, 0)
+	want := wantDefaultRetentionRendered + " " + wantDefaultIntervalRendered
+	if got.Value != want {
+		t.Fatalf("Value = %q, want %q", got.Value, want)
 	}
 }

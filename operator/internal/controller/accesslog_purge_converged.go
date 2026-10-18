@@ -13,6 +13,7 @@ package controller
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -37,16 +38,8 @@ import (
 const accesslogPurgeConvergedCondition = "AccesslogPurgeConverged"
 
 // The reasons AccesslogPurgeConverged publishes beyond the shared
-// reasonConverged (names.go), reasonNoReachablePod (data_present.go) and
-// reasonRotationDisabled (rotation_gate.go).
+// reasonConverged (names.go) and reasonNoReachablePod (data_present.go).
 const (
-	// reasonPurgeIntervalDeclared: the database declares an interval in
-	// spec.replication.accesslogPurge while the cluster's rotation owns the
-	// schedule. ADR-024's rule is that a field which cannot be honoured is
-	// rejected or converged, never ignored — so the purge value is WITHHELD for
-	// this database (every pod keeps whatever it has) rather than silently
-	// overridden with the cluster's interval.
-	reasonPurgeIntervalDeclared = "PurgeIntervalDeclared"
 	// reasonPurgePhaseUnsupported: a pod's slapd refused the three-field value
 	// outright ("extra cruft after <age> <interval>"). Its accesslog overlay is
 	// a stock build without the accesslog-purge-phase patch. Decided handling
@@ -54,34 +47,62 @@ const (
 	// probing, no marker convention — the failure is loud, bounded, and names
 	// exactly what to fix.
 	reasonPurgePhaseUnsupported = "PurgePhaseUnsupported"
+	// reasonRetentionNotUsable: spec.replication.accesslogPurge.retention has
+	// no representation on the server — non-positive, or finer than the whole
+	// seconds olcAccessLogPurge counts in. The API server's rule checks the
+	// duration GRAMMAR and nothing else, so this half is the operator's.
+	//
+	// It is REPORTED, and the operator's default retention is written anyway.
+	// That is the one thing this file may not trade: a database must always
+	// come out of a pass with a purge value, whatever the user got wrong. The
+	// alternative is the defect ADR-037's ninth amendment records — a withheld
+	// value on a cluster that never had one, and an unpurged journal that grows
+	// to its map ceiling and then stops data writes.
+	reasonRetentionNotUsable = "RetentionNotUsable"
+	// reasonPurgeDisabled: spec.replication.accesslogPurge.enabled is false.
+	// No purging on this journal at all; the user has taken responsibility for
+	// its growth. A good state, reported as True.
+	reasonPurgeDisabled = "PurgeDisabled"
 )
 
-// purgeWithhold is a per-database refusal: something this database declares
-// cannot be honoured, so its purge value is not written at all this pass.
-type purgeWithhold struct {
+// defaultPurgeRetention is how long an entry stays in a change journal when the
+// database declares nothing: 7 days. The window is how long a consumer may stay
+// away and still resume from a delta instead of a full refresh, so it is sized
+// to survive a weekend-plus outage.
+//
+// It is the retention half of the old two-token default "7+00:00 1+00:00",
+// unchanged. Decomposing the field must not move a value every cluster is
+// already running.
+const defaultPurgeRetention = 7 * 24 * time.Hour
+
+// purgeDefect is a per-database fault: something this database declares has no
+// representation on the server. It is REPORTED, never acted on by withholding —
+// the purge value is written from the operator's default instead, because an
+// unpurged journal is an outage and a wrong retention is a tuning error.
+type purgeDefect struct {
 	Reason  string
 	Message string
 }
 
 // purgePodPlan is the olcAccessLogPurge decision for one (pod, database).
 //
-// Value is what to write; "" means the attribute must be absent (the "none"
-// opt-out surviving composition — a schedule must never resurrect a purge the
-// user turned off).
+// Value is what to write; "" means the attribute must be absent, which is the
+// explicit `enabled: false` opt-out and nothing else.
 //
 // Fallback is the two-field value to fall back to when the server refuses
 // Value's third field. It is empty whenever Value carries no phase, so the
 // fallback path cannot fire where there is nothing to fall back from. A fresh
 // cluster on an unpatched image has no olcAccessLogPurge at all, and writing
-// nothing there would restore the unpurged-journal failure that
-// defaultAccesslogPurge exists to prevent — so the fallback is written and the
-// condition reports what was lost, rather than the pod being left bare.
+// nothing there would restore the unpurged-journal failure the default exists
+// to prevent — so the fallback is written and the condition reports what was
+// lost, rather than the pod being left bare.
+//
+// There is no Withheld field any more, and its absence is the milestone: with
+// the interval owned by the cluster there is no declared interval to refuse, so
+// there is nothing to withhold, so a database cannot end up unpurged.
 type purgePodPlan struct {
 	Value    string
 	Fallback string
-	Withheld bool
-	Reason   string
-	Message  string
 }
 
 // purgePhaseObservation is one pod's answer.
@@ -95,99 +116,85 @@ type purgePhaseObservation struct {
 	unsupported bool
 }
 
-// splitPurgeAge returns the age half of an olcAccessLogPurge value, and whether
-// the value carried anything beyond it.
+// resolveRetention is the database's half of olcAccessLogPurge: what to KEEP.
+// Pure.
 //
-// The attribute is whitespace-separated (slapd re-emits it with its own
-// spacing, which is why strings.Fields rather than a split on " "). Under
-// rotation only the age half comes from the database: the interval and the
-// phase are a schedule over pods and belong to the cluster (ADR-037, second
-// amendment, "Where the configuration lives").
+// Three answers, and the second return distinguishes the two that look alike
+// from outside:
 //
-// Pure, and deliberately not clever: it does not validate the age against
-// slapd's [ddd+]hh:mm[:ss] grammar. The age is passed through verbatim — it is
-// what the user wrote, or what defaultAccesslogPurge says — exactly as the
-// non-rotating path passes the whole value through verbatim today.
-func splitPurgeAge(purge string) (string, bool) {
-	fields := strings.Fields(purge)
-	switch len(fields) {
-	case 0:
-		return "", false
-	case 1:
-		return fields[0], false
-	default:
-		return fields[0], true
+//   - purging off (`enabled: false`) — zero, no defect. The user asked for no
+//     purge and takes the growth.
+//   - a usable retention — the declared duration, no defect.
+//   - a declared retention with no representation on the server — the
+//     OPERATOR'S DEFAULT plus a defect to report. Never zero: falling back to
+//     "no purge" because a duration was mistyped is how a tuning error becomes
+//     an outage.
+func resolveRetention(sd *ldapv1alpha1.SlapdDatabase) (time.Duration, *purgeDefect) {
+	if sd == nil || sd.Spec.Replication.AccesslogPurge == nil {
+		return defaultPurgeRetention, nil
 	}
-}
+	p := sd.Spec.Replication.AccesslogPurge
+	if p.Enabled != nil && !*p.Enabled {
+		return 0, nil
+	}
+	if p.Retention == nil {
+		return defaultPurgeRetention, nil
+	}
 
-// databaseDeclaresPurgeInterval reports whether the DATABASE's own field — not
-// the operator's default — carries an interval. The distinction matters: the
-// shipped default is "7+00:00 1+00:00" and carries one, but nobody declared it,
-// so a database that says nothing is not in conflict with the cluster's
-// schedule and must not be refused.
-func databaseDeclaresPurgeInterval(sd *ldapv1alpha1.SlapdDatabase) bool {
-	if sd == nil {
-		return false
+	d := p.Retention.Duration
+	switch {
+	case d <= 0:
+		return defaultPurgeRetention, &purgeDefect{
+			Reason: reasonRetentionNotUsable,
+			Message: fmt.Sprintf("spec.replication.accesslogPurge.retention is %s. The API "+
+				"server accepts it — its rule checks the duration GRAMMAR and nothing else — "+
+				"but a retention of zero or less would purge the journal out from under every "+
+				"consumer. The operator's default of %s is in force instead; set a positive "+
+				"retention, or set enabled: false if you really want no purging at all",
+				d, formatLogAge(defaultPurgeRetention)),
+		}
+	case d%time.Second != 0:
+		return defaultPurgeRetention, &purgeDefect{
+			Reason: reasonRetentionNotUsable,
+			Message: fmt.Sprintf("spec.replication.accesslogPurge.retention is %s, which is not "+
+				"a whole number of seconds. olcAccessLogPurge's fields are [ddd+]hh:mm[:ss], so "+
+				"it has no representation on the server. The operator's default of %s is in "+
+				"force instead", d, formatLogAge(defaultPurgeRetention)),
+		}
 	}
-	v := strings.TrimSpace(sd.Spec.Replication.AccesslogPurge)
-	if v == "" || strings.EqualFold(v, noneSentinel) {
-		return false
-	}
-	_, extra := splitPurgeAge(v)
-	return extra
+	return d, nil
 }
 
 // planPodPurge composes the olcAccessLogPurge value for one pod of one
-// database. Pure; the one place the two owners of the attribute meet.
+// database. Pure; the one place the three owners of the attribute meet.
 //
-// With rotation off the result is byte-identical to the pre-ADR-037 behaviour:
-// desiredAccesslogPurge's answer, unchanged, with no fallback. That is a hard
-// compatibility requirement and has its own test.
+// The database brings the retention, the cluster brings the interval, and the
+// grid brings the phase. THERE IS ALWAYS AN INTERVAL — declared in form A,
+// derived as n·t in form B, the operator's default otherwise — so the only way
+// out of here with no value at all is the explicit `enabled: false`.
 //
 // With rotation on, ALL DATABASES ON A POD SHARE THAT POD'S PHASE — aligned,
 // not spread (ADR-037, second amendment, "Databases align, they do not
 // spread"). The phase is a function of the ordinal alone; the database enters
-// only through the age. Spreading the databases over n·D slots would disturb
-// every pod throughout the period and defeat the purpose, which is to
+// only through the retention. Spreading the databases over n·D slots would
+// disturb every pod throughout the period and defeat the purpose, which is to
 // concentrate a pod's disturbance into the window where it is not writing.
 func planPodPurge(plan rotationPlan, sd *ldapv1alpha1.SlapdDatabase, ordinal int32) purgePodPlan {
-	resolved := desiredAccesslogPurge(sd)
-	if !plan.Active {
-		return purgePodPlan{Value: resolved}
-	}
-	// "none" survives composition: a schedule must not resurrect a purge the
-	// user turned off. composePurge would answer "" for a blank age anyway;
-	// returning here keeps the fallback empty too.
-	if resolved == "" {
+	retention, _ := resolveRetention(sd)
+	if retention <= 0 {
+		// `enabled: false`. A schedule must not resurrect a purge the user
+		// turned off.
 		return purgePodPlan{}
 	}
-
-	if databaseDeclaresPurgeInterval(sd) {
-		return purgePodPlan{
-			Withheld: true,
-			Reason:   reasonPurgeIntervalDeclared,
-			Message: fmt.Sprintf("spec.replication.accesslogPurge is %q, which declares an "+
-				"interval. The cluster's spec.rotation owns the schedule (interval %s = "+
-				"spec.replicas × slotLength, phase per pod), so this database's purge value is "+
-				"WITHHELD rather than silently overridden — the pods keep what they have. Leave "+
-				"the age alone and drop the interval (%q), or turn spec.rotation.enabled off",
-				strings.TrimSpace(sd.Spec.Replication.AccesslogPurge), formatLogAge(plan.Interval),
-				firstField(sd.Spec.Replication.AccesslogPurge)),
-		}
+	if !plan.Active {
+		return purgePodPlan{Value: composePurge(retention, plan.Interval, nil)}
 	}
 
-	age, _ := splitPurgeAge(resolved)
 	phase := purgePhase(ordinal, plan.Replicas, plan.SlotLength)
 	return purgePodPlan{
-		Value:    composePurge(age, plan.Interval, phase),
-		Fallback: age + " " + formatLogAge(plan.Interval),
+		Value:    composePurge(retention, plan.Interval, &phase),
+		Fallback: composePurge(retention, plan.Interval, nil),
 	}
-}
-
-// firstField renders the age half of a declared value for a message.
-func firstField(v string) string {
-	age, _ := splitPurgeAge(v)
-	return age
 }
 
 // isPurgeArityRejection reports whether err is a stock slapd refusing the third
@@ -218,13 +225,15 @@ func isPurgeArityRejection(err error) bool {
 //   - a pod that was not read is noted, never indicted (ADR-025). A fleet with
 //     one pod mid-restart must not flip the condition to False.
 //   - a database with nothing to say says so, rather than going Unknown for
-//     want of evidence it does not need. Rotation off is that case, and the
-//     condition is published anyway — setCondition never removes one, so a
-//     cluster that turns rotation OFF would otherwise keep a stale False.
+//     want of evidence it does not need. Purging switched off is that case.
 //   - the whole verdict is recomputed from this pass (ADR-001), so a fleet
 //     upgraded onto a patched image clears it with no special case.
+//
+// What is NOT here any more: the withhold. There is no declared interval on a
+// database to refuse, so there is nothing to withhold, which is how the defect
+// was dissolved rather than patched (ADR-037 ninth amendment).
 func aggregateAccesslogPurgeConverged(
-	rotating bool, withheld *purgeWithhold, results []purgePhaseObservation,
+	plan rotationPlan, defect *purgeDefect, purging bool, results []purgePhaseObservation,
 ) (metav1.ConditionStatus, string, string) {
 	var assessed, unread, unsupported []string
 	for _, r := range results {
@@ -245,26 +254,26 @@ func aggregateAccesslogPurgeConverged(
 	}
 
 	switch {
-	case !rotating:
-		return metav1.ConditionTrue, reasonRotationDisabled,
-			"the cluster's spec.rotation is off, so olcAccessLogPurge carries this database's " +
-				"own age and interval and every pod purges on its own schedule (ADR-037)"
+	case !purging:
+		return metav1.ConditionTrue, reasonPurgeDisabled,
+			"spec.replication.accesslogPurge.enabled is false, so this database's change " +
+				"journal is never purged and olcAccessLogPurge is absent. The journal grows " +
+				"unbounded; you have taken responsibility for it"
 
-	// The withhold is decided from the SPEC, not from any pod, so the
-	// unread-pod note is omitted here: it is true but irrelevant, and reading
-	// "not assessed: slapd-0, slapd-1, slapd-2" under a refusal suggests the
-	// pods were unreachable when in fact the operator deliberately wrote
-	// nothing to them. Measured on a live three-pod cluster.
-	case withheld != nil:
-		return metav1.ConditionFalse, withheld.Reason, withheld.Message
+	// The defect is decided from the SPEC, not from any pod, so the unread-pod
+	// note is omitted: it is true but irrelevant, and reading "not assessed:
+	// slapd-0, slapd-1, slapd-2" under a spec fault suggests the pods were
+	// unreachable when in fact the operator wrote the default to all of them.
+	case defect != nil:
+		return metav1.ConditionFalse, defect.Reason, defect.Message
 
 	case len(unsupported) > 0:
 		return metav1.ConditionFalse, reasonPurgePhaseUnsupported,
 			fmt.Sprintf("the purge PHASE was refused by slapd on %s. That slapd has no "+
 				"accesslog-purge-phase patch, so the third value of olcAccessLogPurge is "+
-				"rejected as cruft; the operator left the two-field <age> <interval> value in "+
-				"place, which keeps the journal bounded but makes those pods purge in step with "+
-				"each other instead of on the rotation grid. Run a slapd image carrying the "+
+				"rejected as cruft; the operator left the two-field <retention> <interval> value "+
+				"in place, which keeps the journal bounded but makes those pods purge in step "+
+				"with each other instead of on the rotation grid. Run a slapd image carrying the "+
 				"patch (2.7.1-0+slaptain2 or later — `slapd -VV`), or turn "+
 				"spec.rotation.enabled off on the cluster%s",
 				strings.Join(unsupported, ", "), unreadNote)
@@ -274,21 +283,30 @@ func aggregateAccesslogPurgeConverged(
 			fmt.Sprintf("could not read or write the accesslog overlay on any pod, so the purge "+
 				"schedule could not be verified%s", unreadNote)
 
+	case !plan.Active:
+		return metav1.ConditionTrue, reasonConverged,
+			fmt.Sprintf("every one of the %d pod(s) read purges this journal every %s, all of "+
+				"them together — the cluster's spec.rotation is off, so nothing is staggered and "+
+				"the write endpoint does not move (ADR-037)%s",
+				len(assessed), formatLogAge(plan.Interval), unreadNote)
+
 	default:
 		return metav1.ConditionTrue, reasonConverged,
 			fmt.Sprintf("every one of the %d pod(s) read carries its own purge phase on the "+
-				"cluster's grid%s", len(assessed), unreadNote)
+				"cluster's grid: interval %s, phases %s apart%s",
+				len(assessed), formatLogAge(plan.Interval), formatLogAge(plan.SlotLength),
+				unreadNote)
 	}
 }
 
 // accesslogPurgeConvergedFor renders the published condition.
 func accesslogPurgeConvergedFor(
 	sd *ldapv1alpha1.SlapdDatabase,
-	rotating bool,
-	withheld *purgeWithhold,
+	plan rotationPlan,
 	results []purgePhaseObservation,
 ) metav1.Condition {
-	status, reason, msg := aggregateAccesslogPurgeConverged(rotating, withheld, results)
+	retention, defect := resolveRetention(sd)
+	status, reason, msg := aggregateAccesslogPurgeConverged(plan, defect, retention > 0, results)
 	cond := metav1.Condition{
 		Type:               accesslogPurgeConvergedCondition,
 		Status:             status,

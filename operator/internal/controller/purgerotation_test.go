@@ -21,10 +21,6 @@ import (
 // they check.
 const (
 	testZeroLogAge = "00:00:00"
-	// testPurgeAge is the age half of the shipped default, as
-	// defaultAccesslogPurge spells it — one day short of a week, with no
-	// seconds field, which is exactly why composePurge must not reformat it.
-	testPurgeAge = "7+00:00"
 	// testNoRotationGrid names the cases where there is no grid to be on.
 	testNoRotationGrid = "a zero slot length means there is no grid"
 )
@@ -485,64 +481,70 @@ func TestRotationSlotNamesTheOrdinalWhosePhaseOwnsIt(t *testing.T) {
 // The age is used verbatim. It arrives already resolved from
 // desiredAccesslogPurge, and reformatting it would rewrite what the user wrote.
 func TestComposePurge(t *testing.T) {
+	phase := func(d time.Duration) *time.Duration { return &d }
 	cases := []struct {
-		name     string
-		age      string
-		interval time.Duration
-		phase    time.Duration
-		want     string
-		because  string
+		name      string
+		retention time.Duration
+		interval  time.Duration
+		phase     *time.Duration
+		want      string
+		because   string
 	}{
 		{
-			name: "the three fields are space-separated in slapd's order",
-			age:  testPurgeAge, interval: 4 * time.Hour, phase: time.Hour,
-			want:    testPurgeAge + " 04:00:00 01:00:00",
+			name:      "the three fields are space-separated in slapd's order",
+			retention: 7 * 24 * time.Hour, interval: 4 * time.Hour, phase: phase(time.Hour),
+			want:    "7+00:00:00 04:00:00 01:00:00",
 			because: "the patch reads logpurge as <age> <interval> [<phase>] and nothing reorders it",
 		},
 		{
-			name: "the age is passed through verbatim, not reformatted",
-			age:  "14+00:00", interval: 4 * time.Hour, phase: 2 * time.Hour,
-			want:    "14+00:00 04:00:00 02:00:00",
-			because: "the age is the user's retention policy; the schedule half has no business rewriting it",
+			name:      "every field goes through the one tested formatter",
+			retention: 14 * 24 * time.Hour, interval: 4 * time.Hour, phase: phase(2 * time.Hour),
+			want: "14+00:00:00 04:00:00 02:00:00",
+			because: "log_age_parse is positional and refuses 0:05 where it accepts 00:05; " +
+				"a typed duration and one formatter remove the class (ADR-024 R6)",
 		},
 		{
-			name: "pod 0's zero phase is emitted, not omitted",
-			age:  testPurgeAge, interval: 4 * time.Hour, phase: 0,
-			want:    testPurgeAge + " 04:00:00 " + testZeroLogAge,
+			name:      "pod 0's zero phase is emitted, not omitted",
+			retention: 7 * 24 * time.Hour, interval: 4 * time.Hour, phase: phase(0),
+			want:    "7+00:00:00 04:00:00 " + testZeroLogAge,
 			because: "a two-field value leaves the task unaligned, and pod 0 would drift off the grid the others hold",
 		},
 		{
-			name: "a period of days carries the days prefix in both schedule fields",
-			age:  testPurgeAge, interval: 48 * time.Hour, phase: 24 * time.Hour,
-			want:    testPurgeAge + " 2+00:00:00 1+00:00:00",
+			// The reason phase is a POINTER. Form A has no phase at all; form
+			// B's pod 0 has a phase of exactly zero. A plain duration would
+			// make them one value, and the three-field form is the one a stock
+			// slapd refuses outright.
+			name:      "a nil phase is form A: two fields, every pod purging together",
+			retention: 7 * 24 * time.Hour, interval: 4 * time.Hour, phase: nil,
+			want:    "7+00:00:00 04:00:00",
+			because: "absence and zero are different states, and only one of them a stock slapd can parse",
+		},
+		{
+			name:      "a period of days carries the days prefix in both schedule fields",
+			retention: 7 * 24 * time.Hour, interval: 48 * time.Hour, phase: phase(24 * time.Hour),
+			want:    "7+00:00:00 2+00:00:00 1+00:00:00",
 			because: "ADR-037 expects long phases, and both schedule fields go through the same strict parser",
 		},
 		{
-			name: "an age of none composes to nothing at all",
-			age:  "", interval: 4 * time.Hour, phase: time.Hour,
+			name:      "a non-positive retention composes to nothing at all",
+			retention: 0, interval: 4 * time.Hour, phase: phase(time.Hour),
 			want:    "",
 			because: "a schedule must not resurrect a purge the user explicitly turned off",
 		},
 		{
-			name: "a whitespace-only age is still none",
-			age:  testBlank, interval: 4 * time.Hour, phase: time.Hour,
+			name:      "a non-positive interval means there is no schedule to write",
+			retention: 7 * 24 * time.Hour, interval: 0, phase: nil,
 			want:    "",
-			because: "blank reads as unset everywhere else in this package and must not become a one-field value",
-		},
-		{
-			name: "a non-positive interval means there is no schedule to write",
-			age:  testPurgeAge, interval: 0, phase: 0,
-			want:    "",
-			because: "an age alone is a value slapd refuses, and inventing an interval here would hide the misconfiguration",
+			because: "a retention alone is a value slapd refuses, and inventing an interval here would hide the misconfiguration",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := composePurge(tc.age, tc.interval, tc.phase)
+			got := composePurge(tc.retention, tc.interval, tc.phase)
 			if got != tc.want {
-				t.Fatalf("composePurge(%q, %s, %s) = %q, want %q — %s",
-					tc.age, tc.interval, tc.phase, got, tc.want, tc.because)
+				t.Fatalf("composePurge(%s, %s, %v) = %q, want %q — %s",
+					tc.retention, tc.interval, tc.phase, got, tc.want, tc.because)
 			}
 		})
 	}
@@ -559,6 +561,7 @@ func TestComposePurge(t *testing.T) {
 // validating. This test is what makes that trust auditable.
 func TestComposePurgeKeepsThePhaseBelowTheInterval(t *testing.T) {
 	const slot = 90 * time.Minute
+	const retention = 7 * 24 * time.Hour
 
 	for n := int32(1); n <= 15; n++ {
 		interval := time.Duration(n) * slot
@@ -570,16 +573,15 @@ func TestComposePurgeKeepsThePhaseBelowTheInterval(t *testing.T) {
 					k, n, slot, phase, interval)
 			}
 
-			value := composePurge(testPurgeAge, interval, phase)
+			value := composePurge(retention, interval, &phase)
 			fields := strings.Fields(value)
 			if len(fields) != 3 {
-				t.Fatalf("composePurge(%q, %s, %s) = %q, want three space-separated fields — "+
+				t.Fatalf("composePurge(%s, %s, %s) = %q, want three space-separated fields — "+
 					"an unpatched slapd reports extra cruft and a short value leaves the task unaligned",
-					testPurgeAge, interval, phase, value)
+					retention, interval, phase, value)
 			}
-			if fields[0] != testPurgeAge {
-				t.Fatalf("composePurge wrote age %q, want %q — the retention policy is the database's and is copied, not rewritten",
-					fields[0], testPurgeAge)
+			if want := formatLogAge(retention); fields[0] != want {
+				t.Fatalf("composePurge wrote retention %q, want %q", fields[0], want)
 			}
 			if want := formatLogAge(interval); fields[1] != want {
 				t.Fatalf("composePurge wrote interval %q, want %q — the schedule fields must go through the strict formatter",
@@ -593,16 +595,20 @@ func TestComposePurgeKeepsThePhaseBelowTheInterval(t *testing.T) {
 	}
 }
 
-// ADR-037, second amendment, "Writer selection": at slot s, walk the preference
-// order d = n-1, n-2, ... 1 and take the first pod that is eligible. Offset j
-// names the pod that purged j slots ago — ordinal (slot-j+n) mod n — so the
-// preferred end, d = n-1, is the pod with the longest time to recover and the
-// next one due to purge.
+// ADR-037, ninth amendment, "the sign convention": v is the signed displacement
+// in slots from a pod's WRITE slot to its own PURGE slot, taken mod n. Pod p
+// purges in slot p, so pod p writes in slot p−v, and at slot s the writer is
+// the pod that purges v slots from now: (s+v) mod n.
 //
-// d is a tunable with a measured range, not a fixed choice: it is bounded below
-// by the purge duration (d*t >= P) and above by the drain time ((n-d)*t >= D),
-// and D has no measured value at all yet. So the walk takes d as a parameter and
-// clamps it rather than deriving it.
+// The walk is ASCENDING — v, v+1, … n−1 — so the pod purging THIS slot falls
+// off the end of the range instead of needing a rule to exclude it. Under the
+// superseded descending parameterisation "never offset 0" was a doc comment
+// plus a property test; here it is the loop bound, and the property test below
+// stays as the guard against someone reintroducing the rule.
+//
+// v is a tunable with a measured range, not a fixed choice: it is bounded by
+// the purge duration at one end and the drain time at the other, and the drain
+// time has no measured value at all yet.
 //
 // Everything eligibility knows — Ready, ADR-036's authorship gate, decision 4's
 // promotion gate — arrives through the predicate. The grid itself contributes
@@ -613,93 +619,105 @@ func TestWriteTarget(t *testing.T) {
 		name     string
 		slot     int32
 		n        int32
-		d        int32
+		v        int32
 		eligible func(int32) bool
 		want     int32
 		wantOK   bool
 		because  string
 	}{
 		{
-			name: "the preferred writer is the pod that purged d slots ago",
-			slot: 0, n: 4, d: 3, eligible: eligibleAll(),
+			name: "v of 1 is the default: the writer purges in the NEXT slot",
+			slot: 0, n: 4, v: 1, eligible: eligibleAll(),
 			want: 1, wantOK: true,
-			because: "at d = n-1 the writer is the next pod due to purge, which has had the whole period to recover",
+			because: "+1 is \"purge the slot after writing\", the configuration ADR-037 prefers and measures first",
 		},
 		{
 			name: "the walk wraps around the period",
-			slot: 1, n: 4, d: 3, eligible: eligibleAll(),
-			want: 2, wantOK: true,
+			slot: 3, n: 4, v: 1, eligible: eligibleAll(),
+			want: 0, wantOK: true,
 			because: "offsets are modular; the period has no edge for the walk to fall off",
 		},
 		{
-			name: "an ineligible preferred writer falls back one slot nearer the purge",
-			slot: 0, n: 4, d: 3, eligible: eligibleSet(0, 2, 3),
+			name: "v of -1 is n-1: the writer purged in the PREVIOUS slot",
+			slot: 0, n: 4, v: -1, eligible: eligibleAll(),
+			want: 3, wantOK: true,
+			because: "the sign is taken mod n, which is what makes a declared value survive a scale event",
+		},
+		{
+			name: "n-1 spelled out is the same answer as -1",
+			slot: 0, n: 4, v: 3, eligible: eligibleAll(),
+			want: 3, wantOK: true,
+			because: "-1 and n-1 are one answer, which is why the operator reports the slot it RESOLVED to",
+		},
+		{
+			name: "an ineligible preferred writer falls back to one that purges a little later",
+			slot: 0, n: 4, v: 1, eligible: eligibleSet(0, 2, 3),
 			want: 2, wantOK: true,
 			because: "the order is a preference, not a requirement; the next-best pod still is not purging",
 		},
 		{
 			name: "the walk skips every ineligible pod before giving up on the order",
-			slot: 0, n: 4, d: 3, eligible: eligibleSet(0, 3),
+			slot: 0, n: 4, v: 1, eligible: eligibleSet(0, 3),
 			want: 3, wantOK: true,
-			because: "offset 1 is the last rung of the walk and is still preferable to the purging pod",
+			because: "offset n-1 is the last rung of the ascending walk and is still preferable to the purging pod",
 		},
 		{
-			name: "d of one picks the pod that purged in the previous slot",
-			slot: 2, n: 4, d: 1, eligible: eligibleAll(),
-			want: 1, wantOK: true,
-			because: "the lower end of d's range is legal and costs write ceiling, not correctness",
+			name: "v of 2 starts the walk two slots out",
+			slot: 0, n: 4, v: 2, eligible: eligibleAll(),
+			want: 2, wantOK: true,
+			because: "2 is the deferred cooldown experiment: a slot between writing and purging",
 		},
 		{
 			name: "with nothing else eligible the purging pod takes the writes anyway",
-			slot: 0, n: 2, d: 1, eligible: eligibleSet(0),
+			slot: 0, n: 2, v: 1, eligible: eligibleSet(0),
 			want: 0, wantOK: true,
 			because: "ADR-037 decides this case explicitly: writes continuing badly beats writes not continuing",
 		},
 		{
 			name: "nothing eligible at all leaves no writer to choose",
-			slot: 2, n: 4, d: 3, eligible: eligibleNone(),
+			slot: 2, n: 4, v: 1, eligible: eligibleNone(),
 			want: 0, wantOK: false,
 			because: "the caller must then leave the selector where it is; the write Service must not select nothing",
 		},
 		{
-			name: "d above the pods that exist is clamped to n-1",
-			slot: 0, n: 4, d: 9, eligible: eligibleAll(),
+			name: "a v above the pods that exist is read modulo n, not clamped",
+			slot: 0, n: 4, v: 9, eligible: eligibleAll(),
 			want: 1, wantOK: true,
-			because: "an unclamped offset would wrap past the period and land back on the purging pod",
+			because: "9 mod 4 is 1; modulo is the whole arithmetic of a signed displacement",
 		},
 		{
-			name: "d of zero is clamped to one",
-			slot: 0, n: 4, d: 0, eligible: eligibleAll(),
-			want: 3, wantOK: true,
-			because: "d = 0 IS the purging pod, which is the one selection the feature exists to forbid",
+			name: "v of zero reads as one rather than selecting the purging pod",
+			slot: 0, n: 4, v: 0, eligible: eligibleAll(),
+			want: 1, wantOK: true,
+			because: "v = 0 IS the purging pod, which is the one selection the feature exists to forbid; the gate refuses it with a condition and this is the defensive floor",
 		},
 		{
-			name: "a negative d is clamped to one",
-			slot: 0, n: 4, d: -5, eligible: eligibleAll(),
-			want: 3, wantOK: true,
-			because: "a nonsense tunable must not silently invert the rotation",
+			name: "a multiple of n reads as one for the same reason",
+			slot: 1, n: 4, v: 8, eligible: eligibleAll(),
+			want: 2, wantOK: true,
+			because: "8 mod 4 is 0, which is why the rule is `v mod n != 0` and not a minimum",
 		},
 		{
 			name: "a single replica writes to itself",
-			slot: 0, n: 1, d: 1, eligible: eligibleSet(0),
+			slot: 0, n: 1, v: 1, eligible: eligibleSet(0),
 			want: 0, wantOK: true,
 			because: "n = 1 has no rotation: the only pod is both purger and writer",
 		},
 		{
 			name: "a single replica that is not eligible has no writer",
-			slot: 0, n: 1, d: 1, eligible: eligibleNone(),
+			slot: 0, n: 1, v: 1, eligible: eligibleNone(),
 			want: 0, wantOK: false,
 			because: "a down single pod is reported as no writer, not as a writer that happens to be down",
 		},
 		{
 			name: "a non-positive replica count has no writer",
-			slot: 0, n: 0, d: 1, eligible: eligibleAll(),
+			slot: 0, n: 0, v: 1, eligible: eligibleAll(),
 			want: 0, wantOK: false,
 			because: "n is spec.replicas; with no pods there is nothing to select and nothing to purge",
 		},
 		{
 			name: "a slot outside the period is read modulo n",
-			slot: 5, n: 4, d: 3, eligible: eligibleAll(),
+			slot: 5, n: 4, v: 1, eligible: eligibleAll(),
 			want: 2, wantOK: true,
 			because: "slot 5 of a four-slot period is slot 1, and the writer must not depend on how the caller counted",
 		},
@@ -707,49 +725,99 @@ func TestWriteTarget(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := writeTarget(tc.slot, tc.n, tc.d, tc.eligible)
+			got, ok := writeTarget(tc.slot, tc.n, tc.v, tc.eligible)
 			if ok != tc.wantOK {
 				t.Fatalf("writeTarget(%d, %d, %d, …) ok = %v, want %v — %s",
-					tc.slot, tc.n, tc.d, ok, tc.wantOK, tc.because)
+					tc.slot, tc.n, tc.v, ok, tc.wantOK, tc.because)
 			}
 			if got != tc.want {
 				t.Fatalf("writeTarget(%d, %d, %d, …) = %d, want %d — %s",
-					tc.slot, tc.n, tc.d, got, tc.want, tc.because)
+					tc.slot, tc.n, tc.v, got, tc.want, tc.because)
 			}
 		})
 	}
 }
 
-// The one rule the grid contributes, over every fleet size and every slot: the
-// writer is never the pod purging, unless it is the only candidate there is.
+// The one rule the grid contributes, over every fleet size, every slot and
+// every legal v: the writer is never the pod purging, unless it is the only
+// candidate there is.
 //
 // This is the whole feature in one assertion. ADR-037's third amendment measured
 // that the only variable a client can see is whether the write target purges —
 // staggering the peers changed nothing at all — so a walk that can land on
 // offset 0 while another pod is available does not merely degrade the feature,
 // it removes it, and every health signal stays green while it does.
+//
+// The ascending walk makes the property fall out of the loop bound, and the
+// test is KEPT anyway: it is the guard against someone reintroducing a walk
+// that can reach offset 0 — which is exactly what the superseded descending
+// parameterisation could do, and had to be forbidden by a comment.
+//
+// The legal range of v is "every int32 whose residue mod n is non-zero", so the
+// sweep covers both signs rather than only the positive half the old
+// parameterisation admitted.
 func TestWriteTargetNeverPicksThePurgingPodUnlessItIsAlone(t *testing.T) {
 	for n := int32(2); n <= 15; n++ {
 		for slot := int32(0); slot < n; slot++ {
-			for d := int32(1); d < n; d++ {
-				got, ok := writeTarget(slot, n, d, eligibleAll())
+			for v := -2*n + 1; v <= 2*n; v++ {
+				if v%n == 0 {
+					// Refused by the gate with a condition; writeTarget's
+					// defensive floor reads it as 1, which is covered above.
+					continue
+				}
+				got, ok := writeTarget(slot, n, v, eligibleAll())
 				if !ok {
 					t.Fatalf("writeTarget(%d, %d, %d, all eligible) found no writer — "+
-						"a healthy fleet always has one", slot, n, d)
+						"a healthy fleet always has one", slot, n, v)
 				}
 				if got == slot {
 					t.Fatalf("writeTarget(%d, %d, %d, all eligible) = %d, the pod purging this slot — "+
 						"the write target purging its own writes is the entire quantity the feature removes",
-						slot, n, d, got)
+						slot, n, v, got)
 				}
 			}
 
 			// The decided degenerate case: only the purging pod is left.
-			got, ok := writeTarget(slot, n, n-1, eligibleSet(slot))
+			got, ok := writeTarget(slot, n, 1, eligibleSet(slot))
 			if !ok || got != slot {
-				t.Fatalf("writeTarget(%d, %d, %d, only the purging pod eligible) = %d, %v; want %d, true — "+
+				t.Fatalf("writeTarget(%d, %d, 1, only the purging pod eligible) = %d, %v; want %d, true — "+
 					"ADR-037 takes the stall here: writes continuing badly beats writes not continuing",
-					slot, n, n-1, got, ok, slot)
+					slot, n, got, ok, slot)
+			}
+		}
+	}
+}
+
+// The correspondence the whole feature rests on, asserted end to end: the pod
+// the write endpoint names at slot s is the pod whose PURGE PHASE is v slots
+// ahead of the one currently firing. The grid is written by purgePhase and read
+// by rotationSlot, and writeTarget has to agree with both or the endpoint moves
+// to a pod that is about to purge.
+func TestWriteTargetAgreesWithThePhaseGrid(t *testing.T) {
+	const t0 = 15 * time.Minute
+	for n := int32(2); n <= 8; n++ {
+		period := time.Duration(n) * t0
+		for _, v := range []int32{1, 2, -1} {
+			if v%n == 0 {
+				// Refused by the gate with a condition; writeTarget's
+				// defensive floor reads it as 1, which is a different grid.
+				continue
+			}
+			for step := range int64(n) {
+				now := time.Unix(step*int64(t0/time.Second), 0)
+				slot := rotationSlot(now, t0, n)
+				writer, ok := writeTarget(slot, n, v, eligibleAll())
+				if !ok {
+					t.Fatalf("n=%d v=%d: no writer on a healthy fleet", n, v)
+				}
+				// The writer's own purge phase must be v slots after the phase
+				// of the slot firing now, modulo the period.
+				want := (purgePhase(slot, n, t0) + time.Duration(((v%n)+n)%n)*t0) % period
+				if got := purgePhase(writer, n, t0); got != want {
+					t.Fatalf("n=%d v=%d slot=%d: writer %d purges at %s, want %s — "+
+						"writeTarget and purgePhase describe one grid and must agree on it",
+						n, v, slot, writer, got, want)
+				}
 			}
 		}
 	}

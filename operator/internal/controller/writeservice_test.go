@@ -257,8 +257,8 @@ func TestWriteServiceSelectorIsNeverEmpty(t *testing.T) {
 
 // The feature's entire claim, asserted end to end through the two functions a
 // reconciler composes: over every fleet size, every slot of the period and
-// every legal writer offset, the pod the write Service names is never the pod
-// whose purge is current.
+// every legal slotsFromWriteToPurge, the pod the write Service names is never
+// the pod whose purge is current.
 //
 // purgerotation_test.go pins the same property on writeTarget alone. This one
 // pins that nothing between writeTarget's answer and the label a client is
@@ -272,17 +272,23 @@ func TestWriteServiceSelectorNeverNamesThePurgingPod(t *testing.T) {
 	for n := int32(2); n <= 15; n++ {
 		ready := allReady(n)
 		for slot := int32(0); slot < n; slot++ {
-			for d := int32(1); d < n; d++ {
-				writer, ok := writeTarget(slot, n, d, eligibleForWrites(ready, nil))
+			// Every legal v: the rule is v mod n != 0, so the sweep covers
+			// both signs rather than only the positive half the superseded
+			// descending parameterisation admitted.
+			for v := -2*n + 1; v <= 2*n; v++ {
+				if v%n == 0 {
+					continue
+				}
+				writer, ok := writeTarget(slot, n, v, eligibleForWrites(ready, nil))
 				if !ok {
-					t.Fatalf("n=%d slot=%d d=%d: no writer chosen with every pod ready — a healthy "+
-						"fleet always has one, and no writer means the endpoint stops moving", n, slot, d)
+					t.Fatalf("n=%d slot=%d v=%d: no writer chosen with every pod ready — a healthy "+
+						"fleet always has one, and no writer means the endpoint stops moving", n, slot, v)
 				}
 				got := writeServiceSelector(testClusterName, writer)[labelStatefulSetPodName]
 				if purging := podOf(testClusterName, slot); got == purging {
-					t.Fatalf("n=%d slot=%d d=%d: the write Service selects %q, which is the pod purging "+
+					t.Fatalf("n=%d slot=%d v=%d: the write Service selects %q, which is the pod purging "+
 						"this slot — ADR-037's third amendment measured the write target's own purge as "+
-						"the entire client-visible quantity", n, slot, d, purging)
+						"the entire client-visible quantity", n, slot, v, purging)
 				}
 			}
 		}

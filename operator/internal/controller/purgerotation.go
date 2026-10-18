@@ -18,7 +18,6 @@ package controller
 
 import (
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -166,74 +165,108 @@ func rotationSlot(now time.Time, t time.Duration, n int32) int32 {
 	return int32((slots%int64(n) + int64(n)) % int64(n))
 }
 
-// composePurge builds the olcAccessLogPurge value: "<age> <interval> <phase>".
+// composePurge builds the olcAccessLogPurge value slapd sees:
+// "<retention> <interval>", with "<phase>" appended when there is one.
 //
-// The attribute has two owners (ADR-037, second amendment, "Where the
-// configuration lives"): <age> is per-database retention and stays on
-// SlapdDatabase, while <interval> and <phase> are a schedule over pods and come
-// from the cluster. This function is the composition seam, and the only place
-// the three meet.
+// This is the one place the directive's three owners meet (ADR-024 R6).
+// Retention is the database's, the interval is the pod's and therefore the
+// cluster's, and the phase is derived per pod and declared by nobody. Each
+// arrives here as a time.Duration and leaves as one tested rendering of
+// slapd's [ddd+]hh:mm[:ss] — which is the third thing decomposition buys:
+// log_age_parse is positional and refuses "0:05" where it accepts "00:05", so
+// handing a user that format means handing them a plausible value that is
+// silently rejected.
 //
-// age arrives already resolved — it is the age half of desiredAccesslogPurge's
-// output — and is used verbatim, never reformatted: "7+00:00" is what the
-// shipped default says and what the user wrote.
+// phase is a POINTER because absence is a real state and zero is a real value.
+// Form A — one interval, every pod purging together — has no phase at all;
+// form B's pod 0 has a phase of exactly zero and must still carry it. Taking a
+// plain duration would make those two indistinguishable, and the three-field
+// value is the one a stock slapd refuses outright, so the difference decides
+// whether an unpatched image can run this database at all.
 //
 // The caller is responsible for the invariant slapd enforces, phase < interval.
 // With phase = purgePhase(k, n, t) and interval = n*t it holds by construction
 // for every ordinal in [0, n).
 //
-// Defined behaviour for inputs the grid should never produce:
+// Defined behaviour for inputs the planner should never produce:
 //
-//   - a blank age (empty or whitespace-only) is the "none" opt-out surviving
-//     composition: the result is "", meaning no olcAccessLogPurge at all. A
-//     schedule must not resurrect a purge the user turned off.
-//   - a non-positive interval means there is no schedule to write, and the
-//     result is "" as well. Emitting an age alone would be a two-field value
-//     slapd refuses, and inventing an interval here would hide the misconfiguration.
-func composePurge(age string, interval, phase time.Duration) string {
-	age = strings.TrimSpace(age)
-	if age == "" || interval <= 0 {
+//   - a non-positive retention or interval yields "", meaning no
+//     olcAccessLogPurge at all. Emitting a retention alone would be a
+//     one-field value slapd refuses, and inventing an interval here would hide
+//     the misconfiguration from the condition that exists to report it. The
+//     planner resolves both before calling, so reaching this is a bug upstream
+//     rather than a user error to absorb.
+func composePurge(retention, interval time.Duration, phase *time.Duration) string {
+	if retention <= 0 || interval <= 0 {
 		return ""
 	}
-	return age + " " + formatLogAge(interval) + " " + formatLogAge(phase)
+	v := formatLogAge(retention) + " " + formatLogAge(interval)
+	if phase != nil {
+		v += " " + formatLogAge(*phase)
+	}
+	return v
 }
 
 // writeTarget picks the pod the write Service should select during slot `slot`.
 //
-// ADR-037, second amendment, "Writer selection": at slot s, walk the preference
-// order d = n-1, n-2, ... 1 and take the first pod that is eligible. Offset j
-// names the pod that purged j slots ago — ordinal (slot-j+n) mod n — so the
-// preferred end, d = n-1, is the pod that has had the longest time to recover
-// and is the next one to purge. eligible carries everything the grid does not
-// know: Ready, not read-only under ADR-036's authorship gate, not working off
-// purge backlog, lag or a recent absence (decision 4's promotion gate).
+// ADR-037, ninth amendment, "the sign convention": v is
+// spec.rotation.slotsFromWriteToPurge, the signed displacement in slots from a
+// pod's WRITE slot to its own PURGE slot, taken mod n. Pod p purges in slot p
+// (that is what purgePhase says), so pod p writes in slot p−v, and at slot s
+// the writer is therefore the pod that purges v slots from now: (s+v) mod n.
 //
-// Offset 0 — the pod purging this slot — is never offered by the walk. That is
-// the entire point of the feature: the purge runs where the writes are not.
+// The walk is ASCENDING — v, v+1, … n−1 — reading as "the pod that purges v
+// slots from now; if it is not eligible, one that purges a little later".
+// Offset 0 is the pod purging THIS slot, and it falls off the end of the range
+// rather than needing a rule to exclude it. Under the superseded descending
+// parameterisation "never offset 0" was a doc comment plus a property test;
+// here it is the loop bound.
+//
+// eligible carries everything the grid does not know: Ready, not read-only
+// under ADR-036's authorship gate, not working off purge backlog, lag or a
+// recent absence (decision 4's promotion gate).
 //
 // Two decided edges, neither of them a fallthrough:
 //
-//   - degenerate fallback. If no offset in [1, d] is eligible, the purging pod
-//     itself is taken when it is eligible. ADR-037: with n = 2 and one pod down
-//     the only candidate is the purging pod — "take it and accept the stall:
-//     writes continuing badly beats writes not continuing".
+//   - degenerate fallback. If no offset in [v, n−1] is eligible, the purging
+//     pod itself is taken when it is eligible. ADR-037: with n = 2 and one pod
+//     down the only candidate is the purging pod — "take it and accept the
+//     stall: writes continuing badly beats writes not continuing".
 //   - nothing eligible at all returns (0, false). The false means "no writer
 //     could be chosen", and the caller must then leave the Service selector
 //     where it is: the write Service must not be left selecting nothing.
 //
-// d is clamped to [1, n-1], so n = 1 has no rotation at all — the single pod is
-// both purger and writer, reached through the degenerate fallback. n <= 0 has no
-// writer. A slot outside [0, n) is read modulo n.
-func writeTarget(slot, n, d int32, eligible func(int32) bool) (int32, bool) {
+// Defined behaviour for inputs the gate should never produce:
+//
+//   - v is read modulo n, so −1 and n−1 are the same answer. That is the point
+//     of the sign convention and is what makes a declared value survive a
+//     scale event.
+//   - v ≡ 0 (mod n) reads as 1. Zero and every multiple of n put the write on
+//     the pod that is purging; the rotation gate refuses such a value with a
+//     condition (reasonWriteSlotCollidesWithPurge) and withholds the whole
+//     feature, so this is the defensive end of a path that should not be
+//     walked — and 1 is the one answer that cannot silently invert the
+//     rotation. n = 1 is the exception the rule cannot cover: with one pod
+//     every v is a multiple of n, the single pod is both purger and writer,
+//     and it is reached through the degenerate fallback.
+//   - n <= 0 has no writer. A slot outside [0, n) is read modulo n.
+func writeTarget(slot, n, v int32, eligible func(int32) bool) (int32, bool) {
 	if n <= 0 {
 		return 0, false
 	}
 	slot = (slot%n + n) % n
-	d = min(max(d, 1), n-1)
 
-	// The preference walk. Offset 0 is not part of it.
-	for j := d; j >= 1; j-- {
-		if ord := (slot - j + n) % n; eligible(ord) {
+	// Modulo first — the whole point of a signed displacement is that −1 and
+	// n−1 are one answer. Only then the defensive floor: v ≡ 0 is the purging
+	// pod, which is the one selection this feature exists to forbid.
+	v = (v%n + n) % n
+	if v == 0 {
+		v = 1
+	}
+
+	// The ascending preference walk. Offset 0 is not in the range.
+	for j := v; j <= n-1; j++ {
+		if ord := (slot + j) % n; eligible(ord) {
 			return ord, true
 		}
 	}

@@ -12,13 +12,16 @@ package controller
 
 import (
 	"testing"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
 const (
-	// wantDefaultPurge pins defaultAccesslogPurge's value, so it is spelled
-	// out here rather than taken from the constant it checks.
+	// wantDefaultPurge is a representative composed purge value, used as an
+	// opaque string by the generic overlay-attribute convergence table below.
 	wantDefaultPurge   = "7+00:00 1+00:00"
 	explicitPurge      = "2+00:00 1+00:00"
 	explicitCheckpoint = "500 15"
@@ -27,23 +30,54 @@ const (
 // ADR-024 R4/R5: the accesslog purge window and the syncprov checkpoint are
 // converged on every reconcile, not written once at overlay creation. The
 // decision lives in pure functions — the resolved value
-// (desiredAccesslogPurge / desiredSyncprovCheckpoint) and the convergence step
-// (planOverlayAttr) — so the live-LDAP half stays a thin executor, exactly as
-// ADR-022 did it for the sessionlog.
+// (resolveRetention + planPodPurge / desiredSyncprovCheckpoint) and the
+// convergence step (planOverlayAttr) — so the live-LDAP half stays a thin
+// executor, exactly as ADR-022 did it for the sessionlog.
 //
 // Both attributes were verified live-modifiable on a running slapd before being
 // classed R4 (the precondition the ADR-024 amendments of 2026-09-12 and
 // 2026-09-13 made mandatory): replace and delete, both attributes, instantaneous,
 // pod still serving and still accepting data writes afterwards.
+//
+// The purge DIRECTIVE's own resolution moved to accesslog_purge_converged_test.go
+// when ADR-024 R6 decomposed it into typed fields with three owners.
 
-func sdWithPurge(v string) *ldapv1alpha1.SlapdDatabase {
-	return &ldapv1alpha1.SlapdDatabase{
-		Spec: ldapv1alpha1.SlapdDatabaseSpec{
-			Replication: ldapv1alpha1.DatabaseReplicationConfig{
-				AccesslogPurge: v,
-			},
-		},
+// slapdDatabaseFixture declares the three states of the decomposed purge block
+// without a table having to build a CR by hand. A nil fixture is a nil
+// database; a zero fixture is a database with no accesslogPurge at all, which
+// is what every existing CR looks like and must keep meaning "the operator's
+// defaults".
+//
+// retentionSet exists because zero is a REAL declared value here — "purge
+// everything immediately" — and must stay distinguishable from "not declared".
+// That is the same distinction the pointer in the API carries, reproduced in
+// the fixture so a table can assert on it.
+type slapdDatabaseFixture struct {
+	enabled      *bool
+	retention    time.Duration
+	retentionSet bool
+}
+
+func (f *slapdDatabaseFixture) build() *ldapv1alpha1.SlapdDatabase {
+	if f == nil {
+		return nil
 	}
+	sd := &ldapv1alpha1.SlapdDatabase{}
+	if f.enabled == nil && f.retention == 0 && !f.retentionSet {
+		return sd
+	}
+	block := &ldapv1alpha1.AccesslogPurgeConfig{Enabled: f.enabled}
+	if f.retention != 0 || f.retentionSet {
+		block.Retention = &metav1.Duration{Duration: f.retention}
+	}
+	sd.Spec.Replication.AccesslogPurge = block
+	return sd
+}
+
+// sdPurgeDisabled is the explicit "never purge, keep forever" opt-out that
+// replaced the "none" sentinel.
+func sdPurgeDisabled() *ldapv1alpha1.SlapdDatabase {
+	return (&slapdDatabaseFixture{enabled: new(false)}).build()
 }
 
 func sdWithCheckpoint(v string) *ldapv1alpha1.SlapdDatabase {
@@ -53,44 +87,6 @@ func sdWithCheckpoint(v string) *ldapv1alpha1.SlapdDatabase {
 				SyncprovCheckpoint: v,
 			},
 		},
-	}
-}
-
-func TestDesiredAccesslogPurge(t *testing.T) {
-	cases := []struct {
-		name  string
-		field string
-		want  string
-	}{
-		{"unset falls back to the operator default", "", defaultAccesslogPurge},
-		{"whitespace-only is still unset", testBlank, defaultAccesslogPurge},
-		{"none opts out of purging entirely", noneSentinel, ""},
-		{"none is matched case-insensitively", noneMixedCase, ""},
-		{"none tolerates surrounding whitespace", "  none  ", ""},
-		{"an explicit window is used verbatim", explicitPurge, explicitPurge},
-		{"an explicit window is trimmed", "  14+00:00 1+00:00 ", "14+00:00 1+00:00"},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := desiredAccesslogPurge(sdWithPurge(tc.field)); got != tc.want {
-				t.Fatalf("desiredAccesslogPurge(%q) = %q, want %q", tc.field, got, tc.want)
-			}
-		})
-	}
-}
-
-// The default is the whole point of the R5 half of this batch: an unpurged
-// journal grows to its map ceiling and then stops taking writes — and because
-// the accesslog overlay sits in the DATA write path, data writes stop with it.
-// An empty default here would silently restore exactly that failure mode.
-func TestDefaultAccesslogPurge_IsAWindowNotNothing(t *testing.T) {
-	if defaultAccesslogPurge == "" {
-		t.Fatal("defaultAccesslogPurge is empty — unset would mean no purge at all")
-	}
-	if want := wantDefaultPurge; defaultAccesslogPurge != want {
-		t.Fatalf("defaultAccesslogPurge = %q, want %q (7-day window, daily sweep)",
-			defaultAccesslogPurge, want)
 	}
 }
 

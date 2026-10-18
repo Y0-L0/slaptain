@@ -377,19 +377,17 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	//      no special case (ADR-001).
 	setCondition(&sd.Status.Conditions, startupConfigConvergedFor(sd, startupObs))
 
-	// 10c. Publish AccesslogPurgeConverged (ADR-037). Observation of what the
-	//      per-pod pass above actually managed to write, plus the one refusal
-	//      the spec can declare: an interval in this database's accesslogPurge
-	//      while the cluster's rotation owns the schedule. Recomputed wholly
-	//      from this pass (ADR-001), and an unreadable pod never counts toward
-	//      False (ADR-025).
-	rotation := evaluateRotation(sc)
-	var purgeHold *purgeWithhold
-	if pp := planPodPurge(rotation, sd, 0); pp.Withheld {
-		purgeHold = &purgeWithhold{Reason: pp.Reason, Message: pp.Message}
-	}
+	// 10c. Publish AccesslogPurgeConverged (ADR-037, ADR-024 R6). Observation
+	//      of what the per-pod pass above actually managed to write, plus the
+	//      one fault this database's own spec can carry: a retention with no
+	//      representation on the server. There is no WITHHOLD any more — the
+	//      interval belongs to the cluster, so there is nothing a database can
+	//      declare that has to be refused, and a database can no longer end up
+	//      with no purge value at all. Recomputed wholly from this pass
+	//      (ADR-001), and an unreadable pod never counts toward False
+	//      (ADR-025).
 	setCondition(&sd.Status.Conditions,
-		accesslogPurgeConvergedFor(sd, rotation.Active, purgeHold, purgeObs))
+		accesslogPurgeConvergedFor(sd, evaluateRotation(sc), purgeObs))
 
 	// 11. Update status. The precedence lives in databasePhase, which is pure
 	//      and therefore assertable — inline here it was dead in every test,
@@ -1719,13 +1717,11 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogOverlay(
 		return err
 	}
 
-	// The purge value is decided for THIS pod (ADR-037): with rotation off it
-	// is what it has always been, and with rotation on it is
-	// "<age> <interval> <phase>", where the phase is this pod's ordinal times
-	// the cluster's slot length. A withheld plan means the database declares
-	// something the cluster's schedule cannot honour — leave olcAccessLogPurge
-	// exactly as it is on this pod and let the condition carry the news
-	// (ADR-024 R4: rejected, never ignored).
+	// The purge value is decided for THIS pod (ADR-024 R6, ADR-037): the
+	// database's retention, the cluster's interval, and — with rotation on —
+	// this pod's own phase, which is its ordinal times the cluster's slot
+	// length. The only empty value is the explicit enabled: false; there is no
+	// longer any way for a database to arrive here with nothing to write.
 	purge := pp.Value
 
 	if !hasAccesslog {
@@ -1737,7 +1733,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogOverlay(
 		addReq.Attribute("olcAccessLogDB", []string{ldapv1alpha1.AccesslogSuffix(sd.Name)})
 		addReq.Attribute("olcAccessLogOps", []string{"writes"})
 		addReq.Attribute("olcAccessLogSuccess", []string{olcTrue})
-		if purge != "" && !pp.Withheld {
+		if purge != "" {
 			addReq.Attribute("olcAccessLogPurge", []string{purge})
 		}
 		addErr := guardedAdd(conn, addReq)
@@ -1780,10 +1776,6 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogOverlay(
 	// Leaving it write-once meant an operator-defaulted or edited purge window
 	// never reached a pod whose overlay predated the change, and an unpurged
 	// journal ends in stalled data writes.
-	// A withheld plan converges nothing: every pod keeps the value it carries.
-	if pp.Withheld {
-		return nil
-	}
 	return r.ensureAccesslogPurge(ctx, conn, host, dataDN, pp, obs)
 }
 
@@ -4049,42 +4041,14 @@ func (r *SlapdDatabaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // ── Overlay tunables: purge window and checkpoint (ADR-024 R4/R5) ───────────
 
-// defaultAccesslogPurge is the purge window the operator applies when
-// spec.replication.accesslogPurge is unset: keep 7 days of change journal,
-// sweep once a day.
-//
-// Unset used to mean NO purge, which is not a neutral default — it is a
-// slow-motion outage. The journal grows until it hits its map ceiling, and
-// because the accesslog overlay sits in the DATA database's write path, the
-// moment the journal cannot take a write neither can the data. The window is
-// sized to survive a weekend-plus consumer outage: a consumer offline longer
-// than the window loses its delta anchor and needs a full refresh, so the
-// window trades journal bytes for how long a peer may stay away.
-const defaultAccesslogPurge = "7+00:00 1+00:00"
-
 // noneSentinel is the explicit opt-out spelling shared by the string-valued
-// tunables that the operator defaults (keepalive, accesslogPurge): "" means
-// "no opinion, use the operator default", "none" means "I really want none".
+// tunables that the operator defaults (keepalive): "" means "no opinion, use
+// the operator default", "none" means "I really want none".
+//
+// accesslogPurge no longer uses it: the purge directive was decomposed into
+// typed fields (ADR-024 R6), and `enabled: false` is the opt-out a boolean can
+// state without a sentinel.
 const noneSentinel = "none"
-
-// desiredAccesslogPurge resolves spec.replication.accesslogPurge: unset gets
-// the operator's window (see defaultAccesslogPurge for why "nothing" is not an
-// option), "none" is the explicit way to ask for no purging at all, and any
-// other value is passed through verbatim.
-func desiredAccesslogPurge(sd *ldapv1alpha1.SlapdDatabase) string {
-	if sd == nil {
-		return defaultAccesslogPurge
-	}
-	v := strings.TrimSpace(sd.Spec.Replication.AccesslogPurge)
-	switch {
-	case v == "":
-		return defaultAccesslogPurge
-	case strings.EqualFold(v, noneSentinel):
-		return ""
-	default:
-		return v
-	}
-}
 
 // desiredSyncprovCheckpoint resolves spec.replication.syncprovCheckpoint.
 // Unlike the purge window this has NO operator default: an unwritten

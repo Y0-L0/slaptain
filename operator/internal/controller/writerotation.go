@@ -167,7 +167,7 @@ func (r *SlapdClusterReconciler) reconcileWriteService(
 	// heldReadOnly is ADR-036's authorship gate. It is Proposed and populates
 	// nothing, so the term is inert; it is passed rather than omitted so the
 	// day it lands is a change at one call site.
-	writer, ok := writeTarget(slot, plan.Replicas, plan.WriterOffset, eligibleForWrites(ready, nil))
+	writer, ok := writeTarget(slot, plan.Replicas, plan.SlotsFromWriteToPurge, eligibleForWrites(ready, nil))
 
 	requeue := nextSlotBoundary(now, plan.SlotLength)
 	setCondition(&sc.Status.Conditions, writeRotationCondition(sc, writer, ok, now.Add(requeue)))

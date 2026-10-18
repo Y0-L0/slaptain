@@ -406,3 +406,74 @@ Membership today, per ADR-034 R5 (one customer per change):
 
 R4 is unchanged and this class satisfies it the same way R2 does: the field is
 answered by a condition, never silently dropped.
+
+## Amendment, 2026-10-18: a tunable is placed by what it owns, not by what it is spelled next to
+
+ADR-037's purge rotation exposed a placement this ADR had never examined,
+because it arrived from upstream pre-packaged. `olcAccessLogPurge` is one
+slapd directive — `logpurge <age> <interval> [<phase>]` — and slaptain
+inherited it as one string field on `SlapdDatabase`. One field, one owner.
+
+It is three quantities with **three different owners**, and the asymmetry only
+became visible once the cluster took one of them:
+
+| quantity | what it decides | whose it is |
+|---|---|---|
+| retention (`age`) | how far behind a consumer of THIS database may fall | the database |
+| interval | how often the purge cost is paid | the pod, so the cluster |
+| phase | which pod pays it when | derived; nobody declares it |
+
+With rotation off, the database declared retention **and** interval. With
+rotation on, the cluster took the interval and the database's half was refused.
+A field whose meaning depends on another resource's mode is a defect generator,
+and it duly generated one: on a cluster created with rotation already on, a
+database declaring an interval got **no purge value at all**, which is the
+unbounded journal R4 exists to prevent.
+
+### The rule
+
+**R6 — Decompose an upstream directive when its parts have different owners.**
+Mirroring upstream's grammar is not a reason to keep quantities together. If
+two parts of one value answer to different resources, they are two fields.
+
+### Why these three split where they do
+
+Retention is a data policy. It bounds how much history exists, and the bound is
+`retention × write rate` — the interval does not appear in it. Different
+databases legitimately keep different amounts.
+
+The interval is a scheduling cost, and **the cost is paid by the pod, not the
+database**. ADR-037's second amendment already established this: all databases
+on one pod align on that pod's phase, producing one busy window of duration
+`ΣPᵢ`. The thing being scheduled is the pod's contention, so the schedule
+belongs where pods are counted. ADR-037's third amendment goes further and
+*refutes* per-database interval tuning as a remedy — 18x disk read, p99 2.1 ms
+to 143-230 ms, 2.2 % of load dropped, no throughput gained — so the field was
+never buying what it appeared to offer.
+
+The phase is derived per pod and **no user can write it**. Leaving it inside a
+free-form string invites someone to try, and a hand-written phase colliding
+with another pod's is invisible from outside — the same silence that let a
+stagger which never happened read as a stagger that did nothing.
+
+### What decomposition buys beyond tidiness
+
+1. **The mode-dependent field disappears**, and the defect class with it. There
+   is no declared interval to refuse, so there is no withhold, so there is no
+   way to end up unpurged.
+2. **Each quantity can be validated as itself.** A duration grammar on
+   retention, a modular rule on the slot count, a boolean that cannot be
+   misread — none of them expressible against one opaque string.
+3. **slapd's format stops being the user's problem.** `log_age_parse` is
+   positional and refuses `0:05` where it accepts `00:05`. Handing a user that
+   format means handing them a plausible value that is silently rejected; a
+   typed duration and one tested formatter remove the class.
+
+### The cost, which the documentation must carry
+
+The API no longer mirrors the directive. The operator composes a value nobody
+typed, so anyone debugging from `cn=config` sees one string and needs the
+mapping back to the fields that produced it. That mapping belongs next to the
+fields and in `docs/TUNING.md` — not only here, where nobody reads it at 3am.
+
+R5 is unchanged: unset still means slaptain's default, now per quantity.

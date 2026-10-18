@@ -1095,3 +1095,116 @@ No chart renders `spec.rotation`, so the feature can only be enabled by
 editing the CR. The e2e turns it on by patching. That is a packaging gap, not
 a design one, and it is the next small piece of work rather than something
 this ADR leaves open.
+
+## Amendment, 2026-10-18 (ninth): the API, consolidated — supersedes the fourth
+
+The fourth amendment recorded the API as built. Running it on a mesh showed the
+shape was wrong, and wrong in a way that produced an outage-class defect rather
+than an inconvenience. This replaces it. ADR-024's new R6 carries the placement
+argument; this records the shape and the conventions.
+
+### What was wrong
+
+With rotation off the database declared retention **and** interval; with
+rotation on the cluster took the interval and the database's half was refused
+with a condition. One field, two meanings, chosen by another resource's mode.
+
+Measured consequence on a fresh three-site mesh: a database declaring an
+interval, on a cluster created with rotation already on, ended up with **no
+`olcAccessLogPurge` at all** on every pod at every site. The withhold assumed
+there was an existing value to keep — the same assumption the sixth amendment
+had already corrected once, on the unpatched-slapd path, and which was never
+carried across to this one. An unpurged journal grows to its map ceiling and
+then stops data writes.
+
+The published examples made it reachable by following them: the rotation
+example's own header says to stack it on the three-site example, which declares
+an interval.
+
+### The shape
+
+```yaml
+# SlapdDatabase — what to keep
+spec:
+  replication:
+    accesslogPurge:
+      enabled: true
+      retention: 24h
+
+# SlapdCluster — when to purge
+spec:
+  accesslogPurge:
+    interval: 24h                  # form A: one schedule, all pods together
+  rotation:                        # form B: staggered, plus the write endpoint
+    enabled: true
+    slotLength: 6h                 # interval becomes replicas × slotLength
+    slotsFromWriteToPurge: 1
+```
+
+The two cluster forms are **mutually exclusive and setting both is refused**,
+never silently preferred — the shape ADR-028 already uses for `meshRef` beside
+an explicitly set derived field. The interval is always the cluster's:
+declared in form A, derived in form B. That the derivation only exists in one
+form is forced, not sloppy — holding the interval fixed and recomputing
+`t = T/n` re-phases the entire fleet on every scale event, which is why `t`
+must be the declared quantity whenever there is a grid.
+
+### `enabled` sits next to `purge`, not next to `retention`
+
+`accesslogRetention: {enabled: false}` reads as "no retention — purge
+everything". It must mean the opposite: never purge, keep forever. In the one
+field whose failure mode is an unbounded journal, that inversion is not an
+acceptable thing to leave lying around. Naming the block for the **action** and
+the duration for the **quantity** makes `enabled: false` unambiguous.
+
+### The sign convention, and why the name is long
+
+`slotsFromWriteToPurge` is a signed displacement in slots from a pod's write
+slot to its own purge slot, taken mod `n`. So `-1` is `n-1` and stays correct
+when the cluster scales — the reason a bare count could not survive: writing
+`2` for a three-pod cluster means `n-1` only until somebody adds a pod.
+
+Two properties decided the direction and the name.
+
+**The default is 1.** `+1` is "purge the slot after writing", which is the
+configuration this ADR already prefers and the one being measured first. `-1`
+is "purge the slot before writing" — the other experiment. Both experiments
+are therefore ±1: symmetric, minimal, and the sign carries the whole
+difference. The deferred cooldown experiment (`d = n−2` in the old
+parameterisation) becomes `2`, so the ladder is 1, 2, 3 and still reads
+correctly for a run nobody has done.
+
+**"From X to Y" is the only construction that survives a negative.** Any name
+containing a direction word turns the negative case into a double negative —
+`writeSlotsBeforePurge: -1` has to be parsed as "minus one slots before", every
+time. A name stating the two endpoints and the direction of travel needs no
+convention paragraph: after is positive, before is negative.
+
+A consequence worth having: the fallback walk becomes ascending, `v, v+1, …
+n−1` — "the pod that purges `v` slots from now; if it is not eligible, one
+that purges a little later". The forbidden slot (the pod purging now) falls off
+the end of the range instead of needing a rule to exclude it. Under the old
+parameterisation "never offset 0" was a doc comment plus a property test; here
+it is the loop bound.
+
+Validation changes with it: `minimum: 1` is gone, and the rule is
+**`value mod n ≠ 0`** — zero and every multiple of `n` put the write on the
+pod that is purging. That needs `spec.replicas`, so it is the operator's to
+report, and it should name the slot it resolved to rather than echo what was
+typed, since `-1` and `n-1` are the same answer.
+
+### Migration
+
+The existing `accesslogPurge` is a two-token string with a two-token default,
+and five shipped samples carry one. A two-token value is **refused with a
+condition naming the new fields**, never reinterpreted: silently re-reading
+`"7+00:00 1+00:00"` as a retention would be undebuggable. ADR-035 applies —
+before 1.0 the clean design wins where compatibility and clarity pull apart,
+and this is `v1alpha1`.
+
+### Unchanged
+
+Everything the seventh and eighth amendments settled stands: the
+connection-lifetime precondition, turning rotation off widening the endpoint
+rather than deleting it, the readiness route, and the requeue that cannot live
+inside the replication gate.

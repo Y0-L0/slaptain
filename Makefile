@@ -222,6 +222,18 @@ $(STAMPS)/exporter-tag: FORCE | $(STAMPS)
 		echo "$(EXPORTER_IMAGE_TAG)" > $@; \
 	fi
 
+# Track the registry/project PREFIX, because an image's identity is its full
+# name and not just its tag: switching REGISTRY (internal registry → ghcr, say)
+# leaves every tag stamp fresh, so nothing rebuilds, so `make push` pushes a
+# name that was never created ("image not known"). Separate from the tag stamp
+# on purpose — only the images whose name carries the prefix depend on it, so a
+# registry switch does not re-run the openldap-deb package build, which is
+# `localhost/`-named and by far the most expensive thing here.
+$(STAMPS)/registry: FORCE | $(STAMPS)
+	@if [ "$$(cat $@ 2>/dev/null)" != "$(REGISTRY)/$(PROJECT)" ]; then \
+		echo "$(REGISTRY)/$(PROJECT)" > $@; \
+	fi
+
 # OpenLDAP 2.7.1 packages, built once and consumed by both 2.7 images below.
 $(STAMPS)/openldap-deb: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
 	$(CONTAINER_ENGINE) build \
@@ -229,24 +241,24 @@ $(STAMPS)/openldap-deb: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
 		-t $(OPENLDAP_DEB_IMAGE) images/openldap-deb/
 	@touch $@
 
-$(STAMPS)/init: $(INIT_SRCS) $(STAMPS)/openldap-deb $(STAMPS)/tag | $(STAMPS)
+$(STAMPS)/init: $(INIT_SRCS) $(STAMPS)/openldap-deb $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
 	$(CONTAINER_ENGINE) build \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE) \
 		-t $(INIT_IMAGE) images/slapd-init/
 	@touch $@
 
-$(STAMPS)/slapd: $(SLAPD_SRCS) $(STAMPS)/openldap-deb $(STAMPS)/tag | $(STAMPS)
+$(STAMPS)/slapd: $(SLAPD_SRCS) $(STAMPS)/openldap-deb $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
 	$(CONTAINER_ENGINE) build \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE) \
 		-t $(SLAPD_IMAGE) images/slapd/
 	@touch $@
 
-$(STAMPS)/init-ol26: $(INIT_OL26_SRCS) $(STAMPS)/tag | $(STAMPS)
+$(STAMPS)/init-ol26: $(INIT_OL26_SRCS) $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
 	$(CONTAINER_ENGINE) build -f images/slapd-init/Containerfile.ol26 \
 		-t $(INIT_IMAGE_OL26) images/slapd-init/
 	@touch $@
 
-$(STAMPS)/slapd-ol26: $(SLAPD_OL26_SRCS) $(STAMPS)/tag | $(STAMPS)
+$(STAMPS)/slapd-ol26: $(SLAPD_OL26_SRCS) $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
 	$(CONTAINER_ENGINE) build -f images/slapd/Containerfile.ol26 \
 		-t $(SLAPD_IMAGE_OL26) images/slapd/
 	@touch $@
@@ -263,13 +275,13 @@ $(STAMPS)/openldap-deb-ol26src: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
 # Both images consume the .debs through the ordinary (2.7) Containerfiles —
 # those install whatever /debs holds, so they are version-agnostic. The .ol26
 # Containerfiles are NOT used here: they apt-install Debian's binary.
-$(STAMPS)/init-ol26src: $(INIT_SRCS) $(STAMPS)/openldap-deb-ol26src $(STAMPS)/tag | $(STAMPS)
+$(STAMPS)/init-ol26src: $(INIT_SRCS) $(STAMPS)/openldap-deb-ol26src $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
 	$(CONTAINER_ENGINE) build \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_OL26SRC) \
 		-t $(INIT_IMAGE_OL26SRC) images/slapd-init/
 	@touch $@
 
-$(STAMPS)/slapd-ol26src: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-ol26src $(STAMPS)/tag | $(STAMPS)
+$(STAMPS)/slapd-ol26src: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-ol26src $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
 	$(CONTAINER_ENGINE) build \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_OL26SRC) \
 		-t $(SLAPD_IMAGE_OL26SRC) images/slapd/
@@ -286,7 +298,7 @@ $(STAMPS)/openldap-deb-debug: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
 		-t $(OPENLDAP_DEB_IMAGE_DEBUG) images/openldap-deb/
 	@touch $@
 
-$(STAMPS)/slapd-debug: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-debug $(STAMPS)/tag | $(STAMPS)
+$(STAMPS)/slapd-debug: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-debug $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
 	$(CONTAINER_ENGINE) build \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_DEBUG) \
 		--build-arg BUILD_VARIANT=debug \
@@ -300,22 +312,22 @@ $(STAMPS)/openldap-deb-asan: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
 		-t $(OPENLDAP_DEB_IMAGE_ASAN) images/openldap-deb/
 	@touch $@
 
-$(STAMPS)/slapd-asan: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-asan $(STAMPS)/tag | $(STAMPS)
+$(STAMPS)/slapd-asan: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-asan $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
 	$(CONTAINER_ENGINE) build \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_ASAN) \
 		--build-arg BUILD_VARIANT=asan \
 		-t $(SLAPD_IMAGE_ASAN) images/slapd/
 	@touch $@
 
-$(STAMPS)/toolkit: $(TOOLKIT_SRCS) $(STAMPS)/tag | $(STAMPS)
+$(STAMPS)/toolkit: $(TOOLKIT_SRCS) $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
 	$(CONTAINER_ENGINE) build -t $(TOOLKIT_IMAGE) images/slapd-toolkit/
 	@touch $@
 
-$(STAMPS)/operator: $(OPERATOR_SRCS) $(STAMPS)/tag | $(STAMPS)
+$(STAMPS)/operator: $(OPERATOR_SRCS) $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
 	$(CONTAINER_ENGINE) build -f images/operator/Containerfile -t $(OPERATOR_IMAGE) .
 	@touch $@
 
-$(STAMPS)/exporter: $(EXPORTER_SRCS) $(STAMPS)/exporter-tag | $(STAMPS)
+$(STAMPS)/exporter: $(EXPORTER_SRCS) $(STAMPS)/exporter-tag $(STAMPS)/registry | $(STAMPS)
 	$(CONTAINER_ENGINE) build -f images/slapd-exporter/Containerfile -t $(EXPORTER_IMAGE) .
 	@touch $@
 

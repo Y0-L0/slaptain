@@ -801,6 +801,21 @@ cluster:
 
 `charts/slapd-mesh/examples/rotation.yaml` is that block as a stackable overlay.
 
+**Do not declare `cluster.accesslogPurge.interval` with it.** Those are the two
+mutually exclusive forms of one decision — *when* the purge runs — and setting both
+is refused by name (`RotationConfigured=False/ScheduleDeclaredTwice`). Under
+rotation the interval is `replicas × slotLength`; form A is for a mesh that wants a
+different sweep rate without the stagger:
+
+```yaml
+cluster:
+  accesslogPurge:
+    interval: "12h"       # every pod sweeping together; no write endpoint
+```
+
+What each database KEEPS is still the database's, and is unaffected by either form:
+`databases[].spec.replication.accesslogPurge.retention` (ADR-024 R6).
+
 It carries no per-site field and must never grow one. Every site derives the same
 grid from the same `cluster.replicas`, which is what keeps the invariant table
 above true of it. Two sites rotating on different grids would each still be

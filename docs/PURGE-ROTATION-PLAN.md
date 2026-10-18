@@ -67,9 +67,10 @@ decided handling — attempt, then report.
 
 ## Conventions this plan follows (verified against the codebase)
 
-- `desiredAccesslogPurge(sd)` (`slapddatabase_controller.go:3946`) is the one
-  place the purge value is decided, and `defaultAccesslogPurge` (`:3935`) is
-  `"7+00:00 1+00:00"`. This is the composition seam.
+- The purge value is decided in one place. That was `desiredAccesslogPurge(sd)`
+  over a two-token string when this plan was written; since Phase 5 it is
+  `planPodPurge` over three typed quantities (`composePurge` renders them).
+  Either way, one composition seam.
 - `ensureAccesslogPurge(ctx, conn, host, dataDN, purge)` (`:1720`) already runs
   **once per pod**, from a call chain that has `ordinal int32` in scope. Per-pod
   divergence is a value change on an existing path, not new machinery.
@@ -180,9 +181,10 @@ operator built to write one phase for EVERY pod was pushed, deployed, and
 watched converge onto the fleet, and the spec caught it — `pod slapd-1 … has
 purge phase "00:00:00", want "00:10:00"`.
 
-Two notes for Phase 4. `writerOffset` is parsed, clamped and reported but
-nothing reads it yet: it is the write Service's input. And `rotationSlot` —
-the only one of the five pure functions this phase did not call — is likewise
+Two notes for Phase 4. The writer displacement is parsed and reported but
+nothing reads it yet: it is the write Service's input. (Phase 5 renamed it
+`slotsFromWriteToPurge` and inverted its sign — see below.) And `rotationSlot`
+— the only one of the five pure functions this phase did not call — is likewise
 Phase 4's, which is why the grid still needs no clock anywhere.
 
 ## Phase 4 — the write Service rotates
@@ -272,3 +274,65 @@ invented for it.
   19.6 s synchronised). If that inversion is real, rotation mildly worsens
   replication lag while removing the client-visible stall. It does not change
   the decision; it may change what the release notes have to say.
+
+## Phase 5 — decompose the purge directive by ownership (ADR-024 R6, ADR-037 ninth)
+
+Not planned; forced by a measured, outage-class defect that the first four
+phases created between them.
+
+**What happened.** `olcAccessLogPurge` arrived from upstream pre-packaged as one
+string field on `SlapdDatabase`. With rotation off the database declared
+retention *and* interval; with rotation on the cluster took the interval and the
+database's half was refused with a withhold. One field, two meanings, chosen by
+another resource's mode.
+
+On a fresh three-site mesh, a database declaring an interval on a cluster
+**created** with rotation already on ended up with **no `olcAccessLogPurge` at
+all** — every pod, every site. The withhold assumed there was an existing value
+to keep, which is the same assumption the sixth amendment had already corrected
+once on the unpatched-slapd path and which was never carried across to this one.
+An unpurged journal grows to its map ceiling and then stops data writes, because
+the accesslog overlay sits in the data database's write path.
+
+The published examples made it reachable by following them:
+`charts/slapd-mesh/examples/rotation.yaml` says to stack it on
+`three-site.yaml`, which declared an interval.
+
+**What was done.** Consolidating the API dissolves the defect rather than
+patching it. There is no declared interval on a database, so there is nothing to
+refuse, so there is no withhold, so there is no way to end up unpurged.
+
+```yaml
+# SlapdDatabase — what to keep
+spec.replication.accesslogPurge:  {enabled, retention}
+
+# SlapdCluster — when to purge, in exactly one of two forms
+spec.accesslogPurge:              {interval}          # form A
+spec.rotation:                    {enabled, slotLength, slotsFromWriteToPurge}
+```
+
+Landed with it:
+
+- **Mutual exclusion is refused**, never resolved by precedence
+  (`ScheduleDeclaredTwice`), and the default interval stays in force meanwhile.
+- **`writerOffset` → `slotsFromWriteToPurge`**: a signed displacement taken mod
+  `n`, so `-1` is `n-1` and survives a scale event. Default **1**. `minimum: 1`
+  is gone; the rule is `v mod n ≠ 0`, which needs `spec.replicas` and is
+  therefore reported rather than refused at admission.
+- **The fallback walk became ascending**, `v … n−1`. The pod purging this slot
+  falls off the end of the range instead of being excluded by a doc comment plus
+  a property test — the property test is kept anyway, as the guard against
+  someone reintroducing a walk that can reach it.
+- **Two-token values are refused, never reinterpreted** (ADR-035: pre-1.0 the
+  clean design wins). Because the field changed type, the refusal is the API
+  server's rather than a condition — a stricter and earlier refusal than the
+  ninth amendment anticipated, at the cost of one: a SlapdDatabase already
+  stored with a string does not decode, so it must be rewritten rather than
+  reported on.
+- **`purgePodPlan` lost its `Withheld`/`Reason`/`Message` fields** and the
+  reconciler lost two branches. The absence is the deliverable.
+
+**The regression guard** is one ungated e2e assertion, deliberately the weakest
+one available: every replicated database on every read-write pod carries *some*
+`olcAccessLogPurge`. It is the defect's negation, it costs one search per pod per
+database, and it would have caught the outage.

@@ -90,7 +90,8 @@ value is rewritten at every pod start, so the way back is a restart.
 | `spec.replication.syncprovSessionlog` | 5000 | converged |
 | `spec.replication.syncprovSessionlogSource` | `InMemory` | **startup-only** |
 | `spec.replication.syncprovCheckpoint` | none | converged |
-| `spec.replication.accesslogPurge` | `7+00:00 1+00:00` | converged (age only under cluster rotation) |
+| `spec.replication.accesslogPurge.enabled` | `true` | converged |
+| `spec.replication.accesslogPurge.retention` | `168h` (7 days) | converged |
 
 `spec.maxSize` takes a Kubernetes quantity (`32Gi`) or a bare byte count; the
 operator converts. A value it cannot parse is an error, not a fallback.
@@ -102,15 +103,64 @@ converged at all — replace and delete, no crash, no hang — which is the prec
 ADR-024 now puts on this class. (They used to be written only at overlay creation,
 so edits were silently ignored; that debt is paid.)
 
-`accesslogPurge` has one caveat, and it is about who owns the *schedule*. With the
-cluster's purge rotation on (`SlapdCluster.spec.rotation.enabled`, ADR-037) the
-interval and each pod's purge phase are derived from the cluster — interval
-`spec.replicas × spec.rotation.slotLength`, phase `ordinal × slotLength` — so what
-this field still carries is the retention **age**. An age alone is honoured, `"none"`
-still opts out, and a value carrying an interval is **refused with a condition**
-naming the database rather than quietly overridden: a field that cannot be honoured
-is rejected or converged, never ignored (ADR-024). With rotation off — the default —
-nothing changes, and a two-field value is the normal thing to write.
+### `olcAccessLogPurge` has three owners, and you set two of them
+
+`logpurge <age> <interval> [<phase>]` is one slapd directive and three quantities
+with three different owners (ADR-024 R6). slaptain splits them accordingly, and the
+value you read back in `cn=config` is one nobody typed:
+
+```
+olcAccessLogPurge: 7+00:00:00 18:00:00 06:00:00
+                   ^retention ^interval ^phase
+```
+
+| quantity | what it decides | where you set it |
+|---|---|---|
+| retention (`age`) | how far behind a consumer of **this** database may fall | `SlapdDatabase.spec.replication.accesslogPurge.retention` |
+| interval | how often the purge cost is paid — and the cost is the **pod's**, since all of a pod's databases purge in one window | `SlapdCluster.spec.accesslogPurge.interval`, or derived from `spec.rotation` |
+| phase | which pod pays it when | derived per pod; nobody declares it |
+
+So: **what to keep is the database's, when to purge is the cluster's.** A database
+cannot declare an interval, which is what makes a mode-dependent field — and the
+outage it generated — impossible rather than merely discouraged.
+
+`enabled` sits beside the *action*, not beside the duration, on purpose:
+`accesslogRetention: {enabled: false}` would read as "no retention — purge
+everything", and here it has to mean the opposite. `enabled: false` is "never purge,
+keep forever", and you take responsibility for the growth. It replaced the old
+`"none"` sentinel.
+
+The cluster declares the schedule in exactly one of two forms:
+
+```yaml
+# form A — one schedule, every pod purging together
+spec:
+  accesslogPurge:
+    interval: 24h
+
+# form B — staggered phases, plus the rotating write endpoint (ADR-037)
+spec:
+  rotation:
+    enabled: true
+    slotLength: 6h          # interval becomes replicas × slotLength
+```
+
+**Setting both is refused**, never silently resolved by precedence — a field that is
+quietly never in force is the class of defect this split exists to remove. The
+condition is `RotationConfigured=False/ScheduleDeclaredTwice` and it names both
+fields. Meanwhile the operator's default 24h interval stays in force, so nothing goes
+unpurged while you work out which one you meant.
+
+Both durations are Go durations (`168h`, `24h`, `30m`) and must land on a whole
+second: `olcAccessLogPurge`'s fields are `[ddd+]hh:mm[:ss]` and there is nowhere to
+put a millisecond. The API server checks only the *grammar* — `0s` and `500ms` both
+parse — so the operator reports the rest and writes its default rather than leaving a
+journal unbounded.
+
+**Migration.** The old `accesslogPurge` was a two-token string, `"7+00:00 1+00:00"`.
+It is **refused, never reinterpreted**: silently re-reading an old value as a
+retention would be undebuggable. Rewrite it as `retention:`, and move the interval to
+the cluster if you meant to keep it.
 
 `spec.replication.syncprovSessionlogSource` chooses *where* the data database's
 syncprov session log lives. `InMemory` (the default, and what an unset field means)
@@ -124,8 +174,8 @@ ADR-022 still forbids that, and it is a different attribute on a different datab
 
 Sourcing the log changes the replay window's *units*. In memory the window is an
 operation count — the last 5000 writes, however long that takes. From the journal it
-is the journal's retention, i.e. `spec.replication.accesslogPurge`, seven days by
-default. Which is larger depends entirely on your write rate; size the purge window
+is the journal's retention, i.e. `spec.replication.accesslogPurge.retention`, seven
+days by default. Which is larger depends entirely on your write rate; size the purge window
 on purpose before relying on it (see *Journal sizing* below).
 
 This field is **startup-only**, and that has consequences worth reading twice.
@@ -173,7 +223,7 @@ back-mdb — no `slapindex` run, no downtime.
 | `spec.persistence.{config,data,accesslog}.size` | 1Gi / **5Gi** / 1Gi | StatefulSet `volumeClaimTemplates` — **create-only in practice**: the templates are immutable, so a changed size needs the StatefulSet recreated |
 | `spec.rotation.enabled` | off | converged into every pod's `olcAccessLogPurge` |
 | `spec.rotation.slotLength` | none, and **required when enabled** | converged |
-| `spec.rotation.writerOffset` | `replicas − 1` | clamped to `[1, replicas−1]`, and the clamp is reported |
+| `spec.rotation.slotsFromWriteToPurge` | `1` | signed, taken mod `replicas`; `v mod replicas = 0` is refused and reported |
 
 `spec.ldap.passwordHash` governs only what slapd hashes on a client's behalf. The
 root passwords the operator generates are hashed by the operator before they reach
@@ -230,10 +280,28 @@ site derives the same grid from the same `replicas`. The grid is nonetheless per
 where the client sent it, which is a mesh accepting writes at any provider rather
 than a gap in the rotation.
 
-Leave `writerOffset` unset unless you are measuring: unset is the operator's
-`replicas − 1`, the pod that purges next and has had the longest to work off its
-backlog. Note what the chart does *not* do — it restates neither that default nor
-any other, so the day the operator's changes, your cluster follows.
+Do not declare `spec.accesslogPurge.interval` alongside this. The two are the two
+forms of one decision — *when* the purge runs — and setting both is refused by name
+(`ScheduleDeclaredTwice`). Under rotation the interval is `replicas × slotLength`
+and there is nothing left to declare.
+
+Leave `slotsFromWriteToPurge` unset unless you are measuring. Unset is `1`: "purge
+the slot **after** writing", so the write endpoint names the pod that purges next —
+it has just stopped taking writes and works its journal down while somebody else
+takes them. `-1` is the other experiment, "purge the slot **before** writing", and
+it is the same answer as `replicas − 1` because the value is read modulo `replicas`
+— which is the point of the sign: `2` means "the slot before" only until somebody
+adds a pod, while `-1` keeps meaning it.
+
+The rule is `v mod replicas ≠ 0`, not a minimum. Zero *and every multiple of
+`replicas`* put the write on the pod that is purging, so `3` on a three-pod cluster
+is as wrong as `0` and looks far more reasonable. That rule needs `spec.replicas`,
+which no CRD marker can see, so the operator reports it — naming the slot the value
+**resolved to** rather than echoing what you typed, since `-1` and `replicas − 1`
+are one answer and only one of them is on your screen.
+
+Note what the chart does *not* do — it restates neither default nor any other, so
+the day the operator's changes, your cluster follows.
 
 **Before you set it, check both prerequisites.** The image must carry the
 purge-phase patch (above), and the clients must be the kind this helps — see
@@ -250,7 +318,8 @@ endpoint to sit on — a prerequisite, not the benefit.
 #### The write endpoint
 
 Turning the rotation on publishes a second client Service, `<cluster>-write`,
-selecting exactly one read-write pod: the one whose purge is furthest away. It moves
+selecting exactly one read-write pod: by default the one that purges in the next
+slot, and in general the one `slotsFromWriteToPurge` names. It moves
 at every slot boundary, in lockstep with the grid, so the pod taking writes is never
 the pod purging. It answers on the same ports as `<cluster>` and honours
 `spec.service.type`, so a client that dials `<cluster>:389` today writes to
@@ -301,7 +370,9 @@ never stops a running directory reconciling:
 | `SlotLengthMissing` | `enabled: true` with no `slotLength`. There is no default on purpose |
 | `SlotLengthNotPositive` | `0s` passes admission and would put every pod's phase at zero — the synchronised purge the feature exists to remove |
 | `SlotLengthNotWholeSeconds` | `500ms` passes admission and has no representation in `olcAccessLogPurge`, whose fields are `[ddd+]hh:mm[:ss]` |
-| `WriterOffsetClamped` | `writerOffset` was outside `[1, replicas−1]`; the message says what it was clamped to. Still active |
+| `WriteSlotCollidesWithPurge` | `slotsFromWriteToPurge` resolved to slot 0 — the pod that is purging. Zero and every multiple of `replicas` land there, which is why the rule is modular and not a minimum. Nothing rotates; the default interval keeps the journals bounded |
+| `ScheduleDeclaredTwice` | `spec.accesslogPurge.interval` and `spec.rotation.enabled` both declare *when* the purge runs. Delete one |
+| `PurgeIntervalNotUsable` | `spec.accesslogPurge.interval` is non-positive or finer than a second, so it has no representation on the server. The default interval is in force |
 
 Each SlapdDatabase then publishes `AccesslogPurgeConverged`:
 
@@ -309,7 +380,8 @@ Each SlapdDatabase then publishes `AccesslogPurgeConverged`:
 |---|---|
 | `Converged` | every pod that was read carries its own phase |
 | `RotationDisabled` | the cluster is not rotating; the value is this database's own age and interval |
-| `PurgeIntervalDeclared` | this database's `accesslogPurge` carries an interval the cluster's schedule now owns. The value is **withheld** — every pod keeps what it has — rather than overridden. Drop the interval, keep the age |
+| `RetentionNotUsable` | `accesslogPurge.retention` is non-positive or finer than a second. **Reported, and the operator's 7-day default written anyway** — a mistyped duration must not become an unbounded journal |
+| `PurgeDisabled` | `accesslogPurge.enabled` is `false`. No purging on this journal at all; the growth is yours |
 | `PurgePhaseUnsupported` | a named pod's slapd refused the phase. That image carries no purge-phase patch; the operator wrote the two-field value instead, so the journal stays bounded and that pod simply does not take its phase |
 | `NoReachablePod` | nothing could be read. `Unknown`, never `False` — unreadable evidence is not evidence |
 
@@ -450,15 +522,14 @@ The operator gives every accesslog DB an 8Gi map and a `2048 15` checkpoint, nei
 of them configurable — the journal is a derived, purged artefact, so losing its tail
 costs a consumer a full refresh rather than data.
 
-`spec.replication.accesslogPurge` defaults to `"7+00:00 1+00:00"` — keep seven days of
-journal, sweep once a day. Unset gets that default; the explicit sentinel `"none"`
-opts out of purging entirely; any other value is used verbatim.
+`spec.replication.accesslogPurge.retention` defaults to `168h` — keep seven days of
+journal. Unset gets that default; `enabled: false` opts out of purging entirely.
 
-Under the cluster's purge rotation (`spec.rotation.enabled`, ADR-037) the sweep half
-of that value belongs to the cluster, not to this database: the interval is
-`replicas × slotLength` and each pod sweeps at its own phase, so this field carries
-the age alone and an interval in it is refused rather than overridden. The sizing
-arithmetic below is unchanged — only who writes the interval moves.
+How often the sweep runs is the **cluster's**, not this database's: the operator's
+default of 24h, or `SlapdCluster.spec.accesslogPurge.interval`, or
+`replicas × slotLength` under `spec.rotation` (ADR-024 R6 — see *`olcAccessLogPurge`
+has three owners* above). The sizing arithmetic below is unchanged; only who writes
+the interval moved.
 
 There is a default because "no opinion" is not a neutral setting here. An unpurged
 journal grows until it reaches its 8Gi map ceiling, and the accesslog overlay sits in

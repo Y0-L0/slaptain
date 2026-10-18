@@ -291,6 +291,18 @@ Reproducibility and triage:
                          expectation moves with it: every stanza assertion is
                          relative (a scale moves the count by one, and that is
                          an in-cluster peer) or existence-based.
+  E2E_ROTATION         = Set to 1 to install the mesh with the ADR-037 purge
+                         rotation ON, by stacking the chart's own
+                         charts/slapd-mesh/examples/rotation.yaml on the
+                         generated values — the packaging path a user takes,
+                         rather than a CR patch that the next helm upgrade
+                         would silently drop. Applied at SETUP. Off by default,
+                         so a normal run is byte-identical to before. The
+                         example's slotLength is production-shaped (6h), so the
+                         per-pod purge PHASES are what a run observes; the
+                         write endpoint MOVING is too slow to watch at that t,
+                         and write_rotation_test.go patches its own short slot
+                         for that and restores whatever it found.
   E2E_LABEL_FILTER     = Ginkgo label expression selecting which specs run, e.g.
                          "restore-inplace" or "backup && !restore". Lets a single
                          scenario be iterated without paying for the whole suite,
@@ -782,6 +794,21 @@ build_mesh_values() {
 # is the feature under test, not an omission.
 setup_mesh_bundle() {
     build_mesh_values
+    # E2E_ROTATION=1 stacks the chart's OWN rotation example on top of the
+    # generated values, exactly as charts/slapd-mesh/examples/rotation.yaml
+    # documents it (ADR-037). Deliberately the published file rather than a
+    # --set: the packaging path a user actually takes is the one worth
+    # exercising, and a knob that rendered its own rotation block here would be
+    # asserting a shape the chart never produces.
+    #
+    # It is a second -f, not a second values FILE PER SITE: the same two paths
+    # are named at every site, so ADR-028 §3's "identical bytes everywhere"
+    # survives — rotation carries no per-site field and must not grow one.
+    local -a rotation_values=()
+    if [[ "${E2E_ROTATION:-0}" == "1" ]]; then
+        rotation_values=(-f "$PROJECT_ROOT/charts/slapd-mesh/examples/rotation.yaml")
+        log "Purge rotation (ADR-037): ON, via charts/slapd-mesh/examples/rotation.yaml"
+    fi
     local ctx
     for ctx in "${CONTEXTS[@]}"; do
         log "[$ctx] Installing the mesh bundle (site ${SITE_NAMES[$ctx]}, identical values)..."
@@ -795,7 +822,7 @@ setup_mesh_bundle() {
         hctl "$ctx" upgrade --install slapd "$PROJECT_ROOT/charts/slapd-mesh" \
             --namespace "$NAMESPACE_TESTING" --create-namespace \
             --set retainOnUninstall=false \
-            -f "$MESH_VALUES_FILE"
+            -f "$MESH_VALUES_FILE" "${rotation_values[@]}"
     done
 }
 

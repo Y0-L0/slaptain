@@ -155,6 +155,36 @@ image reports the condition instead of looping silently.
 **Not done when it works** — see "what the measurement already settled". This
 phase changes no client-visible number by design.
 
+**Landed.** Three RW pods, two databases, `slotLength: 10m`:
+
+```
+slapd-0  2+00:00 00:30:00 00:00:00   7+00:00 00:30:00 00:00:00
+slapd-1  2+00:00 00:30:00 00:10:00   7+00:00 00:30:00 00:10:00
+slapd-2  2+00:00 00:30:00 00:20:00   7+00:00 00:30:00 00:20:00
+```
+
+Distinct per pod, aligned across databases, interval `3 × 10m`. The value is
+composed at both write sites — the overlay's ADD and the converging pass —
+because a stock slapd rejects the three-field value at config-parse time and
+takes the whole ADD down with it, which would leave a fresh cluster on an
+unpatched image with no accesslog overlay at all.
+
+Four conditions carry what cannot be honoured: `RotationConfigured` on the
+SlapdCluster (the four checks of ADR-037's fourth amendment, all captured live)
+and `AccesslogPurgeConverged` on each SlapdDatabase (a declared interval is
+withheld; a pod that refuses the phase is named). Both reported, neither
+refused.
+
+The e2e's teeth were proven the way the third amendment's warning demands: an
+operator built to write one phase for EVERY pod was pushed, deployed, and
+watched converge onto the fleet, and the spec caught it — `pod slapd-1 … has
+purge phase "00:00:00", want "00:10:00"`.
+
+Two notes for Phase 4. `writerOffset` is parsed, clamped and reported but
+nothing reads it yet: it is the write Service's input. And `rotationSlot` —
+the only one of the five pure functions this phase did not call — is likewise
+Phase 4's, which is why the grid still needs no clock anywhere.
+
 ## Phase 4 — the write Service rotates
 
 1. A `<name>-write` Service selecting exactly one pod, via the

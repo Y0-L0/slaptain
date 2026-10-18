@@ -171,12 +171,65 @@ back-mdb — no `slapindex` run, no downtime.
 | `spec.replication.retry` | `10 +` | converged into the stanzas |
 | `spec.backend.idlExponent` | none — slapd's 16 | **bootstrap-time** |
 | `spec.persistence.{config,data,accesslog}.size` | 1Gi / **5Gi** / 1Gi | StatefulSet `volumeClaimTemplates` — **create-only in practice**: the templates are immutable, so a changed size needs the StatefulSet recreated |
+| `spec.rotation.enabled` | off | converged into every pod's `olcAccessLogPurge` |
+| `spec.rotation.slotLength` | none, and **required when enabled** | converged |
+| `spec.rotation.writerOffset` | `replicas − 1` | clamped to `[1, replicas−1]`, and the clamp is reported |
 
 `spec.ldap.passwordHash` governs only what slapd hashes on a client's behalf. The
 root passwords the operator generates are hashed by the operator before they reach
 slapd. Stronger schemes need their module in the runtime image, and slaptain's does
 not ship `pw-argon2` today — asking for `{ARGON2}` produces a slapd that rejects
 every password write.
+
+### The purge rotation: what the operator checks, and what it only reports
+
+`spec.rotation` puts every read-write pod's accesslog purge on one absolute grid:
+with `n = spec.replicas` pods and a slot length `t`, every pod gets purge interval
+`T = n·t` and pod `k` gets phase `k·t`, counted from the epoch. That third value is
+a slaptain patch, not upstream's, so it needs a slaptain slapd image
+(`2.7.1-0+slaptain2` or later — `slapd -VV`).
+
+Opt-in, and off by default: nothing about an existing cluster's purge schedule
+changes until you set it.
+
+**Staggering alone changes nothing a client can see.** This is measured, not
+cautionary: de-synchronising the providers' purges lands on the synchronised arm and
+nowhere near the arm where the write target did not purge (ADR-037, third
+amendment). What the stagger buys is a pod that is *not* purging for the write
+endpoint to sit on — a prerequisite, not the benefit.
+
+The API server checks only that `slotLength` parses as a Go duration. Everything
+else is the operator's, and each is published on the SlapdCluster as
+`RotationConfigured` — reported, never refused, so a schedule you cannot honour
+never stops a running directory reconciling:
+
+| Reason | What it means |
+|---|---|
+| `RotationActive` | the grid is in force; the message states the interval and the spacing |
+| `RotationDisabled` | `enabled` is unset or false — the good case, not a fault |
+| `SlotLengthMissing` | `enabled: true` with no `slotLength`. There is no default on purpose |
+| `SlotLengthNotPositive` | `0s` passes admission and would put every pod's phase at zero — the synchronised purge the feature exists to remove |
+| `SlotLengthNotWholeSeconds` | `500ms` passes admission and has no representation in `olcAccessLogPurge`, whose fields are `[ddd+]hh:mm[:ss]` |
+| `WriterOffsetClamped` | `writerOffset` was outside `[1, replicas−1]`; the message says what it was clamped to. Still active |
+
+Each SlapdDatabase then publishes `AccesslogPurgeConverged`:
+
+| Reason | What it means |
+|---|---|
+| `Converged` | every pod that was read carries its own phase |
+| `RotationDisabled` | the cluster is not rotating; the value is this database's own age and interval |
+| `PurgeIntervalDeclared` | this database's `accesslogPurge` carries an interval the cluster's schedule now owns. The value is **withheld** — every pod keeps what it has — rather than overridden. Drop the interval, keep the age |
+| `PurgePhaseUnsupported` | a named pod's slapd refused the phase. That image carries no purge-phase patch; the operator wrote the two-field value instead, so the journal stays bounded and that pod simply does not take its phase |
+| `NoReachablePod` | nothing could be read. `Unknown`, never `False` — unreadable evidence is not evidence |
+
+A pod that could not be read is named in the message and never counts against the
+verdict.
+
+Sizing is yours. The operator will not refuse a rotation whose phases are too long
+for your write rate, and will not shorten one to keep a purge small. The arithmetic
+is ADR-037's capacity condition — every provider logs every write, including the ones
+it receives by syncrepl, while only the inactive ones purge — against your own
+storage's measured delete rate.
 
 ### `cn=monitor`: always present, nothing to set
 

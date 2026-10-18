@@ -278,6 +278,16 @@ func TestIsPurgeArityRejection(t *testing.T) {
 			want: true,
 		},
 		{
+			// Captured from slaptest on an unpatched 2.6.10 image: the
+			// slapd.conf keyword path names <logpurge>, the cn=config path
+			// names <olcAccessLogPurge>. Matching on the attribute name would
+			// therefore miss half the cases for no gain — "extra cruft" is the
+			// invariant, and it is what the matcher looks for.
+			name: "the keyword spelling, as slaptest emits it",
+			err:  errors.New("/t.conf: line 10: <logpurge> extra cruft after <age> <interval>."),
+			want: true,
+		},
+		{
 			name: "case is not load-bearing",
 			err:  errors.New("<olcAccessLogPurge> Extra Cruft after <age> <interval>"),
 			want: true,

@@ -788,7 +788,8 @@ spec:
               a fixed 8Gi. The accesslog overlay sits in the data database's
               write path, so when the journal cannot take a write neither can
               the data. Check that the purge runs, or shorten
-              spec.replication.accesslogPurge (docs/TUNING.md).
+              spec.replication.accesslogPurge.retention, or the cluster's
+              spec.accesslogPurge.interval (docs/TUNING.md).
 
         - alert: SlaptainAccesslogMapNearlyFull
           expr: >-
@@ -803,8 +804,8 @@ spec:
               Under a day or two of writes from full at the default purge
               window. When the journal cannot take a write, the data database
               cannot either — the accesslog overlay is in its write path. Check
-              that the purge runs, or shorten spec.replication.accesslogPurge
-              (docs/TUNING.md).
+              that the purge runs, or shorten spec.replication.accesslogPurge.retention,
+              or the cluster's spec.accesslogPurge.interval (docs/TUNING.md).
 
         - alert: SlaptainMDBReaderSlotsHigh
           # olmMDBReadersUsed is me_numreaders, a high-water mark of slots

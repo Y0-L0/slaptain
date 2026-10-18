@@ -826,7 +826,7 @@ tests:
               role: readwrite
             exp_annotations:
               summary: "slapd-0: accesslog journal cn=accesslog-default is 82% full"
-              description: "The journal fills on write rate, not data volume, and its map is a fixed 8Gi. The accesslog overlay sits in the data database's write path, so when the journal cannot take a write neither can the data. Check that the purge runs, or shorten spec.replication.accesslogPurge (docs/TUNING.md)."
+              description: "The journal fills on write rate, not data volume, and its map is a fixed 8Gi. The accesslog overlay sits in the data database's write path, so when the journal cannot take a write neither can the data. Check that the purge runs, or shorten spec.replication.accesslogPurge.retention, or the cluster's spec.accesslogPurge.interval (docs/TUNING.md)."
       - eval_time: 35m
         alertname: SlaptainAccesslogMapNearlyFull
         exp_alerts: []
@@ -898,7 +898,7 @@ tests:
               role: readwrite
             exp_annotations:
               summary: "slapd-0: accesslog journal cn=accesslog-default is 92% full"
-              description: "Under a day or two of writes from full at the default purge window. When the journal cannot take a write, the data database cannot either — the accesslog overlay is in its write path. Check that the purge runs, or shorten spec.replication.accesslogPurge (docs/TUNING.md)."
+              description: "Under a day or two of writes from full at the default purge window. When the journal cannot take a write, the data database cannot either — the accesslog overlay is in its write path. Check that the purge runs, or shorten spec.replication.accesslogPurge.retention, or the cluster's spec.accesslogPurge.interval (docs/TUNING.md)."
 
   - interval: 1m
     name: LMDB reader slots — a leak fires, the thread-count steady state and a missing max do not

@@ -26,7 +26,8 @@
 #   SKIP_SETUP=1   reuse the already-deployed storm-repro mesh
 #
 # The mesh is deployed with SLAPD_TAG_SUFFIX=-ol26 (OpenLDAP 2.6) and
-# TEST_RESOURCES=storm-repro (accesslogPurge "0+00:05 0+00:01"). On success the
+# TEST_RESOURCES=storm-repro (retention 5m on the database, interval 1m on the
+# cluster). On success the
 # run ends with the resilience-labelled e2e FAILING on the no-storm spec — that
 # failure is the observed red the assertion never had (Test Discipline). It is
 # left to the operator of this script to record the evidence (ADR-021).
@@ -72,7 +73,12 @@ site_addr() {
 }
 
 e2e() { # subcommand — always the -ol26 storm-repro mesh
+    # The sweep interval is the CLUSTER's since ADR-024 R6 — the fixture carries
+    # only the retention now. Without this the purge would run on the operator's
+    # 24h default and the journal this repro needs to forget fast would not
+    # forget at all: the run would come back clean and prove nothing.
     SLAPD_TAG_SUFFIX=-ol26 TEST_RESOURCES=storm-repro GIT_TAG="$GIT_TAG" \
+        E2E_PURGE_INTERVAL=1m \
         "$SCRIPT_DIR/e2e.sh" "$@"
 }
 

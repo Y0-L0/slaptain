@@ -66,6 +66,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── DEBUG-IMAGES.md             # slapd:<tag>-debug / -asan: diagnostic image variants for heap corruption
 │   ├── OPENLDAP-VERSIONS.md        # Dual 2.7/2.6 image pairs, tag scheme, 2.6→2.7 migration runbook (ADR-021)
 │   ├── BACKUP-PLAN.md              # ADR-014 implementation breakdown (phases)
+│   ├── PURGE-ROTATION-PLAN.md      # ADR-037 implementation breakdown: per-pod purge phases + the rotating write endpoint
 │   ├── MULTI-SITE.md               # USER guide: the mesh model, the invariants, a multi-site install (ADR-028)
 │   ├── MESH-PLAN.md                # ADR-028 implementation breakdown (7 phases, all landed)
 │   ├── BACKLOG.md                  # Cross-cutting tech debt (e.g. lint debt, e2e framework gaps)

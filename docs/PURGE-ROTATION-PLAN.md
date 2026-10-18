@@ -1,0 +1,202 @@
+# Purge Rotation Implementation Plan (ADR-037)
+
+The accesslog purge stalls the writes of the pod that runs it. This plan
+implements the fix: per-pod purge phases plus a write endpoint that rotates in
+lockstep, so the pod taking writes is never the pod purging.
+
+Read [ADR-037](adrs/adr-037-purge-off-the-write-path.md) first, including all
+three amendments. This plan implements its decisions and does not re-argue them.
+
+## Resuming this work
+
+Nothing is implemented yet. The prerequisite — a slapd that can express a purge
+phase — exists as a local patch and a 2.6 image; see Phase 0 for what that
+leaves undone.
+
+Current state:
+
+- `images/openldap-deb/local-patches/accesslog-purge-phase.patch` adds an
+  optional third value to `logpurge`, epoch-anchored. Built into the
+  `-ol26src` image pair by `images/openldap-deb/Containerfile.ol26src`.
+- The patch is **not** in `images/openldap-deb/debian/patches/series`, so the
+  default 2.7.1 pair cannot express a phase. That is Phase 0.
+
+## What the measurement already settled — do not re-litigate
+
+ADR-037's third amendment measured staggering on its own. It changes nothing a
+client can see: staggered arms land on the synchronised arm and nowhere near
+the arm where the write target did not purge.
+
+Two consequences bind this plan:
+
+- **Staggering alone is not a deliverable.** Phases without a rotating write
+  endpoint produce a cluster that measures exactly like today. Phase 3 below
+  therefore ends in a state that is *correct and useless*; do not mistake a
+  green Phase 3 for working software, and do not ship there.
+- **The whole value is in Phase 4.** Everything before it is scaffolding for
+  the one thing that moves the number: the writes not being where the purge is.
+
+## Hazards to read before writing any code
+
+**1. `n` is `spec.replicas`, never readiness.** `n` fixes `T = n·t`, and `T` is
+the interval written into every pod's `cn=config`. Deriving `n` from Ready pods
+would rewrite the whole fleet's configuration on one transient restart — the
+churn ADR-013 exists to prevent. Readiness belongs only in writer *selection*,
+which persists nothing. Someone will try to "fix" this; the comment in the code
+must say why it is not a bug.
+
+**2. `t` is fixed and `T = n·t` varies.** Scaling then leaves existing phases
+untouched and only moves the interval, and an interval change does not move a
+phase. Holding `T` fixed and recomputing `t = T/n` re-phases the entire fleet on
+every scale event.
+
+**3. Nothing here may touch the pod template.** This is Services and `cn=config`
+only. The golden templates in `operator/internal/controller/testdata/` pin that;
+if they go red, the change is wrong. Do **not** regenerate them with
+`-update-pod-template-golden`.
+
+**4. The slapd config parser is strict about the time format.** `log_age_parse`
+accepts `[ddd+]hh:mm[:ss]` with two-digit fields; `0:05` is rejected where
+`00:05` is accepted, and a value with days must also carry minutes. Emit
+`hh:mm:ss` or `ddd+hh:mm:ss` unconditionally and unit-test the formatter against
+known values before anything else uses it.
+
+**5. An unpatched slapd rejects a three-field value** with
+`<olcAccessLogPurge> extra cruft after <age> <interval>`. See Phase 3 for the
+decided handling — attempt, then report.
+
+## Conventions this plan follows (verified against the codebase)
+
+- `desiredAccesslogPurge(sd)` (`slapddatabase_controller.go:3946`) is the one
+  place the purge value is decided, and `defaultAccesslogPurge` (`:3935`) is
+  `"7+00:00 1+00:00"`. This is the composition seam.
+- `ensureAccesslogPurge(ctx, conn, host, dataDN, purge)` (`:1720`) already runs
+  **once per pod**, from a call chain that has `ordinal int32` in scope. Per-pod
+  divergence is a value change on an existing path, not new machinery.
+- Services are reconciled on `SlapdClusterReconciler` with SSA patches —
+  `reconcileClusterIPService` (`slapdcluster_controller.go:691`) is the pattern
+  to copy.
+- There is no clock abstraction and none is wanted: pure functions take
+  `now time.Time`, and only the reconciler calls `time.Now()`.
+- Red-first (CLAUDE.md Test Discipline). Every pure function in Phase 1 gets its
+  assertions written, and observed failing, before its implementation.
+- After CRD changes: `make operator-manifests` (syncs `charts/operator/crds/`)
+  and `make verify-generated`.
+
+## Phase 0 — the phase parameter reaches the default image
+
+Without this the feature is unusable on 2.7.1, which is what every cluster runs.
+
+1. Add `accesslog-purge-phase.patch` to
+   `images/openldap-deb/debian/patches/series`. It applies cleanly to 2.7.1 —
+   checked, seven hunks, offsets only — but has never been **built** there.
+2. `make build-openldap-deb && make build-slapd build-init`.
+3. Smoke-test: a three-field `logpurge` through `slaptest`, as in
+   `Containerfile.ol26src`'s A/B — stock rejects it, patched accepts it.
+4. Confirm `slapd -VV` on the 2.7 image carries the `+slaptain` marker.
+
+**Done when** a 2.7.1 image accepts `logpurge 0+00:15 0+00:05 0+00:02`.
+
+## Phase 1 — the decisions, as pure functions (no cluster, red first)
+
+A new file, `operator/internal/controller/purgerotation.go`, holding only
+arithmetic:
+
+```go
+func formatLogAge(d time.Duration) string            // hazard 4
+func purgePhase(ordinal, n int32, t time.Duration) time.Duration
+func rotationSlot(now time.Time, t time.Duration, n int32) int32
+func composePurge(age string, interval, phase time.Duration) string
+func writeTarget(slot, n, d int32, eligible func(int32) bool) (int32, bool)
+```
+
+`writeTarget` walks the preference order `d, d−1, … 1`, skips the pod purging
+this slot (offset 0), and takes the first for which `eligible` reports true.
+With `n = 2` and only the purging pod eligible it returns that pod — ADR-037's
+decided degenerate case, writes continuing badly beating writes not continuing.
+
+Assertions worth having before the code exists: the grid is invariant under when
+you ask it; `purgePhase` is distinct for every ordinal and `< T`; a scale-up
+leaves lower ordinals' phases unchanged; `writeTarget` never returns the purging
+pod unless it is the only candidate; `formatLogAge` round-trips through the
+format `log_age_parse` accepts.
+
+**Done when** those are green and at least two deliberate mutations have been
+observed to turn them red.
+
+## Phase 2 — API types
+
+On `SlapdCluster`, a rotation block carrying `enabled`, the slot length `t`, and
+`d`. `d` stays a tunable: ADR-037 bounds it by `d·t ≥ P` and `(n−d)·t ≥ D`, and
+`D` has no measured value yet.
+
+`SlapdDatabase.spec.replication.accesslogPurge`
+(`slapddatabase_types.go:254`) keeps the **age** only. When cluster rotation is
+on, an interval in that field is **refused with a condition**, never silently
+overridden — ADR-024's rule that a field which cannot be honoured is rejected
+rather than ignored.
+
+**Done when** `make verify-generated` is clean and the CRD round-trips.
+
+## Phase 3 — converge the per-pod value
+
+Thread the ordinal into the composition at `desiredAccesslogPurge` and emit
+`<age> <interval> <phase>` per (pod, database). **All databases on a pod share
+that pod's phase** — aligned, not spread (ADR-037, second amendment).
+
+Capability handling, decided: **attempt, then report.** Write the three-field
+value; on rejection, leave the two-field value in place and set a condition
+naming the pod and the reason. No version probing, no marker convention. The
+failure is loud, bounded, and tells the user exactly what to fix.
+
+**Done when** every pod carries a distinct phase, and a cluster on an unpatched
+image reports the condition instead of looping silently.
+
+**Not done when it works** — see "what the measurement already settled". This
+phase changes no client-visible number by design.
+
+## Phase 4 — the write Service rotates
+
+1. A `<name>-write` Service selecting exactly one pod, via the
+   `statefulset.kubernetes.io/pod-name` label. Copy the SSA pattern from
+   `reconcileClusterIPService`.
+2. Each reconcile: compute the slot from `time.Now()`, pick the writer with
+   `writeTarget` and an eligibility predicate, patch the selector if it moved.
+3. Eligibility: Ready; not purging this slot; not read-only under ADR-036's
+   authorship gate; not working off backlog, lag or a recent absence
+   (ADR-037 decision 4). **ADR-036 is still Proposed** — write that term as a
+   seam that is inert until it lands, never as a dependency that blocks.
+4. `RequeueAfter` the time remaining to the next slot boundary, which is exact
+   because the grid is absolute.
+5. A status condition naming the current writer and the next rotation time.
+   Observation only.
+
+**Done when** an e2e shows the Service selector following the grid, and the pod
+it names is never the pod whose phase is current.
+
+## Out of scope, deliberately
+
+- **The read Service** (ADR-037's ROs-plus-writer design). It is a freshness
+  refinement with no measurement behind it, and it costs read capacity in
+  inverse proportion to `readReplicas`. The write path is what the measurement
+  says matters; ship that, then decide.
+- **`d = n−2`, the cooldown slot.** Exists only for `n ≥ 3` and every arm so far
+  is 2+2. Unknown, and left that way rather than guessed.
+- **Upstreaming the patch.** It is ours and local; the packaging fork carries it.
+- **Backup source selection** avoiding the purging pod.
+
+## Known risks
+
+- **`D`, the drain time, is unmeasured**, so `T ≥ P + D` cannot be evaluated for
+  a real deployment and `d` cannot be fixed. The feature is sized on one half of
+  its own rule. The rotation is for short-lived connections by design; a pooled
+  client keeps writing to the old pod and the rotation does nothing for it.
+- **Operator downtime degrades to today**: purges keep firing from `cn=config`,
+  the writer stops rotating, and eventually the writer purges while taking
+  writes. No worse than unmitigated — but the write Service must not be left
+  selecting nothing.
+- **Phase 0 is on the critical path** and touches the image every cluster runs.
+- **Peak CSN lag was higher staggered** in two arms (34.7 s, 39.2 s against
+  19.6 s synchronised). If that inversion is real, rotation mildly worsens
+  replication lag while removing the client-visible stall. It does not change
+  the decision; it may change what the release notes have to say.

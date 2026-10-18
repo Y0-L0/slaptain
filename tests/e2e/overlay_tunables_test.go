@@ -39,12 +39,27 @@ var _ = Describe("overlay tunables: purge window and checkpoint",
 		var (
 			rwPods []string
 			dbs    []ldapv1alpha1.SlapdDatabase
+			// rotating, slotLength and replicas describe the ADR-037 grid the
+			// cluster declares. replicas is spec.replicas — DECLARED, never
+			// readiness — because it is what the operator derives the purge
+			// interval T = n·t from.
+			rotating   bool
+			slotLength time.Duration
+			replicas   int32
 		)
 
 		BeforeAll(func(ctx SpecContext) {
 			By("reading the SlapdCluster")
 			sc := &ldapv1alpha1.SlapdCluster{}
 			Expect(crdClient.Get(ctx, nsName(namespace, "slapd"), sc)).To(Succeed())
+			replicas = sc.Spec.Replicas
+			if replicas == 0 {
+				replicas = 1
+			}
+			if r := sc.Spec.Rotation; r.Enabled != nil && *r.Enabled && r.SlotLength != nil {
+				slotLength = r.SlotLength.Duration
+				rotating = slotLength > 0 && slotLength%time.Second == 0
+			}
 			if !sc.Spec.Replication.Enabled || sc.IsConsumerOnly() {
 				Skip("cluster is not a syncrepl provider, so it carries neither " +
 					"an accesslog overlay nor a data-DB syncprov overlay")
@@ -81,6 +96,10 @@ var _ = Describe("overlay tunables: purge window and checkpoint",
 		}, NodeTimeout(8*time.Minute))
 
 		It("converges the accesslog purge window on every RW pod", func(ctx SpecContext) {
+			if rotating {
+				Skip("spec.rotation is on, so olcAccessLogPurge carries the cluster's " +
+					"interval and this pod's phase — see the rotation spec below")
+			}
 			for _, pod := range rwPods {
 				By("inspecting cn=config on " + pod)
 				conn := dialPodConfigEventually(ctx, pod)
@@ -113,6 +132,113 @@ var _ = Describe("overlay tunables: purge window and checkpoint",
 				conn.Close()
 			}
 		}, NodeTimeout(6*time.Minute))
+
+		// ADR-037: with spec.rotation on, olcAccessLogPurge gains a third value
+		// and the operator composes it per (pod, database) — the age from the
+		// SlapdDatabase, the interval T = spec.replicas × slotLength and the
+		// phase k × slotLength from the SlapdCluster.
+		//
+		// This spec exists because of ADR-037's third amendment, which measured
+		// a stagger that had never happened: a driver assuming the SERVER
+		// multiplies the value by the pod's ordinal would write ONE phase for
+		// every pod, the providers would stay synchronised, and the arm would
+		// report no difference — reading as "the patch does nothing" rather
+		// than "the stagger never happened". Nothing outside cn=config can tell
+		// those two apart, so the distinctness is asserted here, directly, per
+		// pod. Staggering alone changes no client-visible number by design; the
+		// write endpoint moving is what moves the number, and that is a
+		// different milestone.
+		It("gives every RW pod its own purge phase on the cluster's grid",
+			Label("purge-rotation"), func(ctx SpecContext) {
+				if !rotating {
+					Skip("spec.rotation.enabled is not set (or its slotLength is not a usable " +
+						"whole number of seconds), so no pod carries a purge phase")
+				}
+
+				wantInterval := logAge(time.Duration(replicas) * slotLength)
+				// phase → the pod that carries it, so a collision names both.
+				seen := map[string]string{}
+
+				for i, pod := range rwPods {
+					By("inspecting cn=config on " + pod)
+					conn := dialPodConfigEventually(ctx, pod)
+
+					wantPhase := logAge(time.Duration(i) * slotLength)
+					podPhase := ""
+
+					for _, sd := range dbs {
+						if !(&sd).DeltaSyncEnabled() {
+							continue
+						}
+						if purgeDisabled(sd) {
+							continue
+						}
+						if declaresPurgeInterval(sd) {
+							// ADR-024 R4: the operator REFUSES such a database
+							// rather than overriding it, and reports a
+							// condition. Nothing is written, so there is no
+							// per-pod value to assert.
+							continue
+						}
+
+						dataDB, ok := findMdb(observedMdbDatabases(conn), sd.Spec.Suffix)
+						Expect(ok).To(BeTrue(), "pod %s has no data database %q", pod, sd.Spec.Suffix)
+
+						dn, values := overlayAttrValues(conn, dataDB.dn,
+							"(objectClass=olcAccessLogConfig)", "olcAccessLogPurge")
+						Expect(dn).NotTo(BeEmpty(),
+							"pod %s: data database %q has no accesslog overlay", pod, sd.Spec.Suffix)
+						Expect(values).To(HaveLen(1),
+							"pod %s: %s carries %d olcAccessLogPurge values, want exactly one",
+							pod, dn, len(values))
+
+						fields := strings.Fields(values[0])
+						Expect(fields).To(HaveLen(3),
+							"pod %s: %s (db %s) carries olcAccessLogPurge %q — with spec.rotation "+
+								"on it must carry THREE fields <age> <interval> <phase>. Two fields "+
+								"means this pod purges on its own uncoordinated schedule, which is "+
+								"the synchronised purge ADR-037 exists to remove; check the "+
+								"AccesslogPurgeConverged condition on the SlapdDatabase and whether "+
+								"this slapd image carries the accesslog-purge-phase patch",
+							pod, dn, sd.Name, values[0])
+
+						Expect(fields[1]).To(Equal(wantInterval),
+							"pod %s: %s (db %s) has purge interval %q, want %q "+
+								"(spec.replicas=%d × slotLength=%s)",
+							pod, dn, sd.Name, fields[1], wantInterval, replicas, slotLength)
+
+						Expect(fields[2]).To(Equal(wantPhase),
+							"pod %s: %s (db %s) has purge phase %q, want %q (ordinal %d × "+
+								"slotLength %s). A phase that does not track the ordinal means "+
+								"the fleet is not staggered",
+							pod, dn, sd.Name, fields[2], wantPhase, i, slotLength)
+
+						// Databases ALIGN, they do not spread: one busy window
+						// per pod, in the slot where it is not the writer.
+						if podPhase == "" {
+							podPhase = fields[2]
+						}
+						Expect(fields[2]).To(Equal(podPhase),
+							"pod %s: database %s purges at %q while another of this pod's "+
+								"databases purges at %q. Databases must align on their pod's "+
+								"phase, not spread across the period (ADR-037)",
+							pod, sd.Name, fields[2], podPhase)
+					}
+
+					if podPhase != "" {
+						Expect(seen).NotTo(HaveKey(podPhase),
+							"pods %s and %s both purge at phase %q — the stagger never happened, "+
+								"and every provider will stall its own writes at the same instant",
+							seen[podPhase], pod, podPhase)
+						seen[podPhase] = pod
+					}
+					conn.Close()
+				}
+
+				Expect(seen).To(HaveLen(len(rwPods)),
+					"expected one distinct purge phase per RW pod, got %d for %d pods: %v",
+					len(seen), len(rwPods), seen)
+			}, NodeTimeout(6*time.Minute))
 
 		It("converges the syncprov checkpoint on every RW pod's data database", func(ctx SpecContext) {
 			for _, pod := range rwPods {
@@ -163,6 +289,38 @@ func wantAccesslogPurge(sd ldapv1alpha1.SlapdDatabase) string {
 	default:
 		return v
 	}
+}
+
+// purgeDisabled reports the explicit "none" opt-out, which survives rotation —
+// a schedule must not resurrect a purge the user turned off.
+func purgeDisabled(sd ldapv1alpha1.SlapdDatabase) bool {
+	return strings.EqualFold(strings.TrimSpace(sd.Spec.Replication.AccesslogPurge), "none")
+}
+
+// declaresPurgeInterval reports whether the DATABASE's own field carries an
+// interval. With rotation on the cluster owns the schedule, so such a database
+// is refused with a condition and nothing is written for it (ADR-024 R4) — the
+// operator's default is not a declaration and does not count.
+func declaresPurgeInterval(sd ldapv1alpha1.SlapdDatabase) bool {
+	v := strings.TrimSpace(sd.Spec.Replication.AccesslogPurge)
+	if v == "" || strings.EqualFold(v, "none") {
+		return false
+	}
+	return len(strings.Fields(v)) > 1
+}
+
+// logAge renders a duration the way slapd's log_age_parse accepts it:
+// "hh:mm:ss", or "ddd+hh:mm:ss" from a day up. Spelled out here rather than
+// imported, so the e2e states the wire format instead of restating the code —
+// if the operator's formatter drifts, this is what catches it.
+func logAge(d time.Duration) string {
+	secs := int64(d / time.Second)
+	days, rest := secs/86400, secs%86400
+	hh, mm, ss := rest/3600, rest%3600/60, rest%60
+	if days > 0 {
+		return fmt.Sprintf("%d+%02d:%02d:%02d", days, hh, mm, ss)
+	}
+	return fmt.Sprintf("%02d:%02d:%02d", hh, mm, ss)
 }
 
 // overlayAttrValues returns the DN of the overlay under dbDN matching filter and

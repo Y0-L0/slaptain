@@ -269,30 +269,44 @@ var _ = Describe("ADR-037: the write endpoint rotates",
 			Expect(after).To(BeElementOf(rwPods))
 		})
 
-		// ADR-037's open question 1, marked there as "Unverified, and
-		// load-bearing": a Service selector change does not move established
-		// connections, because kube-proxy steers NEW flows while existing
-		// conntrack entries keep going to the old endpoint. If the bulk of write
-		// traffic does not follow, the rotation degrades to no rotation.
+		// The feature's claim, and its precondition, measured together.
+		//
+		// THE CLAIM, asserted: a NEW connection opened after the endpoint moves
+		// writes to the NEW target. That is what the rotation promises and it
+		// must be green — an endpoint new connections do not follow is an
+		// endpoint that does nothing.
+		//
+		// THE PRECONDITION, recorded: a Kubernetes Service does not re-wire
+		// established connections — kube-proxy steers new flows while existing
+		// conntrack entries keep going where they were sent. So a client holding
+		// one connection keeps writing to the pod it first reached. That is
+		// expected, it is written down (PURGE-ROTATION-PLAN, "Known risks": the
+		// rotation is for short-lived connections by design), and it is a
+		// property of the DEPLOYMENT rather than a defect here. The rotation
+		// benefits clients that open short-lived connections, or pool with a
+		// maximum connection lifetime well below the slot length; a client that
+		// holds a connection for hours does not benefit, and nothing in this
+		// operator could make it.
+		//
+		// So that half is observed and reported, never asserted, and this spec
+		// is not a characterisation harness for pooled clients.
 		//
 		// The measurement needs a path through kube-proxy, which the write
 		// Service's ClusterIP is not from outside the cluster, so the probe is a
 		// throwaway NodePort Service carrying the SAME selector, kept in step
 		// with the real one. kube-proxy does not care who wrote the selector:
-		// the flow-pinning behaviour under test is identical.
+		// the flow behaviour is identical.
 		//
 		// Which pod took a write is read from the entry's own entryCSN — the
 		// #sid# field names the server that accepted it (ADR-017 makes that a
 		// bare per-pod integer), so this is in-band evidence rather than an
 		// inference from where the client thought it was connected.
-		//
-		// The established-connection half REPORTS rather than asserts: both
-		// outcomes are real findings about ADR-037 and neither is a defect in
-		// this operator. The fresh-connection half is asserted, because a new
-		// connection not reaching the new writer would mean the endpoint does
-		// not work at all.
-		It("measures whether writes follow the endpoint when it moves",
+		It("sends a new connection to the new write target when the endpoint moves",
 			Label("write-rotation-pooled"), func(ctx SpecContext) {
+				// A per-run suffix: an interrupted run cannot leave an entry that
+				// makes the next one fail on "already exists".
+				run := strconv.FormatInt(time.Now().Unix()%100000, 10)
+
 				nodeIP := os.Getenv("E2E_NODE_IP")
 				if nodeIP == "" {
 					Skip("E2E_NODE_IP is not set, so there is no path through kube-proxy to probe")
@@ -352,7 +366,20 @@ var _ = Describe("ADR-037: the write endpoint rotates",
 					req.Attribute("gidNumber", []string{"76001"})
 					req.Attribute("homeDirectory", []string{"/home/" + uid})
 					Expect(conn.Add(req)).To(Succeed(), "write %s through the probe endpoint", dn)
-					DeferCleanup(func() { _ = ldapConn.Del(ldap.NewDelRequest(dn, nil)) })
+					// The probe entry is written to ONE pod and deleted through the
+					// cluster Service, which load-balances: a delete issued
+					// milliseconds later can reach a pod the entry has not
+					// replicated to yet and come back "no such object". Retry
+					// until it is gone, so a run does not leave an entry behind
+					// that makes the NEXT run fail on "already exists" — which is
+					// how this spec failed once, looking like a product defect.
+					DeferCleanup(func(ctx SpecContext) {
+						Eventually(ctx, func() bool {
+							_ = ldapConn.Del(ldap.NewDelRequest(dn, nil))
+							return ldapExists(ldapConn, dn)
+						}).WithTimeout(60*time.Second).WithPolling(2*time.Second).Should(BeFalse(),
+							"probe entry %s must not survive the spec", dn)
+					})
 
 					sr, err := conn.Search(ldap.NewSearchRequest(dn, ldap.ScopeBaseObject,
 						ldap.NeverDerefAliases, 0, 0, false, "(objectClass=*)",
@@ -373,7 +400,7 @@ var _ = Describe("ADR-037: the write endpoint rotates",
 				By("opening one connection and writing through it, before any rotation")
 				pooled := retryConnectLDAP(ctx, addr, baseDN, adminPW)
 				DeferCleanup(func() { _ = pooled.Close() })
-				landedA, csnA := whereDidItLand(pooled, "rotprobe-a")
+				landedA, csnA := whereDidItLand(pooled, "rotprobe-a-"+run)
 				Expect(fmt.Sprintf("slapd-%d", landedA)).To(Equal(first),
 					"the first write did not land on the pod the endpoint names, so the probe is "+
 						"not measuring the endpoint at all (entryCSN %s)", csnA)
@@ -387,38 +414,55 @@ var _ = Describe("ADR-037: the write endpoint rotates",
 				mirror(ctx, second)
 				GinkgoWriter.Printf("endpoint moved %s → %s\n", first, second)
 
+				By("waiting for the endpoint to RESOLVE to the new target before dialling it")
+				// Not merely "does it answer": a Service whose selector has just
+				// been rewritten keeps answering from the old pod until the
+				// EndpointSlice updates and kube-proxy reprograms. A fresh
+				// connection opened inside that window reaches the OLD target —
+				// measured, 16 ms after the patch — and that is the propagation
+				// delay of the endpoint, not a client failing to follow it. What
+				// a real client does is dial once the endpoint has converged.
+				newPod, err := k8sClient.CoreV1().Pods(namespace).Get(ctx, second, metav1.GetOptions{})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(newPod.Status.PodIP).NotTo(BeEmpty())
+				Eventually(ctx, func() []string {
+					eps, err := k8sClient.CoreV1().Endpoints(namespace).Get(ctx, probeSvcName, metav1.GetOptions{})
+					if err != nil {
+						return nil
+					}
+					var ips []string
+					for _, s := range eps.Subsets {
+						for _, a := range s.Addresses {
+							ips = append(ips, a.IP)
+						}
+					}
+					return ips
+				}).WithTimeout(60*time.Second).WithPolling(time.Second).
+					Should(ConsistOf(newPod.Status.PodIP),
+						"the probe endpoint must resolve to %s (%s) before a fresh connection can "+
+							"be said to have followed or not followed it", second, newPod.Status.PodIP)
+
 				By("writing again on the SAME connection")
-				landedB, csnB := whereDidItLand(pooled, "rotprobe-b")
+				landedB, csnB := whereDidItLand(pooled, "rotprobe-b-"+run)
 				followed := fmt.Sprintf("slapd-%d", landedB) == second
 
 				By("writing on a FRESH connection")
 				var landedC int32
 				var csnC string
-				Eventually(ctx, func() string {
-					fresh := retryConnectLDAP(ctx, addr, baseDN, adminPW)
-					defer func() { _ = fresh.Close() }()
-					sr, err := fresh.Search(ldap.NewSearchRequest("", ldap.ScopeBaseObject,
-						ldap.NeverDerefAliases, 0, 0, false, "(objectClass=*)",
-						[]string{"namingContexts"}, nil))
-					if err != nil || len(sr.Entries) == 0 {
-						return ""
-					}
-					return "up"
-				}).WithTimeout(60*time.Second).WithPolling(2*time.Second).Should(Equal("up"),
-					"the probe endpoint must answer after the selector moved")
-
 				freshConn := retryConnectLDAP(ctx, addr, baseDN, adminPW)
 				DeferCleanup(func() { _ = freshConn.Close() })
-				landedC, csnC = whereDidItLand(freshConn, "rotprobe-c")
+				landedC, csnC = whereDidItLand(freshConn, "rotprobe-c-"+run)
 
-				AddReportEntry("ADR-037 open question 1", fmt.Sprintf(
+				AddReportEntry("write endpoint: who followed the move", fmt.Sprintf(
 					"endpoint moved %s → %s\n"+
-						"  established connection wrote to slapd-%d (entryCSN %s) — followed: %v\n"+
-						"  fresh connection wrote to slapd-%d (entryCSN %s)\n"+
-						"  first write (before the move) landed on slapd-%d (entryCSN %s)",
-					first, second, landedB, csnB, followed, landedC, csnC, landedA, csnA))
+						"  before the move, the first write landed on slapd-%d (entryCSN %s)\n"+
+						"  FRESH connection wrote to slapd-%d (entryCSN %s) — this is the claim\n"+
+						"  established connection wrote to slapd-%d (entryCSN %s) — moved: %v; a "+
+						"Service does not re-wire an open flow, which is why the rotation is for "+
+						"short-lived connections by design",
+					first, second, landedA, csnA, landedC, csnC, landedB, csnB, followed))
 				GinkgoWriter.Printf(
-					"OPEN QUESTION 1: established connection followed the move: %v "+
+					"established connection moved with the endpoint: %v "+
 						"(wrote to slapd-%d, endpoint names %s)\n", followed, landedB, second)
 
 				Expect(fmt.Sprintf("slapd-%d", landedC)).To(Equal(second),

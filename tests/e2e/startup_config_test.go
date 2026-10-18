@@ -295,20 +295,47 @@ var _ = Describe("startup-only configuration", Label("startup-config"), Ordered,
 		waitClusterSettled(ctx)
 
 		By("asserting the attribute is gone and the in-memory session log is back")
-		for _, pod := range rwPods {
-			conn := dialPodConfigEventually(ctx, pod)
-			dataDB, ok := findMdb(observedMdbDatabases(conn), dataSuffix)
-			Expect(ok).To(BeTrue(), "pod %s has no data database %q", pod, dataSuffix)
-			dn, src := syncprovAttr(conn, dataDB.dn, "olcSpSessionlogSource")
-			_, inMem := syncprovAttr(conn, dataDB.dn, "olcSpSessionlog")
-			conn.Close()
+		// The two halves of this assertion have two different authors, and only
+		// one of them is finished when the pod goes Ready.
+		//
+		// olcSpSessionlogSource is removed OFFLINE by the init container
+		// (ADR-034), so it is already gone the moment slapd answers. The
+		// in-memory olcSpSessionlog is put back by the SlapdDatabase
+		// controller's next reconcile (ADR-022) — and a pod restart is not an
+		// event that controller watches, so the floor is its resync period, not
+		// the restart. Asserting both with a bare Expect raced and lost on a
+		// three-site mesh: slapd-2 read src empty and inMem absent ten seconds
+		// after its restart, which is the window, not a defect.
+		//
+		// Eventually moves WHEN this is asserted, not WHAT: both halves still
+		// have to hold on every pod, and the budget is deliberately just above
+		// the SlapdDatabase resync floor so a genuinely stuck convergence still
+		// fails here rather than waiting it out.
+		Eventually(ctx, func() error {
+			for _, pod := range rwPods {
+				conn := dialPodConfigEventually(ctx, pod)
+				dataDB, ok := findMdb(observedMdbDatabases(conn), dataSuffix)
+				if !ok {
+					conn.Close()
+					return fmt.Errorf("pod %s has no data database %q", pod, dataSuffix)
+				}
+				dn, src := syncprovAttr(conn, dataDB.dn, "olcSpSessionlogSource")
+				_, inMem := syncprovAttr(conn, dataDB.dn, "olcSpSessionlog")
+				conn.Close()
 
-			Expect(src).To(BeEmpty(),
-				"pod %s: %s must no longer carry olcSpSessionlogSource once the field is "+
-					"dropped and the pod has restarted", pod, dn)
-			Expect(inMem).NotTo(BeEmpty(),
-				"pod %s: %s must carry the in-memory olcSpSessionlog again (ADR-022)", pod, dn)
-		}
+				if len(src) != 0 {
+					return fmt.Errorf("pod %s: %s must no longer carry olcSpSessionlogSource "+
+						"once the field is dropped and the pod has restarted; it carries %v",
+						pod, dn, src)
+				}
+				if len(inMem) == 0 {
+					return fmt.Errorf("pod %s: %s must carry the in-memory olcSpSessionlog "+
+						"again (ADR-022)", pod, dn)
+				}
+			}
+			return nil
+		}).WithTimeout(6*time.Minute).WithPolling(10*time.Second).Should(Succeed(),
+			"the handover back to the in-memory session log must complete on every RW pod")
 
 		By("asserting the condition is True for a database that declares nothing")
 		Eventually(ctx, func() string {

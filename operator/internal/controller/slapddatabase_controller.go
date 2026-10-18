@@ -439,10 +439,13 @@ func (r *SlapdDatabaseReconciler) applyToPods(
 	// deriving it from readiness would rewrite the whole fleet's configuration
 	// on one transient restart, which is the churn ADR-013 exists to prevent.
 	// It is not a bug that the loop ignores readiness.
-	replicas := sc.Spec.Replicas
-	if replicas == 0 {
-		replicas = 1
-	}
+	// declaredReplicas, not a second copy of the same defaulting: this loop's
+	// ordinal range and the rotation grid's n MUST be the same number. The grid
+	// is only safe because every ordinal it is handed is below n — purgePhase
+	// returns an UNWRAPPED phase otherwise, which slapd refuses — so two
+	// independent spellings of "spec.replicas, or 1" is a correctness risk and
+	// not a tidiness one.
+	replicas := declaredReplicas(sc)
 	headlessSvc := sc.Name + "-headless"
 	healthyPods = map[string]bool{}
 	startupObs = make([]startupConfigObservation, 0, replicas)
@@ -455,7 +458,7 @@ func (r *SlapdDatabaseReconciler) applyToPods(
 	rotation := evaluateRotation(sc)
 
 	// RW pods.
-	for i := int32(0); i < replicas; i++ {
+	for i := range replicas {
 		podName := fmt.Sprintf("%s-%d", sc.Name, i)
 		host := fmt.Sprintf("%s.%s.%s.svc.%s",
 			podName, headlessSvc, sc.Namespace, r.ClusterDomain)
@@ -2495,14 +2498,11 @@ func (r *SlapdDatabaseReconciler) ensureReplicationUser(
 	}
 	replDN := "cn=replication," + sd.Spec.Suffix
 
-	replicas := sc.Spec.Replicas
-	if replicas == 0 {
-		replicas = 1
-	}
+	replicas := declaredReplicas(sc)
 	headlessSvc := sc.Name + "-headless"
 
 	// Try each RW pod.
-	for i := int32(0); i < replicas; i++ {
+	for i := range replicas {
 		host := fmt.Sprintf("%s-%d.%s.%s.svc.%s",
 			sc.Name, i, headlessSvc, sc.Namespace, r.ClusterDomain)
 		addr := host + ":" + strconv.Itoa(int(ldapContainerPort))
@@ -2915,10 +2915,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 ) (bool, *ridSegmentVerdict, error) {
 	log := logf.FromContext(ctx)
 
-	replicas := sc.Spec.Replicas
-	if replicas == 0 {
-		replicas = 1
-	}
+	replicas := declaredReplicas(sc)
 	// Skip only when there is genuinely no syncrepl work to do — i.e. no
 	// in-cluster mesh AND no external peers. Consumer-only mode (where the
 	// cluster pulls from externalPeers but produces no writes) MUST still
@@ -3090,7 +3087,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 	}
 
 	// Apply to RW pods.
-	for i := int32(0); i < replicas; i++ {
+	for i := range replicas {
 		podName := fmt.Sprintf("%s-%d", sc.Name, i)
 		host := fmt.Sprintf("%s-%d.%s.%s.svc.%s",
 			sc.Name, i, headlessSvc, sc.Namespace, r.ClusterDomain)

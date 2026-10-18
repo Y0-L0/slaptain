@@ -883,12 +883,65 @@ type SlapdClusterSpec struct {
 	// Prometheus metrics. Unset adds nothing to the pod.
 	// +optional
 	Monitoring SlapdMonitoringConfig `json:"monitoring,omitempty"`
-	// rotation configures the purge/write rotation of ADR-037: each pod purges
-	// its accesslogs at its own phase on an absolute time grid, and the write
-	// endpoint moves in lockstep so the pod taking writes is never the pod
-	// purging. Unset changes nothing — see SlapdRotationConfig.
+	// accesslogPurge is FORM A of the accesslog purge schedule: one interval,
+	// every pod purging together (ADR-024 R6, ADR-037 ninth amendment).
+	//
+	// The schedule is the cluster's because the cost is the POD's — all of a
+	// pod's databases purge in one window, so the thing being scheduled is that
+	// pod's contention. What each database KEEPS is still the database's, on
+	// SlapdDatabase.spec.replication.accesslogPurge.retention.
+	//
+	// Form B is spec.rotation, which staggers the pods and moves the write
+	// endpoint with them. THE TWO FORMS ARE MUTUALLY EXCLUSIVE: setting an
+	// interval here while spec.rotation.enabled is true is REFUSED with a
+	// condition, never silently preferred (the shape ADR-028 uses for meshRef
+	// beside an explicitly set derived field).
+	//
+	// Unset means the operator's default interval of 24h, which is what every
+	// cluster has always had.
+	// +optional
+	AccesslogPurge *SlapdAccesslogPurgeConfig `json:"accesslogPurge,omitempty"`
+	// rotation is FORM B of the accesslog purge schedule (ADR-037): each pod
+	// purges at its own phase on an absolute time grid, and the write endpoint
+	// moves in lockstep so the pod taking writes is never the pod purging. The
+	// interval becomes spec.replicas x slotLength. Unset changes nothing — see
+	// SlapdRotationConfig.
 	// +optional
 	Rotation SlapdRotationConfig `json:"rotation,omitempty"`
+}
+
+// SlapdAccesslogPurgeConfig is form A of the purge schedule: one interval for
+// the whole fleet, every pod purging at the same instants.
+//
+// It is the simple form and the one every cluster has implicitly run since
+// before ADR-037 — the operator's default interval is 24h, which is what the
+// old two-token default "7+00:00 1+00:00" spelled. Form B (spec.rotation)
+// staggers the pods and is what removes the write stall ADR-037 measured;
+// form A does not pretend to.
+//
+// The CEL rule carries interval's GRAMMAR check for the same reason
+// SlapdRotationConfig's does: controller-gen renders metav1.Duration as a bare
+// `type: string` and drops field-level validation markers on it.
+// +kubebuilder:validation:XValidation:rule="!has(self.interval) || self.interval.matches('^([0-9]+([.][0-9]+)?(ns|us|µs|ms|s|m|h))+$')",message="accesslogPurge.interval must be a Go duration such as 24h, 6h or 90m"
+type SlapdAccesslogPurgeConfig struct {
+	// interval is how often every pod sweeps its accesslog journals — slapd's
+	// <interval>, the second field of olcAccessLogPurge.
+	//
+	// Every pod purges on the same absolute grid, so every provider's purge
+	// window lands at the same instant, including the one taking writes. That
+	// is the configuration ADR-037 measured at a 30 s write stall per cycle and
+	// a 3,384 ms peak p99; spec.rotation is what moves it off the write path.
+	// Shortening this interval does NOT help — it was measured and refuted
+	// (15 s vs 5 min: 18x disk read, p99 2.1 ms to 143-230 ms, 2.2 % of load
+	// dropped, no throughput gained).
+	//
+	// Unset means the operator's default of 24h. A Go duration string, whole
+	// seconds only: olcAccessLogPurge's fields are [ddd+]hh:mm[:ss], so an
+	// interval finer than a second has no representation on the server and is
+	// reported by the operator rather than by the API server. A POINTER so an
+	// unset field does not serialise as "0s".
+	// +optional
+	Interval *metav1.Duration `json:"interval,omitempty"`
 }
 
 // SlapdMonitoringConfig configures the slapd exporter sidecar (ADR-033 Surface 3).
@@ -956,13 +1009,19 @@ type SlapdMonitoringConfig struct {
 // fixed and recomputing t = T/n would re-phase the entire fleet on every scale
 // event.
 //
-// WHERE THE AGE LIVES. olcAccessLogPurge has two owners under rotation: the
-// retention age stays per-database on SlapdDatabase.spec.replication.
-// accesslogPurge, while the interval and the phase are a schedule over pods and
-// live here. The operator composes the per-(pod, database) value from both. An
-// INTERVAL in the per-database field is then refused with a condition rather
-// than silently overridden, per ADR-024's rule that a field which cannot be
-// honoured is rejected and never ignored.
+// WHERE THE RETENTION LIVES. olcAccessLogPurge has three owners, decomposed by
+// ADR-024 R6: the retention age is the database's
+// (SlapdDatabase.spec.replication.accesslogPurge.retention), the interval is
+// the pod's and therefore the cluster's, and the phase is derived and nobody
+// declares it. The operator composes the per-(pod, database) value from them.
+// There is no declared interval on a database to conflict with this schedule,
+// which is what dissolves the defect the ninth amendment records rather than
+// patching it: with nothing to refuse there is no withhold, and with no
+// withhold there is no way for a database to end up with no purge value at all.
+//
+// MUTUALLY EXCLUSIVE WITH spec.accesslogPurge (form A). Declaring an interval
+// there while this block is enabled is refused with a condition, never silently
+// preferred.
 //
 // Databases ALIGN, they do not spread: a pod purges all of its accesslogs at
 // its own phase, concentrating its disturbance into the one window where it is
@@ -1021,7 +1080,7 @@ type SlapdRotationConfig struct {
 	// Set it no shorter than you can afford a purge to take: a purge still
 	// running when its next fire comes due makes the daemon skip that cycle, so
 	// the pod whose purge ran long is also the pod whose phase has moved. The
-	// bound at this end is d·t ≥ P — see writerOffset.
+	// bound at this end is (n−v)·t ≥ P — see slotsFromWriteToPurge.
 	//
 	// The operator derives the whole schedule from this one value — interval
 	// T = spec.replicas × t, phase ordinal × t — so there is no second number to
@@ -1067,37 +1126,42 @@ type SlapdRotationConfig struct {
 	// caused it.
 	// +optional
 	SlotLength *metav1.Duration `json:"slotLength,omitempty"`
-	// writerOffset is d, the number of slots between a pod's own purge and the
-	// slot in which it is the write target. Unset means the operator's default
-	// of n−1 (n = spec.replicas): the writer is the pod that purges NEXT, having
-	// had the longest time to work off its purge backlog and its replication
-	// lag. ADR-037's second amendment calls that "the preferred end and the one
-	// being measured first".
+	// slotsFromWriteToPurge is v, the SIGNED displacement in slots from a pod's
+	// write slot to its own purge slot, taken mod spec.replicas. So +1 means
+	// "purge the slot after writing", -1 means "purge the slot before writing",
+	// and -1 is the same answer as n-1 — which is the point of the sign: a bare
+	// count like "2 for a three-pod cluster" means n-1 only until somebody adds
+	// a pod, while -1 stays correct across every scale event.
 	//
-	// Valid range is [1, n−1]. d = 0 would make the write target the pod purging
-	// this slot, which is the whole thing the rotation avoids; the upper bound
-	// depends on spec.replicas and so cannot be expressed as a CRD marker — the
-	// operator clamps it and reports what it did.
+	// Unset means 1: purge the slot after writing. That is the configuration
+	// ADR-037 prefers and the one being measured first — the writer hands off
+	// and then immediately works its journal down, having just stopped taking
+	// writes. -1 is the other experiment, and 2 is the deferred cooldown one
+	// (a slot between writing and purging), so the ladder is 1, 2, 3 and reads
+	// correctly for a run nobody has done.
 	//
-	// Why a tunable rather than a fixed choice: ADR-037 bounds d at both ends
-	// and can evaluate only one of them. A pod must have finished purging before
-	// it writes (d·t ≥ P, for purge duration P, which is computable as
-	// T × write rate / delete rate) and writes must have drained before it
-	// purges again ((n−d)·t ≥ D, for drain time D). D HAS NO MEASURED VALUE AT
-	// ALL, so the sizing rule T ≥ P + D can only be half-evaluated today and d
-	// stays a parameter with a measured range rather than a decided number.
+	// THE RULE IS `v mod n != 0`, NOT a minimum. Zero and every multiple of n
+	// put the write on the pod that is purging, which is the one selection this
+	// whole feature exists to forbid. The rule needs spec.replicas, so it is
+	// the OPERATOR's to report on the RotationConfigured condition, not the API
+	// server's to refuse — and the operator names the slot the value RESOLVED
+	// to rather than echoing what was typed, since -1 and n-1 are the same
+	// answer and only one of them is what you wrote.
 	//
-	// What d costs: the capacity condition above assumes the purge may use the
-	// entire non-writing window, which is exactly d = n−1. At d = 1 it tightens
-	// to write rate ≤ delete rate × 1/n, so the setting that looks more cautious
-	// roughly halves the write ceiling at n = 2. The known cost of d = n−1 is
-	// that the writer purges immediately after its slot ends, carrying its
-	// freshest local writes with syncprov actively serving them; d = n−2 buys a
-	// cooldown slot, exists only for n ≥ 3, and nobody has measured whether it
-	// matters.
-	// +kubebuilder:validation:Minimum=1
+	// What v costs: ADR-037 bounds it at both ends and can evaluate only one.
+	// A pod must have finished purging before it writes again
+	// ((n-v)·t >= P, for purge duration P = T x write rate / delete rate) and
+	// writes must have drained before it purges ((v)·t >= D, for drain time D).
+	// D HAS NO MEASURED VALUE AT ALL, so the sizing rule T >= P + D can only be
+	// half-evaluated today and v stays a parameter with a measured range rather
+	// than a decided number.
+	//
+	// A name stating the two endpoints and the direction of travel is the only
+	// construction that survives a negative: "writeSlotsBeforePurge: -1" has to
+	// be parsed as "minus one slots before", every time. Here, after is
+	// positive and before is negative, and no convention paragraph is needed.
 	// +optional
-	WriterOffset *int32 `json:"writerOffset,omitempty"`
+	SlotsFromWriteToPurge *int32 `json:"slotsFromWriteToPurge,omitempty"`
 }
 
 // ExternalPeerReplicationState summarises the replication health of one external peer.

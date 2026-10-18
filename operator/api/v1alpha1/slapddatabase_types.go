@@ -223,62 +223,31 @@ type DatabaseReplicationConfig struct {
 	// +kubebuilder:validation:Enum=InMemory;Accesslog
 	// +optional
 	SyncprovSessionlogSource string `json:"syncprovSessionlogSource,omitempty"`
-	// accesslogPurge sets the purge policy on this database's accesslog change
-	// journal (olcAccessLogPurge; only used when deltaSync=true).
-	// Format: "<maxage> <interval>", e.g. "2+00:00 1+00:00" means purge entries
-	// older than 2 days, sweeping once a day.
+	// accesslogPurge decides what this database KEEPS in its accesslog change
+	// journal. It does not decide when the purge runs: that is a schedule over
+	// pods and belongs to the cluster (SlapdCluster.spec.accesslogPurge.interval,
+	// or spec.rotation when the schedule is staggered).
 	//
-	// Three states, with cluster rotation off (see below for what changes when
-	// it is on):
-	//   - unset ("") — the operator applies its default of "7+00:00 1+00:00":
-	//     keep 7 days, sweep daily. This is the normal case.
-	//   - "none" — no purging at all. The journal grows unbounded; you are
-	//     taking responsibility for it.
-	//   - any other value — used verbatim.
+	// ADR-024 R6: olcAccessLogPurge is one slapd directive —
+	// `logpurge <age> <interval> [<phase>]` — with three owners. The retention
+	// age bounds how far behind a consumer of THIS database may fall and is the
+	// database's. The interval is a scheduling cost paid by the POD, since all of
+	// a pod's databases purge together. The phase is derived per pod and nobody
+	// declares it. Keeping them in one string made this field's meaning depend on
+	// another resource's mode, and that produced an outage-class defect: a
+	// database declaring an interval on a cluster created with rotation already
+	// on ended up with NO purge value at all, on every pod.
 	//
-	// Why there is a default at all: an unpurged journal grows until it reaches
-	// its 8Gi map ceiling, and because the accesslog overlay sits in the DATA
-	// database's write path, the moment the journal cannot take a write neither
-	// can the data. That is a slow-motion outage, not a tuning wart, so "no
-	// opinion" is not an acceptable default.
+	// Unset means the operator's default: purging ON, keeping 7 days. "No
+	// opinion" is not an acceptable default here — an unpurged journal grows
+	// until it reaches its 8Gi map ceiling, and because the accesslog overlay
+	// sits in the DATA database's write path, the moment the journal cannot take
+	// a write neither can the data.
 	//
-	// Why 7 days: the window is how long a consumer may stay away and still
-	// resume from a delta instead of a full refresh, so it must cover a
-	// weekend-plus outage. On 2.7-default images the interaction between purging
-	// and a dormant consumer (upstream ITS#9580) is mitigated by the cookie-flush
-	// fix; clusters still on the -ol26 image pair carry elevated exposure and
-	// should treat a long consumer outage as needing a checked resync.
-	//
-	// WITH CLUSTER ROTATION ON (SlapdCluster.spec.rotation.enabled) THIS FIELD
-	// CARRIES THE AGE ONLY. Rotation makes the schedule a property of the
-	// cluster, not of a database: the interval is T = replicas × slotLength and
-	// each pod's purge phase is its own, so there is nothing per-database left
-	// to decide but how long to keep the entries (ADR-037, second amendment —
-	// "<age> is a per-database retention policy and stays on SlapdDatabase;
-	// <interval> and <phase> are a schedule over pods and move to the cluster").
-	// Databases then cannot disagree about a schedule they no longer own, and
-	// the operator needs no cross-resource validation to keep them consistent.
-	//
-	// So, with rotation on:
-	//   - unset ("") — the operator's default age, 7 days.
-	//   - "none" — still opts out entirely. No purging on this journal; the
-	//     rotation simply has nothing to do for it.
-	//   - an age alone, e.g. "2+00:00" — honoured.
-	//   - a value carrying an INTERVAL, e.g. "2+00:00 1+00:00" — REFUSED, with
-	//     a condition naming this database. It is not silently overridden by
-	//     the cluster's schedule: a field that cannot be honoured is rejected
-	//     or converged, never ignored (ADR-024). You get told which value the
-	//     operator could not keep, rather than discovering months later that
-	//     the interval you set has never been in force.
-	//
-	// Rotation off — the default, and what every existing deployment has — is
-	// unchanged in every respect, including that a two-field value is the
-	// normal thing to write.
-	//
-	// Converged on every reconcile: a later edit is applied to pods whose
-	// accesslog overlay already exists, and "none" removes the attribute.
+	// Only used when deltaSync=true; a database with no change journal has
+	// nothing to purge.
 	// +optional
-	AccesslogPurge string `json:"accesslogPurge,omitempty"`
+	AccesslogPurge *AccesslogPurgeConfig `json:"accesslogPurge,omitempty"`
 	// externalAccesslogSuffix overrides the accesslog suffix used as `logbase`
 	// in the delta-syncrepl stanzas pointing at spec.replication.externalPeers
 	// on the parent SlapdCluster.
@@ -345,6 +314,71 @@ type BootstrapS3Source struct {
 	// artifact to restore.
 	// +required
 	Key string `json:"key"`
+}
+
+// AccesslogPurgeConfig is the per-database half of olcAccessLogPurge: WHAT TO
+// KEEP in this database's accesslog change journal (ADR-024 R6, ADR-037 ninth
+// amendment).
+//
+// The other half — WHEN THE PURGE RUNS — is a schedule over pods and lives on
+// the SlapdCluster: spec.accesslogPurge.interval for one schedule the whole
+// fleet shares, or spec.rotation for a staggered one that also moves the write
+// endpoint. The operator composes the attribute slapd actually sees from both
+// halves, so what you read back in cn=config is a value nobody typed:
+//
+//	olcAccessLogPurge: <retention> <interval> [<phase>]
+//	                   ^ this CR    ^ the cluster
+//
+// ENABLED SITS HERE, NEXT TO THE ACTION, NOT NEXT TO THE DURATION. An
+// `accesslogRetention: {enabled: false}` would read as "no retention — purge
+// everything", which is the exact opposite of what it means. In the one field
+// whose failure mode is an unbounded journal, that inversion is not a thing to
+// leave lying around (ADR-037 ninth amendment).
+//
+// The CEL rule below carries retention's GRAMMAR check. It cannot live on the
+// field: controller-gen renders metav1.Duration as a bare `type: string` and
+// silently DROPS field-level validation markers on it (verified against
+// controller-gen v0.20.0 — the same Pattern marker renders on a *string field
+// and vanishes on this one). Without it, `retention: banana` is admitted and
+// the error surfaces much later as a decode failure in whatever typed client
+// reads the object.
+// +kubebuilder:validation:XValidation:rule="!has(self.retention) || self.retention.matches('^([0-9]+([.][0-9]+)?(ns|us|\u00b5s|ms|s|m|h))+$')",message="accesslogPurge.retention must be a Go duration such as 168h, 24h or 30m"
+type AccesslogPurgeConfig struct {
+	// enabled turns purging of this database's change journal on or off.
+	//
+	// UNSET MEANS TRUE. That is the one default in this API that is not "do
+	// nothing", and it is deliberate: the journal sits in the data database's
+	// write path, so an unpurged journal is a slow-motion outage rather than a
+	// tuning wart (ADR-024 R4). `enabled: false` is the explicit way to say
+	// "never purge, keep forever" and take responsibility for the growth — it
+	// replaces the old "none" sentinel.
+	//
+	// A pointer so that an explicit false is distinguishable from silence, for
+	// the same reason spec.logLevel is one.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+	// retention is how long an entry stays in this database's change journal —
+	// slapd's <age>, the first field of olcAccessLogPurge.
+	//
+	// It is the window in which a consumer that has been away may still resume
+	// from a delta instead of paying a full refresh, so size it to cover the
+	// longest outage you intend to survive without a checked resync. The
+	// journal's size is retention x write rate; the interval does not appear in
+	// that product, which is why retention is the database's and the interval
+	// is not.
+	//
+	// Unset means the operator's default of 168h (7 days) — long enough for a
+	// weekend-plus consumer outage.
+	//
+	// A Go duration string: "168h", "24h", "30m". Whole seconds only:
+	// olcAccessLogPurge's fields are [ddd+]hh:mm[:ss], so a retention that does
+	// not land on a second has no representation on the server and is reported
+	// by the operator, which is the half of the check the CEL rule above cannot
+	// make. A POINTER because metav1.Duration is a struct and omitempty does
+	// not apply to one — the value form would serialise an unset field as "0s",
+	// claiming a retention nobody chose.
+	// +optional
+	Retention *metav1.Duration `json:"retention,omitempty"`
 }
 
 // DatabaseSeedConfig defines initial data to populate in the database.

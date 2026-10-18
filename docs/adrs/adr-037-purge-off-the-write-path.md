@@ -1026,3 +1026,72 @@ What this does not excuse: the sizing guidance has to say so. A deployment
 cannot be expected to infer the connection-lifetime requirement from the
 absence of a warning, and `docs/TUNING.md` states it as a prerequisite rather
 than as a risk.
+
+## Amendment, 2026-10-18 (eighth): the endpoint moves
+
+The write Service rotates. What the implementation decided beyond this ADR,
+and what the first live run showed.
+
+### Turning the rotation off widens the endpoint; it does not delete it
+
+`<cluster>-write` is never created while rotation is off, so a cluster that
+never rotated is byte-identical to one on an operator without this feature.
+When rotation is turned off on a cluster that *was* rotating, the Service
+keeps its name and loses the pod-name selector entry, becoming an alias of the
+client-facing Service: writes keep flowing and spread across the read-write
+fleet.
+
+Both alternatives are worse, in the same way and for the same reason — they
+punish clients for having taken the documented advice:
+
+- **Deleting it** turns an operator-side configuration change into a write
+  outage at every client pointed at the endpoint this ADR told them to use.
+- **Freezing the selector** pins every write to whichever pod held it last —
+  a pod whose purge nothing phases any more. That is exactly the stall this
+  ADR exists to remove, arriving at the moment the user believes they have
+  returned to the previous behaviour.
+
+### Readiness is read from Pods
+
+`eligibleForWrites` needs per-pod readiness and this operator had only the
+aggregate `ReadyReplicas`. The reading is a Pod list: the RBAC already exists,
+controller-runtime serves it from the informer cache, and the decision reduces
+to a pure function over `[]corev1.Pod`. EndpointSlices would have cost new
+RBAC, a new watch, and a hop through `targetRef` to recover an ordinal.
+
+One trap, worth stating because it is silent: a pod name must be checked
+against *this* cluster before its ordinal is believed. Read from the right
+alone, `<cluster>-readonly-0` parses as ordinal 0, and the write endpoint
+would be steered onto a read-only consumer.
+
+### The requeue cannot live inside the replication gate
+
+The cluster controller's steady-state requeue is conditional on
+`spec.replication.enabled`; without it the reconcile returns no requeue at
+all. A rotation requeue returned from inside that branch would rotate
+replicated clusters and **silently never rotate the others**. The two cadences
+are merged at the end of the pass instead, taking the sooner, with a test that
+catches the regression. With rotation off the merged result is unchanged from
+before the feature existed.
+
+### What the live run measured
+
+The endpoint moves on the grid, and a connection opened after the move reaches
+the new target — the claim this feature makes, now observed rather than
+assumed. A connection held open across the move keeps writing to the old pod,
+which is the precondition the seventh amendment records, confirmed rather than
+discovered.
+
+One finding that will catch the next person who measures this: a fresh
+connection dialled 16 ms after the selector patch still reached the **old**
+pod. That is the endpoint's propagation delay — kube-proxy had not yet
+reprogrammed — and it is not a client failing to follow. A measurement that
+does not wait for the endpoint to converge will read as a failure of the whole
+design when it is nothing of the kind.
+
+### Not yet reachable through a chart
+
+No chart renders `spec.rotation`, so the feature can only be enabled by
+editing the CR. The e2e turns it on by patching. That is a packaging gap, not
+a design one, and it is the next small piece of work rather than something
+this ADR leaves open.

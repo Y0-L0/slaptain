@@ -129,14 +129,40 @@ var _ = Describe("ADR-037: the write endpoint rotates",
 			}
 			rwPods = rwPodNames(ctx, "slapd")
 
+			// This container needs form B, and the two forms of the schedule
+			// are mutually exclusive (ADR-024 R6, ADR-037 ninth amendment): a
+			// cluster deployed with spec.accesslogPurge.interval — form A,
+			// which E2E_PURGE_INTERVAL produces and which most upgrading
+			// clusters will carry — makes "turn spec.rotation on" a
+			// ScheduleDeclaredTwice state. The operator then refuses the
+			// rotation and widens the write Service to the whole fleet, so the
+			// selector is empty and every spec below fails in BeforeAll with a
+			// message about the grid. Measured on a three-site mesh: form A
+			// cost all six write-rotation specs.
+			//
+			// So the container takes BOTH halves of the schedule for its
+			// duration and restores BOTH. That is the same save-mutate-restore
+			// the rotation field already used, extended to the one field that
+			// cannot coexist with it — not a weakened assertion: every check
+			// below still runs, unchanged, against a cluster that really is
+			// rotating.
 			By("turning spec.rotation on with a slot length a test can sit through")
 			original := sc.Spec.Rotation
+			originalPurge := sc.Spec.AccesslogPurge.DeepCopy()
+			if originalPurge != nil && originalPurge.Interval != nil {
+				By("clearing spec.accesslogPurge.interval: form A and form B are mutually exclusive")
+				cur := &ldapv1alpha1.SlapdCluster{}
+				Expect(crdClient.Get(ctx, nsName(namespace, "slapd"), cur)).To(Succeed())
+				cur.Spec.AccesslogPurge = nil
+				Expect(crdClient.Update(ctx, cur)).To(Succeed())
+			}
 			setRotation(ctx, true, slotLength)
 			DeferCleanup(func(ctx SpecContext) {
-				By("restoring the cluster's original spec.rotation")
+				By("restoring the cluster's original spec.rotation and spec.accesslogPurge")
 				cur := &ldapv1alpha1.SlapdCluster{}
 				if err := crdClient.Get(ctx, nsName(namespace, "slapd"), cur); err == nil {
 					cur.Spec.Rotation = original
+					cur.Spec.AccesslogPurge = originalPurge
 					Expect(crdClient.Update(ctx, cur)).To(Succeed())
 				}
 			})

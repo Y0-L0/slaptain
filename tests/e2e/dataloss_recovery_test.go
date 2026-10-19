@@ -204,26 +204,44 @@ var _ = Describe("data loss recovery via replication",
 
 	// ── ITS#9398: the recovery must not trigger a stale-cookie refresh storm ──
 	//
-	// This is the assertion that justifies running OpenLDAP 2.7 (ADR-021). On
-	// 2.6 the spec above converges *in fact* but leaves the mesh in a refresh
-	// loop: the refreshed pod's accesslog is filled in receive order, so
-	// syncprov's mincsn lookup fails on every reconnect and every peer answers
-	// `err=4096 text=sync cookie is stale`. Measured on 2.6.10: ~14k
-	// connections in 27 s, hundreds of millicores per pod, thousands of these
-	// lines — see docs/INVESTIGATION-replication-divergence-after-dataloss-and-restart.md.
-	// Upstream fixed it in commit 414866b8, released only in 2.7.0/2.7.1.
+	// A pod rebuilt from the mesh has its accesslog filled by a full refresh,
+	// in RECEIVE order. syncprov's minCSN lookup over that log then fails, and
+	// the pod answers every consumer of it `err=4096 text=sync cookie is
+	// stale` — forever, while every other health signal, CSN convergence
+	// included, reads green. `slctl inspect`'s accesslog-mincsn check is the
+	// detector (a minCSN sid the contextCSN does not track);
+	// docs/ITS-9398-STORM-SIGNATURE.md is the signature.
 	//
-	// Red-first honesty (measured 2026-09-11): this assertion has never been
-	// observed red. A fresh single-site cluster counts 0 on 2.6 (every local
-	// SID has a recent CSN); a fresh three-site mesh counts 0 too (the suite's
-	// own probes keep SIDs warm); and even engineered dormancy — an idle-site
-	// SID aged past an aggressive accesslogPurge, six armed triggers under
-	// live churn (tests/e2e-storm-repro.sh) — produced only isolated,
-	// self-healing staleness (3 lines, twice). The persistent storm needs the
-	// refresh to regress a contextCSN on the refreshed node (the replay-order
-	// race upstream's 414866b8 FIXME describes). The threshold of 50 cleanly
-	// separates that measured isolated staleness from the measured storm
-	// (thousands); see ADR-021 before "fixing" a red by raising it.
+	// WHAT THIS IS NOT, because both readings were written down here before
+	// they were measured:
+	//
+	//   NOT 2.6-only, and NOT fixed by moving to 2.7. This comment used to say
+	//   the spec "justifies running OpenLDAP 2.7" and that on 2.7.1 the count
+	//   "should be ~0 everywhere". It is red on 2.7.1: 4563 lines on
+	//   2026-10-11, then 2473 and 9237 lines on a three-site mesh on
+	//   2026-10-18 — twice in one session, on the same site both times. The
+	//   2.6.10 measurements below are real and the upstream fix 414866b8 is
+	//   real, but they belong to ITS#9580 (dormancy), which is a different
+	//   failure from the one this spec counts. ITS#9398 is fixed in no
+	//   release, master included: there is nothing to upgrade to.
+	//
+	//   NOT the accesslog purge. Checked directly on the affected pod
+	//   (2026-10-18): the OLDEST surviving journal entry was written at the
+	//   pod's own birth, so the purge had deleted nothing at all, and the
+	//   storm reproduced identically with the ADR-037 purge rotation on and
+	//   with a single fleet-wide interval. Do not read a red here as a purge
+	//   regression.
+	//
+	// Historical measurements, kept because they bound the threshold. On
+	// 2.6.10 the ITS#9580 dormancy loop produced ~14k connections in 27 s and
+	// hundreds of millicores per pod — see
+	// docs/INVESTIGATION-replication-divergence-after-dataloss-and-restart.md.
+	// Engineered dormancy (an idle-site SID aged past an aggressive
+	// accesslogPurge, six armed triggers under live churn,
+	// tests/e2e-storm-repro.sh) produced only isolated, self-healing staleness
+	// — 3 lines, twice. The threshold of 50 separates that legitimate isolated
+	// staleness from the storm (thousands, every time it has fired). Raising
+	// it hides the outage rather than fixing it; see ADR-021 and ADR-038.
 	It("no 'sync cookie is stale' storm follows the recovery (ITS#9398, ADR-021)",
 		func(ctx SpecContext) {
 			const needle = "sync cookie is stale"
@@ -255,10 +273,20 @@ var _ = Describe("data loss recovery via replication",
 
 			Expect(total).To(BeNumerically("<", maxOccurrences),
 				"%d %q lines across %v since the PVC-loss recovery (limit %d). This is the "+
-					"ITS#9398 refresh storm: OpenLDAP 2.6 cannot serve a delta-sync cookie from "+
-					"an accesslog that a full refresh filled in receive order. Reproduces on "+
-					"-ol26 images only in a multi-site mesh with a dormant SID; on 2.7.1 it "+
-					"should be ~0 everywhere. See ADR-021.",
+					"ITS#9398 refresh storm: a rebuilt pod's accesslog is filled by a full "+
+					"refresh in receive order, and the pod then refuses every consumer of that "+
+					"log with a stale cookie while every other health signal — CSN convergence "+
+					"included — reads green. Confirm it with `slctl inspect` "+
+					"(check accesslog-mincsn: a minCSN sid its contextCSN does not track) and "+
+					"see docs/ITS-9398-STORM-SIGNATURE.md. "+
+					"NOT 2.6-only and NOT fixed by upgrading: measured on 2.7.1 at 4563 lines "+
+					"(2026-10-11) and reproduced twice on a three-site mesh on 2026-10-18 at "+
+					"2473 and 9237 lines, on the same site both times. "+
+					"NOT caused by the accesslog purge: on the affected pod the oldest journal "+
+					"entry was the pod's own birth, so the purge had deleted nothing, and the "+
+					"storm reproduced identically with the purge rotation on and off. "+
+					"Rebuilding the pod (ADR-012 case 2) clears it; there is no release to "+
+					"upgrade to. See ADR-021 and ADR-038.",
 				total, needle, pods, maxOccurrences)
 		}, NodeTimeout(3*time.Minute))
 

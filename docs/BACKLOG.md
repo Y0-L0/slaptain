@@ -3033,3 +3033,62 @@ pre-release check rather than a pre-merge one.
 - Watch the same things the fresh cycles watched: the delta-sync lost-sync
   grep, `accesslog-mincsn` per site, `DataPresent`, and the invariant that no
   replicated database is ever left without a purge value.
+
+## The rotation-aware read Service, waiting on numbers it does not have
+
+ADR-037's second amendment designs it and `docs/PURGE-ROTATION-PLAN.md` puts it
+out of scope deliberately: reads go to the read-only replicas **plus the
+current writer**. Nothing in the rotation work built it, and reads still go to
+`<cluster>` (the whole fleet) and `<cluster>-readonly`.
+
+**The argument is freshness, not latency.** Only one provider purges at a time,
+so latency alone would justify excluding exactly that pod. The real claim is
+that a provider which has just purged is working off replication lag — measured
+peaking near 35 s — while under the preferred offset the writer is by
+construction the most-recovered provider.
+
+**Its cost scales inversely with `readReplicas`.** At `readReplicas: 0` the
+read service collapses onto one pod, which on a read-dominated profile is a
+cliff. So the default would have to follow `readReplicas`, with "every pod that
+is not purging" as the other mode — one of the few places where the right
+answer is a property of the deployment rather than of the design.
+
+### What it is waiting for
+
+Two numbers, both of which the load work should produce:
+
+- **replication lag on a just-purged provider**, to say whether excluding it
+  buys enough freshness to pay for the lost read capacity;
+- **read-path cost at a given `readReplicas`**, to size the default.
+
+And one contradiction to resolve first. slapload's `CLAUDE.md` records *"a purge
+stall blocks reads, not just writes"* (20,136 VUs parked at 138k ops/s);
+ADR-037 records reads flowing at ~75 % while writes block. Both are measured.
+If slapload's reading holds for the purging pod specifically, this feature is
+worth materially more than its own ADR currently argues — so resolve it before
+sizing anything.
+
+### Also parked with it
+
+- `slotsFromWriteToPurge: 2`, the cooldown slot — only meaningful at `n >= 3`,
+  and every measured arm so far has been 2+2. Unknown rather than guessed.
+- Upstreaming the `logpurge` phase patch. It is ours and local; the packaging
+  fork carries it.
+
+## A context the lab file does not describe can collide with a real site
+
+`tests/e2e.sh`'s `assign_site_names` gives an undescribed context `site-<idx>`
+by position. With a lab file present, `config <described-ctx> <undescribed-ctx>`
+therefore names the second one `site-2` at index 1 — which collides with the
+lab's own `site-2` if it has one. Two sites, one name, one serverID slot.
+
+Pre-existing, found while fixing the adjacent topology disagreement, and **now
+at least visible** in the `config` dump rather than silent — which is why it is
+recorded here rather than fixed in passing.
+
+### Shape of a fix (not written)
+
+- Refuse a context the lab file does not describe when a lab file is in use, or
+  assign it a name provably outside the lab's own set.
+- Red first: `config` over one described and one undescribed context, asserted
+  to produce two distinct site names and two distinct `serverIDIndex` values.

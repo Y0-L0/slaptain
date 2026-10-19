@@ -1678,6 +1678,23 @@ CONTEXTS=("$@")
 
 # No context given → the lab file's site list (all sites, multi-site when
 # N≥2), else single-site on the current kubectl context.
+#
+# The else branch is the quiet one, and it has cost real validation time: a run
+# INTENDED as multi-site silently becomes single-site, the cross-site thing
+# under test never happens, and the output reads clean all the way to the
+# summary. It is not that the message was missing — it is that "using current
+# context: <ctx>" looks exactly like a normal line, and multisite=0 only shows up
+# buried in `config`.
+#
+# The recurring cause is structural rather than anybody's mistake: lab.yaml is
+# gitignored BY DESIGN, so it does not exist in a git worktree. Every
+# worktree-based run therefore takes this branch unless the file is copied in.
+#
+# So an IMPLICIT single-site fallback says so unmistakably and pauses: it is
+# not refused, because "run against whatever I am pointed at" is a legitimate
+# thing to want, but it cannot slip past as if it were the intent. Naming the
+# contexts explicitly (./tests/e2e.sh <cmd> ctx) never reaches this and never
+# pauses; E2E_ASSUME_SINGLE_SITE=1 skips the pause for scripted single-site use.
 if [[ ${#CONTEXTS[@]} -lt 1 ]]; then
     if [[ ${#LAB_CONTEXTS[@]} -ge 1 ]]; then
         CONTEXTS=("${LAB_CONTEXTS[@]}")
@@ -1686,7 +1703,45 @@ if [[ ${#CONTEXTS[@]} -lt 1 ]]; then
         current_ctx=$(kubectl config current-context 2>/dev/null || true)
         [[ -z "$current_ctx" ]] && die "No context given and no current kubectl context is set"
         CONTEXTS=("$current_ctx")
-        log "No context given — using current context: $current_ctx"
+
+        _why="no lab config file was found"
+        if [[ -n "${E2E_CONFIG:-}" ]]; then
+            _why="the lab config $E2E_CONFIG named no sites"
+        fi
+        printf '\n' >&2
+        printf '\033[1;33m%s\033[0m\n' \
+            "╔══════════════════════════════════════════════════════════════════════════╗" >&2
+        printf '\033[1;33m%s\033[0m\n' \
+            "║  THIS RUN IS SINGLE-SITE. It was not asked to be.                        ║" >&2
+        printf '\033[1;33m%s\033[0m\n' \
+            "╚══════════════════════════════════════════════════════════════════════════╝" >&2
+        {
+            echo "  No context was given on the command line and $_why,"
+            echo "  so the run falls back to the current kubectl context:"
+            echo
+            echo "      $current_ctx"
+            echo
+            echo "  Nothing cross-site is exercised: no external peers, no cross-site"
+            echo "  replication, no mesh convergence. A replication-path change validated"
+            echo "  only here is NOT validated (see CLAUDE.md, Test Discipline)."
+            echo
+            echo "  If you meant multi-site, do one of:"
+            echo "      ./tests/e2e.sh $subcommand <ctx1> <ctx2> <ctx3>"
+            echo "      E2E_CONFIG=/path/to/lab.yaml ./tests/e2e.sh $subcommand"
+            echo
+            echo "  NOTE: lab.yaml is gitignored by design, so it does not exist inside a"
+            echo "  git worktree. If you are in one, copy it in from the main checkout."
+            echo
+        } >&2
+        if [[ "${E2E_ASSUME_SINGLE_SITE:-0}" == "1" ]]; then
+            warn "E2E_ASSUME_SINGLE_SITE=1 — proceeding single-site without pausing"
+        else
+            echo "  Continuing single-site in 10s — Ctrl-C to abort." >&2
+            echo "  (set E2E_ASSUME_SINGLE_SITE=1 to skip this pause)" >&2
+            echo >&2
+            sleep 10
+        fi
+        log "Proceeding single-site on current context: $current_ctx"
     fi
 fi
 

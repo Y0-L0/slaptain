@@ -168,11 +168,36 @@ var _ = Describe("ADR-037: the write endpoint rotates",
 			DeferCleanup(func(ctx SpecContext) {
 				By("restoring the cluster's original spec.rotation and spec.accesslogPurge")
 				cur := &ldapv1alpha1.SlapdCluster{}
-				if err := crdClient.Get(ctx, nsName(namespace, "slapd"), cur); err == nil {
-					cur.Spec.Rotation = original
-					cur.Spec.AccesslogPurge = originalPurge
-					Expect(crdClient.Update(ctx, cur)).To(Succeed())
+				if err := crdClient.Get(ctx, nsName(namespace, "slapd"), cur); err != nil {
+					return
 				}
+				cur.Spec.Rotation = original
+				cur.Spec.AccesslogPurge = originalPurge
+				Expect(crdClient.Update(ctx, cur)).To(Succeed())
+
+				// A SPEC THAT MUTATES SHARED CLUSTER STATE LEAVES IT CONVERGED.
+				//
+				// This container is the only one in the suite that edits the
+				// fixture's schedule, and cn=config is where the edit lands —
+				// shared with overlay_tunables_test.go, which asserts a
+				// CONVERGED olcAccessLogPurge on every RW pod. Ginkgo
+				// randomises top-level containers, so when this one runs first
+				// the restore above used to return while the operator had not
+				// yet rewritten a single pod: the other container's purge spec
+				// read cn=config 26 ms later and indicted a fleet that was
+				// merely still moving. Observed red at seed 1792387631 with no
+				// conflict present; the green at other seeds was luck.
+				//
+				// The fix belongs here and not in the reader. Asserting a
+				// converged state is the right thing for that spec to assert,
+				// and wrapping it in an Eventually would paper over a spec that
+				// returns while the cluster is still in motion — which is a
+				// defect whoever writes the NEXT reader inherits. So this
+				// cleanup finishes its own work: it waits until the operator
+				// has put back what the restored spec says, pod by pod, before
+				// the container returns.
+				By("waiting for the restored schedule to reach every RW pod before returning")
+				waitScheduleConverged(ctx, original, originalPurge)
 			})
 
 			// The cluster was on the chart's production-shaped grid until the
@@ -658,3 +683,104 @@ var _ = Describe("ADR-037: the write endpoint rotates",
 				"a retired write endpoint that resolves to one pod or none has not been retired")
 		})
 	})
+
+// waitScheduleConverged blocks until the cluster's purge schedule — the one the
+// SlapdCluster spec declares after a restore — is on every RW pod of every
+// replicated database.
+//
+// It exists for the cleanup above, and the invariant it enforces is general: a
+// spec that perturbs shared cluster state leaves that state converged, so the
+// next spec to read it is reading a settled cluster rather than racing one.
+// Written as a wait on the ATTRIBUTE and not on a condition alone, because the
+// condition is the operator's claim and the attribute is the thing the other
+// container actually reads.
+//
+// The expectation is recomputed from the restored spec rather than remembered,
+// so it is right whether the fixture was deployed with rotation on
+// (E2E_ROTATION=1 — three fields come back), with a flat interval
+// (E2E_PURGE_INTERVAL — two fields, that interval), or with neither (two
+// fields, the operator's 24h default).
+func waitScheduleConverged(
+	ctx SpecContext,
+	rotation ldapv1alpha1.SlapdRotationConfig,
+	purge *ldapv1alpha1.SlapdAccesslogPurgeConfig,
+) {
+	sc := &ldapv1alpha1.SlapdCluster{}
+	Expect(crdClient.Get(ctx, nsName(namespace, "slapd"), sc)).To(Succeed())
+	replicas := sc.Spec.Replicas
+	if replicas == 0 {
+		replicas = 1
+	}
+	if !sc.Spec.Replication.Enabled || sc.IsConsumerOnly() {
+		return // no accesslog overlay to converge
+	}
+
+	// The restored grid. Form A and form B are mutually exclusive (ADR-024 R6):
+	// declaring both is refused, nothing is staggered, and the fleet falls back
+	// to the operator's default interval — so a cluster that carried
+	// spec.accesslogPurge.interval all along comes back flat, not rotating.
+	declaredInterval := purge != nil && purge.Interval != nil && purge.Interval.Duration > 0
+	slot := time.Duration(0)
+	if rotation.SlotLength != nil {
+		slot = rotation.SlotLength.Duration
+	}
+	phased := rotation.Enabled != nil && *rotation.Enabled &&
+		slot > 0 && slot%time.Second == 0 && !declaredInterval
+
+	interval := 24 * time.Hour
+	switch {
+	case phased:
+		interval = time.Duration(replicas) * slot
+	case declaredInterval:
+		interval = purge.Interval.Duration
+	}
+
+	list := &ldapv1alpha1.SlapdDatabaseList{}
+	Expect(crdClient.List(ctx, list)).To(Succeed())
+	var dbs []ldapv1alpha1.SlapdDatabase
+	for _, sd := range list.Items {
+		if sd.Namespace == namespace && sd.Spec.ClusterRef == "slapd" &&
+			(&sd).DeltaSyncEnabled() && !purgeDisabled(sd) {
+			dbs = append(dbs, sd)
+		}
+	}
+	if len(dbs) == 0 {
+		return
+	}
+	pods := rwPodNames(ctx, "slapd")
+
+	Eventually(ctx, func() []string {
+		var pending []string
+		for i, pod := range pods {
+			conn, err := tryDialPodConfig(pod)
+			if err != nil {
+				pending = append(pending, fmt.Sprintf("%s: %v", pod, err))
+				continue
+			}
+			mdbs := observedMdbDatabases(conn)
+			for _, sd := range dbs {
+				want := wantPurgeValue(sd, interval,
+					time.Duration(i)*slot, phased)
+				dataDB, ok := findMdb(mdbs, sd.Spec.Suffix)
+				if !ok {
+					pending = append(pending,
+						fmt.Sprintf("%s/%s: no data database", pod, sd.Name))
+					continue
+				}
+				_, values := overlayAttrValues(conn, dataDB.dn,
+					"(objectClass=olcAccessLogConfig)", "olcAccessLogPurge")
+				if len(values) != 1 || values[0] != want {
+					pending = append(pending, fmt.Sprintf(
+						"%s/%s: olcAccessLogPurge %v, want %q",
+						pod, sd.Name, values, want))
+				}
+			}
+			conn.Close()
+		}
+		return pending
+	}).WithTimeout(4*time.Minute).WithPolling(3*time.Second).Should(BeEmpty(),
+		"the restored purge schedule never reached every RW pod. This container "+
+			"mutated spec.rotation/spec.accesslogPurge and must leave them converged "+
+			"before it returns — a later spec reading cn=config would otherwise "+
+			"indict a fleet that is merely still moving")
+}

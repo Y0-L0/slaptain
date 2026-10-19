@@ -63,6 +63,19 @@ const (
 	// No purging on this journal at all; the user has taken responsibility for
 	// its growth. A good state, reported as True.
 	reasonPurgeDisabled = "PurgeDisabled"
+	// reasonRotationNotInForce: spec.rotation is DECLARED and the cluster's
+	// rotation gate refused it, so nothing is staggered and every pod is on the
+	// fallback interval. True, because that is a bounded journal on every pod —
+	// which is all this condition is about.
+	//
+	// It exists because the alternative is reporting it as reasonConverged, and
+	// the only honest message for reasonConverged says the rotation is OFF. It
+	// is not off: the user set the field, and the thing to go and read is
+	// RotationConfigured on the SlapdCluster. One reason per state, so that
+	// "nothing is staggered because you asked for nothing" and "nothing is
+	// staggered because what you asked for was refused" cannot be read as the
+	// same sentence.
+	reasonRotationNotInForce = "RotationNotInForce"
 )
 
 // defaultPurgeRetention is how long an entry stays in a change journal when the
@@ -282,6 +295,22 @@ func aggregateAccesslogPurgeConverged(
 		return metav1.ConditionUnknown, reasonNoReachablePod,
 			fmt.Sprintf("could not read or write the accesslog overlay on any pod, so the purge "+
 				"schedule could not be verified%s", unreadNote)
+
+	// Rotation DECLARED and refused. The effect is the one above — a flat
+	// interval on every pod — but the cause is the opposite, and saying
+	// "spec.rotation is off" about a cluster that has spec.rotation set sends
+	// the reader to the one field that is already what they wanted. The fault
+	// itself is RotationConfigured's to state; this condition names it and
+	// stops, so one fault is reported once.
+	case plan.Status == metav1.ConditionFalse:
+		return metav1.ConditionTrue, reasonRotationNotInForce,
+			fmt.Sprintf("every one of the %d pod(s) read purges this journal every %s, all of "+
+				"them together. The cluster DECLARES spec.rotation, and it is not in force: "+
+				"%s on the SlapdCluster reports %s. Until that is resolved nothing is staggered "+
+				"and the write endpoint does not move, so this journal is bounded but the purge "+
+				"still runs on the pod taking writes (ADR-037)%s",
+				len(assessed), formatLogAge(plan.Interval),
+				rotationConfiguredCondition, plan.Reason, unreadNote)
 
 	case !plan.Active:
 		return metav1.ConditionTrue, reasonConverged,

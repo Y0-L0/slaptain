@@ -54,6 +54,19 @@ func flatPlan(interval time.Duration) rotationPlan {
 	return rotationPlan{Interval: interval, Replicas: 3}
 }
 
+// refusedPlan is spec.rotation DECLARED and not in force: the gate reported
+// ConditionFalse, nothing is staggered, and every pod is on the fallback
+// interval. It is not the same state as "rotation is off" and must not be
+// described as one — the user has a spec.rotation block, and the field to go
+// and look at is the one RotationConfigured names.
+func refusedPlan(reason string, interval time.Duration) rotationPlan {
+	return rotationPlan{
+		Interval: interval, Replicas: 3,
+		Status: metav1.ConditionFalse, Reason: reason,
+		Message: "the gate's own words, which are not this condition's to repeat",
+	}
+}
+
 // The defaults are the whole point of R5's half of this: an unpurged journal
 // grows to its map ceiling and then stops taking writes — and because the
 // accesslog overlay sits in the DATA write path, data writes stop with it.
@@ -478,7 +491,33 @@ func TestAggregateAccesslogPurgeConverged(t *testing.T) {
 			obs:        []purgePhaseObservation{{pod: testPod0, assessed: true}},
 			wantStatus: metav1.ConditionTrue,
 			wantReason: reasonConverged,
-			mustSay:    []string{wantDefaultIntervalRendered, "together"},
+			mustSay:    []string{wantDefaultIntervalRendered, "together", "spec.rotation is off"},
+			mustNotSay: []string{rotationConfiguredCondition},
+		},
+		{
+			// M11 finding 2. Under the mutually-exclusive conflict
+			// (spec.accesslogPurge.interval declared beside
+			// spec.rotation.enabled: true) this condition reported
+			// True/Converged with the words "the cluster's spec.rotation is
+			// off". It is not off. It is ON, and REFUSED — and a reader who
+			// follows that sentence goes and looks at the one field that is
+			// already set the way they wanted it.
+			//
+			// The EFFECT stays True: every pod really does carry a flat
+			// interval and no journal is unpurged, which is this condition's
+			// subject. The fault itself belongs to RotationConfigured on the
+			// SlapdCluster and is not restated here — it is pointed at.
+			name:       "rotation declared and refused is not rotation off",
+			plan:       refusedPlan(reasonScheduleDeclaredTwice, defaultPurgeInterval),
+			purging:    true,
+			obs:        []purgePhaseObservation{{pod: testPod0, assessed: true}},
+			wantStatus: metav1.ConditionTrue,
+			wantReason: reasonRotationNotInForce,
+			mustSay: []string{
+				wantDefaultIntervalRendered, "together",
+				rotationConfiguredCondition, reasonScheduleDeclaredTwice,
+			},
+			mustNotSay: []string{"spec.rotation is off"},
 		},
 		{
 			name:       "rotation on and every pod took its phase",

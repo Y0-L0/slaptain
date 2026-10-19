@@ -56,8 +56,16 @@ var _ = Describe("ADR-037: the write endpoint rotates",
 			// approximate in wall-clock terms, and this is that approximation
 			// made explicit rather than raced against.
 			boundaryGuard = 5 * time.Second
-			writeSvcName  = "slapd-write"
-			probeSvcName  = "slapd-write-probe"
+			// freshDialBudget is how long a fresh connection is given to reach
+			// the pod the endpoint names. It pays for ONE thing: the dataplane
+			// catching up with a Service selector the apiserver has already
+			// accepted (EndpointSlice → kube-proxy/Cilium). It is deliberately
+			// short of "wait until it works": a fleet whose traffic never
+			// follows the selector must still go red here, and does.
+			freshDialBudget = 40 * time.Second
+			freshDialPoll   = 2 * time.Second
+			writeSvcName    = "slapd-write"
+			probeSvcName    = "slapd-write-probe"
 		)
 
 		var (
@@ -516,29 +524,97 @@ var _ = Describe("ADR-037: the write endpoint rotates",
 				landedB, csnB := whereDidItLand(pooled, "rotprobe-b-"+run)
 				followed := fmt.Sprintf("slapd-%d", landedB) == second
 
-				By("writing on a FRESH connection")
+				// THE CLAIM, with the one thing that is not part of it removed.
+				//
+				// What this spec defends is "a connection opened AFTER the
+				// endpoint moves reaches the NEW target". What it must not also
+				// assert is "within one dial of the Endpoints object changing" —
+				// that was never the claim and is not a property of the system.
+				// The Eventually above waits on the control-plane object; the
+				// dataplane is a second step, and the comment on that wait says
+				// so itself ("until the EndpointSlice updates AND kube-proxy
+				// reprograms"). A fresh dial inside that window reaches the OLD
+				// pod — measured at 16 ms after the selector patch when the
+				// write endpoint landed, and recorded as a trap in ADR-037
+				// amendment 8.
+				//
+				// Measured on a three-site mesh: a single dial passed in one
+				// cycle and failed in the next, on scheduling noise alone. A
+				// spec that flips on timing is evidence in neither direction,
+				// and a flaky green is worse than a slow one because it teaches
+				// people to re-run.
+				//
+				// So: retry, with both teeth kept.
+				//
+				//  - Every attempt opens a GENUINELY FRESH connection and closes
+				//    it. Reusing one would silently turn this into the pooled
+				//    case, which is the opposite of what is being measured.
+				//  - The budget is for DATAPLANE PROPAGATION, not an unbounded
+				//    wait for correctness. If no fresh connection ever reaches
+				//    the pod the endpoint names, the spec still goes red — which
+				//    is the real regression: the selector moving while traffic
+				//    never follows.
+				//
+				// Each attempt re-reads the selector rather than holding `second`
+				// for the whole budget, because the grid keeps advancing (20s
+				// slots) and an attempt that straddles a boundary would otherwise
+				// be judged against a writer that is no longer named. This keeps
+				// the teeth rather than blunting them: a fleet where traffic
+				// systematically lagged the selector by a slot would fail EVERY
+				// attempt, since the thing compared always moves together.
+				By("writing on a FRESH connection, allowing for dataplane propagation")
 				var landedC int32
 				var csnC string
-				freshConn := retryConnectLDAP(ctx, addr, baseDN, adminPW)
-				DeferCleanup(func() { _ = freshConn.Close() })
-				landedC, csnC = whereDidItLand(freshConn, "rotprobe-c-"+run)
+				freshWanted := second
+				freshOK := false
+				freshAttempts := 0
+				freshDeadline := time.Now().Add(freshDialBudget)
+				for {
+					freshAttempts++
+					awayFromBoundary(ctx)
+					freshWanted = writeSelector(ctx)
+					mirror(ctx, freshWanted)
+
+					freshConn := retryConnectLDAP(ctx, addr, baseDN, adminPW)
+					landedC, csnC = whereDidItLand(freshConn,
+						fmt.Sprintf("rotprobe-c%d-%s", freshAttempts, run))
+					_ = freshConn.Close()
+
+					if fmt.Sprintf("slapd-%d", landedC) == freshWanted {
+						freshOK = true
+						GinkgoWriter.Printf(
+							"fresh connection reached %s on attempt %d\n", freshWanted, freshAttempts)
+						break
+					}
+					if time.Now().After(freshDeadline) || ctx.Err() != nil {
+						break
+					}
+					GinkgoWriter.Printf(
+						"fresh connection reached slapd-%d while the endpoint named %s "+
+							"(attempt %d) — dataplane has not reprogrammed yet, retrying\n",
+						landedC, freshWanted, freshAttempts)
+					time.Sleep(freshDialPoll)
+				}
 
 				AddReportEntry("write endpoint: who followed the move", fmt.Sprintf(
 					"endpoint moved %s → %s\n"+
 						"  before the move, the first write landed on slapd-%d (entryCSN %s)\n"+
-						"  FRESH connection wrote to slapd-%d (entryCSN %s) — this is the claim\n"+
+						"  FRESH connection wrote to slapd-%d (entryCSN %s) after %d attempt(s) — this is the claim\n"+
 						"  established connection wrote to slapd-%d (entryCSN %s) — moved: %v; a "+
 						"Service does not re-wire an open flow, which is why the rotation is for "+
 						"short-lived connections by design",
-					first, second, landedA, csnA, landedC, csnC, landedB, csnB, followed))
+					first, second, landedA, csnA, landedC, csnC, freshAttempts, landedB, csnB, followed))
 				GinkgoWriter.Printf(
 					"established connection moved with the endpoint: %v "+
 						"(wrote to slapd-%d, endpoint names %s)\n", followed, landedB, second)
 
-				Expect(fmt.Sprintf("slapd-%d", landedC)).To(Equal(second),
-					"a FRESH connection to the moved endpoint wrote to slapd-%d while the endpoint "+
-						"names %s — if new connections do not reach the new writer the endpoint "+
-						"does not work at all (entryCSN %s)", landedC, second, csnC)
+				Expect(freshOK).To(BeTrue(),
+					"across %d attempt(s) over %s, no FRESH connection ever reached the pod the "+
+						"write endpoint names: the last one wrote to slapd-%d while the endpoint "+
+						"named %s (entryCSN %s). The budget exists for dataplane propagation "+
+						"only — if new connections never reach the new writer, the endpoint does "+
+						"not work at all and the rotation moves nothing",
+					freshAttempts, freshDialBudget, landedC, freshWanted, csnC)
 			})
 
 		// Rotation off is not "point the endpoint nowhere" and not "delete it".

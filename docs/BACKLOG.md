@@ -2997,3 +2997,39 @@ once. `writeservice_test.go` does that now; nothing else does.
   test asserting the literal spelling.
 - Red first: misspell the constant, confirm the build is clean, and confirm
   that test is the one that goes red.
+
+## The suite has never swept a cluster that was upgraded into rotation
+
+Every mesh cycle so far bootstrapped its clusters with the purge schedule
+already declared — rotation on (form B) or a fleet-wide interval (form A). The
+shape a real deployment takes is the other one: a cluster that has been running
+without any of this, which then has rotation enabled on it.
+
+The mechanism that differs is which code path writes `olcAccessLogPurge`. An
+overlay created *with* a phase takes the ADD path; an overlay that already
+exists takes the convergence path. **Both are covered**, including on a mesh —
+a database created on an already-rotating three-site mesh was born with a
+correct three-field value, and the `write-rotation` specs turn `spec.rotation`
+on and off on a *running* mesh cluster and assert the result.
+
+So what is missing is narrow: the **full suite**, swept end to end, against a
+cluster created without rotation and then upgraded into it. The question it
+answers is not "does the purge value converge" — that is answered — but
+"is anything *else* in the suite sensitive to having been upgraded into
+rotation rather than born with it".
+
+Judged thin, and recorded rather than run: nothing else in the suite reads
+`olcAccessLogPurge`, and the paths that write it are covered. But it is not
+zero, and it is the shape the real upgrade takes — which makes it a
+pre-release check rather than a pre-merge one.
+
+### Shape of a check (not written)
+
+- Bring a three-site mesh up with **no** purge schedule declared at all.
+- Let it settle; confirm the two-field operator default is in force.
+- Enable rotation through the chart, identically at every site.
+- Run the full suite, and compare its result to the fresh-with-rotation cycle
+  already in the record rather than reading it in isolation.
+- Watch the same things the fresh cycles watched: the delta-sync lost-sync
+  grep, `accesslog-mincsn` per site, `DataPresent`, and the invariant that no
+  replicated database is ever left without a purge value.

@@ -667,8 +667,30 @@ the original decision — the history of reasoning matters.
 ### slctl — Diagnostic CLI
 
 `bin/slctl` (also installed to `/usr/local/bin/slctl`) is a diagnostic and management tool
-for SlapdCluster resources. Source: `operator/cmd/slctl/`. Use it when debugging e2e failures
-or inspecting cluster state.
+for SlapdCluster resources. Source: `operator/cmd/slctl/`.
+
+**It is the default way to reach a cluster, not merely an option.** Reaching slapd by hand
+means a `kubectl port-forward`, a `kubectl get secret … | base64 -d`, a bind DN assembled
+from the right resource, and a background process to kill afterwards — four chances to get it
+wrong, repeated in every script and runbook that does it. `slctl` discovers all of that from
+the CRs. So: **do not hand-roll port-forward + ldapsearch plumbing** in docs, runbooks,
+scripts or ad-hoc debugging. Reach for `slctl ldapsearch` / `ldapadd` / `ldapmodify` /
+`ldapdelete`, `slctl inspect`, `slctl aws`, `slctl debug`. `--verbose` prints the equivalent
+raw commands (password masked) when you need to show the mechanism or hand someone a
+one-liner that does not need slctl.
+
+Two traps worth knowing before you conclude it does not work:
+
+- **A stale binary reads as a broken cluster.** `/usr/local/bin/slctl` is whatever was
+  installed last, and against newer CRDs it fails with an unmarshal error that looks like
+  cluster damage. `make build-slctl` (or `make install-slctl`) first when working on a branch
+  that changed the API.
+- **`--as` selects the identity, and the default is the DATA admin.** Anything under
+  `cn=config`, and any accesslog DB, needs `--as config`; the data rootDN is genuinely denied
+  there (ADR-020). That is a different database with a different rootDN, not a failure.
+
+The e2e suite is the deliberate exception: it talks to pods directly because it is testing the
+endpoints themselves.
 
 | Command | Purpose |
 |---|---|

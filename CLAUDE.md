@@ -613,6 +613,26 @@ verify the check before believing it. A test that cannot fail, a sweep that
 cannot match, a wait that cannot end and a dump that cannot disagree all look
 exactly like success.
 
+**Two kinds, two different defences.** The six above are *checks that cannot
+fail*, and for those the defence is mutation: make it red on purpose, and if
+you cannot, it was never a check.
+
+The sibling kind is a *reading that cannot be distinguished from absence*, and
+mutation does not help — there is nothing to make red. A query against a
+mis-named metric returns an empty result rather than an error; a log fetch
+against a high-volume log silently truncates and reports nothing found; a build
+step reports success having reused a cached layer, so the gate inside it never
+ran at all (that one is ours — a smoke test was "verified" by a build that
+skipped it). For these the defence is **a second independent route to the same
+number, where the agreement is the evidence** — two instruments that fail
+differently are unlikely to agree on a wrong answer. Purge duration read from
+the server's own timing line against purge duration derived from the delete
+rate, agreeing to 2 %, is worth more than either alone.
+
+Conflating the two is how somebody mutation-tests a dashboard query and
+concludes it is sound. For a CHECK, prove it red. For a READING, get it twice
+by routes that fail differently.
+
 **Not dogmatic:** behavior-preserving refactors under already-green tests need no new red —
 the existing tests are the guard. Red-first applies to new behavior and bug fixes. If a test
 will not go red for the intended reason, treat it as a broken test and say so — do not paper

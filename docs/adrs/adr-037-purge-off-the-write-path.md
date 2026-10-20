@@ -1634,3 +1634,43 @@ the cost to replication rather than removing it; there is still no single
 correct lead, because the window closes as the write rate rises; and `r` is
 still higher than this ADR long assumed and still degrades with purge size.
 This result sits on top of those, not instead of them.
+
+## Amendment, 2026-10-20 (fourteenth): what two providers cannot show
+
+Everything measured in this ADR was measured at `n = 2`. That is weaker than it
+sounds, and the precise form matters more than "only one shape was tested".
+
+**At two providers the displacement has no degrees of freedom.** The pod taking
+writes is always the pod that purges next. `v = +1` and `v = −1` select the same
+pod, because there is exactly one non-purging pod; anything else selects the pod
+purging right now, which the gate refuses. So `slotsFromWriteToPurge` is not
+merely untested on the platform — **it is unexercisable there.** Every
+conclusion in this document about displacement is derivation with no
+measurement anywhere near it.
+
+The congruence results (`current` hazard ⟺ `v ≡ 0`, `lagging` hazard ⟺
+`v ≡ 1 (mod n)`), the choice to keep `+1` as the default, and the rejection of
+`-1` are all arithmetic. They are believed, they are internally consistent, and
+nothing has observed them.
+
+### The four questions a third provider would settle, cheaply
+
+1. **Does `-1` behave as the congruence says** — clean at `n ≥ 3`, identical to
+   `+1` at `n = 2`?
+2. **Does the lead's upper bound take the derived general form
+   `(n−1)·t − P`?** Two providers can only ever exhibit `t − P`, so the `(n−1)`
+   factor is pure algebra today.
+3. **Does a cooldown slot buy anything beyond what `-1` already gives?**
+   Parked since the second amendment as unknown rather than answered badly.
+4. **Is the delete rate's fall with purge size real?** Three points —
+   ~2,400-3,100/s at 4,400 entries, 2,570/s at 187k, 1,960/s at 353k — are a
+   hint, not a curve. Both `P` and the capacity condition rest on `r`, and a
+   production-shaped 6h slot implies purges far larger than any of those. If
+   `r` keeps falling at that scale, the feasibility arithmetic in Notation gets
+   worse exactly where it matters most.
+
+The fourth is the one that would change advice rather than confirm it.
+
+Also unmeasured, and smaller: the lead time has run on a **single site**. It
+touches no syncrepl stanza, overlay or `cn=config` value, so it is not on the
+replication path — but no mesh has carried it.

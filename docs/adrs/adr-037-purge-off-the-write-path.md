@@ -1674,3 +1674,42 @@ The fourth is the one that would change advice rather than confirm it.
 Also unmeasured, and smaller: the lead time has run on a **single site**. It
 touches no syncrepl stanza, overlay or `cn=config` value, so it is not on the
 replication path — but no mesh has carried it.
+
+## Amendment, 2026-10-20 (fifteenth): the delete rate does not fall — that was two instruments disagreeing
+
+Amendment 12's third correction said `r` "is not constant and appears to
+degrade with purge size". **Withdrawn.** It was one instrument's reading being
+compared against another's without either being run against the same purge.
+
+| purge size | `r` | instrument | quality |
+|---|---|---|---|
+| 4,400 | 2,364-3,102/s | server `etime`/`nentries` | exact |
+| 187,264 | 2,570/s | server `etime`/`nentries` | exact |
+| 353,532 | "1,960/s" | entry-count decline, 30 s scrape | **bounded, not measured** |
+
+The exact instrument shows **no decline at all across a 42× range** — 2,570/s
+at 187k sits inside the range measured at 4,400. The only reading suggesting a
+fall is the coarse one, and its duration is bounded rather than measured: the
+purge began somewhere in one 30 s window and ended in another, so `r` lies
+anywhere in **1,683-2,357/s**, which overlaps the small-purge readings. The
+midpoint was quoted as though it were a measurement.
+
+**So the honest figure is ~2,400-2,600/s under load by the exact instrument,
+and whether `r` falls at production purge sizes is unmeasured.** Amendment 14's
+fourth question is restated accordingly: not *"does `r` fall with purge size"*
+but **"do these two instruments agree at a single purge size"**. Until they do,
+three points from two routes are not a curve.
+
+### Why this is in the record rather than quietly edited
+
+It is an instance of the rule written down the same day, committed one message
+after writing it. The defence for a reading is to get it twice by routes that
+fail differently — and when they disagree, **the disagreement is the signal,
+not a data point to plot through.** Two routes were available, they disagreed,
+and the disagreement was read as a trend.
+
+Nothing else in amendment 12 moves. `P = w·n·t / r` stands, the capacity
+condition stands, and the lead window stands — they are all more stable with a
+flat `r` than with a falling one. What changes is that a deployment sizing from
+this document has one number and a stated uncertainty, instead of a
+degradation it was told to design around.

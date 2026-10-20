@@ -289,8 +289,13 @@ rate, and will not shorten one to keep a purge small. Three numbers are yours:
 
 ### Do not take a delete rate from this document
 
-`r` is not a constant. Measured directly under one load it ran 1,960–2,570/s;
-it was roughly 2,400–3,100/s on small purges and 1,960/s on a 353,000-entry one.
+`r` measured **~2,400–2,600/s** under load by the server's own timing line,
+across purges from 4,400 to 187,000 entries — a 42× range with no decline in
+it. A single coarser reading on a 353,000-entry purge suggested a fall, but it
+came from a different instrument whose duration is bounded rather than
+measured, and its range overlaps the others. **Whether `r` falls at production
+purge sizes is unmeasured**, and the two instruments have never been run
+against the same purge.
 If `r` degrades as purges grow, then `P` grows **faster than linearly** in the
 interval, so an `r` taken from a smaller purge flatters a larger one.
 

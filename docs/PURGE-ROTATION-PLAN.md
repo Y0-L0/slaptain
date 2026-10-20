@@ -342,3 +342,31 @@ Landed with it:
 one available: every replicated database on every read-write pod carries *some*
 `olcAccessLogPurge`. It is the defect's negation, it costs one search per pod per
 database, and it would have caught the outage.
+
+
+## Phase 5 — the lead time (2026-10-20)
+
+Load measurement inverted the plan's premise: **staggering the purges is free;
+moving the writes is what costs.** With rotation on and writes pinned,
+throughput was indistinguishable from baseline; with writes following the
+endpoint it fell 2.8 % and dropped iterations doubled, with 99.9 % of the loss
+inside 30 s of a slot boundary.
+
+The endpoint moved *at* the boundary, so the pod that stopped taking writes
+began purging at the same instant and every connection not yet aged out
+delivered writes into an active purge. `spec.rotation.leadTime` moves the
+endpoint that far ahead of the boundary instead. It is a lookahead only — the
+purge grid is untouched and `leadTime: 0` is byte-identical to the behaviour it
+corrects.
+
+One guard, evaluable from `n` and `t` alone: `d < (n−1)·t`. The lead is the
+administrator's number, not the operator's — deriving it would need the client
+connection lifetime, which the operator cannot see.
+
+Shipped alongside: the runqueue-lock fix behind a SIGSEGV on a live
+three-field-to-two-field transition, and the 2.7.1 purge-timing log line
+backported to the 2.6 build so purge duration and delete rate can be read
+rather than inferred.
+
+See ADR-037 amendment 11 for the measurement, the feasibility arithmetic and
+what was deliberately not decided.

@@ -1278,3 +1278,119 @@ direction is a second thing the sign legitimately expresses. The
 recommendation is therefore strengthened: **write the signed form.** A bare
 `n−1` is a value that was already going stale, and now also degrades away from
 what its author meant.
+
+## Amendment, 2026-10-20 (eleventh): the endpoint has to move early, and D has a value
+
+Load measurement on two providers settled what this ADR could not reason its
+way to, and inverted its premise.
+
+### What was measured
+
+Five bracketed arms, matched hours, 15.4M-entry fixture, `n = 2`:
+
+| arm | ops/s | dropped |
+|---|---|---|
+| base | 97,879 | 8.99M |
+| rotation on, writes **pinned** | 97,650 | 9.71M |
+| base | 97,727 | 9.57M |
+| rotation on, writes **following the endpoint** | 95,049 | 18.89M |
+
+The two baselines agree to 0.16 %. Pinned-writes rotation is indistinguishable
+from baseline. Following the endpoint costs 2.8 % and doubles dropped
+iterations.
+
+**Staggering the purges is free. Moving the writes is what costs.** That is the
+opposite of this ADR's premise, and the pinned arm is what proves it — without
+it, "rotation is worse" could not be separated from "staggering is worse".
+
+### Where the loss is
+
+Binned by position in the 100 s slot: **99.9 % of it lands in the first 30 s
+after a boundary**, 69 % inside the client's 20 s connection lifetime. The
+remaining 70 % of every slot is clean. Two controls make that a measurement
+rather than an artefact of the modulus: the baseline binned at its own period
+gives one contiguous burst at an arbitrary offset — correct, because a lockstep
+phase is set by when the attribute was written and is not epoch-aligned — and
+the pinned arm binned at its write pod's cycle gives 99.6 % in `[0, 20s)`,
+epoch-aligned to its purge.
+
+### The mechanism, and the correction to decision 2
+
+The endpoint moved **at** the boundary. So the pod that stops taking writes
+starts purging at the same instant, and every connection that has not yet aged
+out delivers writes into an active purge — not occasionally, but every slot, by
+construction.
+
+The fix is a **lead time** `d`: move the endpoint `d` *before* the boundary.
+With `d ≥ τ`, no connection still points at the old writer when it begins
+purging. It is a lookahead and nothing more — the purge grid is untouched, no
+persisted `cn=config` changes, and `leadTime: 0` is byte-identical to the
+behaviour this amendment corrects.
+
+### `D` has a value now, and it was never the right letter for it
+
+Two corrections to this ADR's own vocabulary, both of which caused real
+confusion while the measurement was running:
+
+- `P` is the **purge duration** and `D` is the **drain time**. Those were used
+  interchangeably in analysis, and a disturbance duration (purge *plus*
+  recovery, 60-75 s) was once substituted into a constraint that needed a purge
+  duration (~45 s). The window it implied was empty; the real one was not.
+- **`D` is the client connection lifetime.** This ADR said *"`D` has no value at
+  all yet"*. It has one: `τ`, measured at 20 s in the lab, and it is a property
+  of the client population — not of the cluster, and not knowable by the
+  operator.
+
+Which means the drain condition `(n−d)·t ≥ D` was never satisfiable at the
+preferred end under boundary-moving: the drain window there is **zero**,
+whatever `t` is. The lead time is the implementation of a condition this ADR
+already stated and never built.
+
+### The lead's feasibility condition is the capacity condition
+
+Deletes per purge are `w·T = w·n·t`, so `P = w·n·t / r`. The incoming writer
+purged `(n−1)` slots ago, so:
+
+    τ ≤ d ≤ (n−1)·t − P        feasible iff   r > n·w/(n−1)
+
+That inequality is decision 1's capacity condition, `write ≤ delete·(n−1)/n`,
+rearranged. **A lead time is feasible exactly when the cluster is within its
+purge capacity** — it adds no constraint a deployment did not already have.
+What it adds is a floor on the slot length, `t ≥ τ / ((n−1) − n·w/r)`, and that
+floor is where the margin actually lives: at the bottom of a measured delete
+rate it can approach the slot length itself.
+
+`n = 2` is the sharpest case and stays so. With `v = 1` the incoming writer *is*
+the currently-purging pod, so a lead necessarily overlaps the tail of its purge
+by `d` — correct and bounded, and tighter than anything with a third provider.
+
+### What is NOT decided here
+
+- **`slotsFromWriteToPurge` keeps its `+1` default.** An earlier reading of the
+  lagging hazard argued for `-1`; that trades a client-lifetime problem for a
+  replication-freshness one and inverts the intended per-pod ordering of
+  write-then-purge. The lead attacks the cause instead.
+- **The lead is chosen, not derived.** Deriving it needs `τ`, which is a client
+  property the operator cannot see, plus `w` and `r`, which it does not measure.
+  One guard is evaluable from `n` and `t` alone and is the only one applied:
+  `d < (n−1)·t`, beyond which the lead reaches back past the start of the
+  incoming writer's purge. Everything else is the administrator's.
+- **No `slotLength` floor is enforced.** Short slots are measurement geometry,
+  not a production shape; the operator reconciles on its own cadence and does
+  not chase boundaries.
+
+### Two defects fixed alongside
+
+A `slapd` took a **SIGSEGV** 13 s after a three-field-to-two-field
+`olcAccessLogPurge` transition on a server that had been purging for an hour;
+the same transition was clean twice on a server whose purge task had never run.
+The live-set path wrote the runqueue entry's `interval`, `phase` and `aligned`
+**without `slapd_rq.rq_mutex`**, which `ldap_pvt_runqueue_resched` reads under
+it. Two of those three writes were ours. Now locked — including stock's, since
+holding the lock while one of the three fields it protects stayed outside it
+would be worse than not holding it at all. A race fix with no reproduction: the
+crash has not recurred, which is consistent with the fix and is not proof of it.
+
+And the 2.7.1 purge-timing log line is backported to the 2.6 build, because
+`P` and `r` were being inferred from a 30 s scrape against a ~45 s event. They
+are now read directly: `etime=5.402305 nentries=803`, both providers agreeing.

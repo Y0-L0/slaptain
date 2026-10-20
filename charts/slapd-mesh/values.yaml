@@ -315,6 +315,15 @@ cluster:
   #  # the write on the purging pod and are refused by name. Leave unset unless
   #  # you are measuring.
   #  slotsFromWriteToPurge: 1
+  #  # d: how long BEFORE each slot boundary the write endpoint moves. Unset → 0,
+  #  # the endpoint moving AT the boundary, which is what every cluster did before
+  #  # this field existed. Measured: with the writes following the endpoint, 99.9%
+  #  # of the throughput loss lands in the first 30 s after a boundary, because the
+  #  # pod that stops taking writes starts purging at the same instant and every
+  #  # connection that has not aged out delivers into an active purge. Set it ABOVE
+  #  # your clients' maximum connection lifetime; the operator cannot know that
+  #  # number and recommends none. Must be below (replicas - 1) x slotLength.
+  #  leadTime: "60s"
 
   # -- FORM A of the purge schedule: one interval, every pod sweeping its
   # accesslog journals at the same instants. This is what every mesh has always

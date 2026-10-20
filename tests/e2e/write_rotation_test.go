@@ -110,6 +110,49 @@ var _ = Describe("ADR-037: the write endpoint rotates",
 			return svc.Spec.Selector["statefulset.kubernetes.io/pod-name"]
 		}
 
+		// nextBoundary is the next instant the purge grid turns over.
+		nextBoundary := func(at time.Time) time.Time {
+			step := int64(slotLength / time.Second)
+			return time.Unix((at.Unix()/step+1)*step, 0)
+		}
+
+		// insideLeadWindow sleeps until the current instant sits strictly
+		// inside the lead window — after boundary−lead, before the boundary —
+		// with margin at both ends.
+		//
+		// The near margin pays for the operator: its requeue fires AT
+		// boundary−lead and the selector lands a moment later. The far margin
+		// keeps the sample off the boundary itself, where the endpoint moves
+		// again and a reading legitimately names either slot's writer.
+		insideLeadWindow := func(ctx SpecContext, lead time.Duration) {
+			const margin = 2 * time.Second
+			Expect(lead).To(BeNumerically(">=", 2*margin+time.Second),
+				"the lead is too short to sample inside with margin at both ends")
+			for {
+				ttb := time.Until(nextBoundary(time.Now()))
+				if ttb >= margin && ttb <= lead-margin {
+					return
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(250 * time.Millisecond):
+				}
+			}
+		}
+
+		// setLead patches spec.rotation.leadTime; nil clears it.
+		setLead := func(ctx context.Context, lead *time.Duration) {
+			sc := &ldapv1alpha1.SlapdCluster{}
+			Expect(crdClient.Get(ctx, nsName(namespace, "slapd"), sc)).To(Succeed())
+			if lead == nil {
+				sc.Spec.Rotation.LeadTime = nil
+			} else {
+				sc.Spec.Rotation.LeadTime = &metav1.Duration{Duration: *lead}
+			}
+			Expect(crdClient.Update(ctx, sc)).To(Succeed())
+		}
+
 		// setRotation patches spec.rotation on the fixture cluster.
 		setRotation := func(ctx context.Context, on bool, t time.Duration) {
 			sc := &ldapv1alpha1.SlapdCluster{}
@@ -370,6 +413,88 @@ var _ = Describe("ADR-037: the write endpoint rotates",
 			after := writeSelector(ctx)
 			GinkgoWriter.Printf("after boundary:  %s (slot %d)\n", after, slotAt(time.Now()))
 			Expect(after).To(BeElementOf(rwPods))
+		})
+
+		// spec.rotation.leadTime: the endpoint moves BEFORE the boundary.
+		//
+		// The load run separated the two halves of ADR-037. Staggering the
+		// purges is free — rotation on with the writes pinned measured as
+		// baseline. Moving the writes costs 2.8 % of throughput, and 99.9 % of
+		// that loss lands in the first 30 s after a slot boundary, because the
+		// endpoint moved AT the boundary: the pod that stopped taking writes
+		// began purging at the same instant, and every connection that had not
+		// yet aged out delivered into an active purge.
+		//
+		// So the whole claim of this field is a timing one, and it is the only
+		// thing this spec measures: inside the lead window — after
+		// boundary−lead, before the boundary — the Service must ALREADY name
+		// the writer of the slot that has not started yet.
+		//
+		// The assertion is written against BOTH answers on purpose. An operator
+		// that accepted leadTime and ignored it would leave the selector on the
+		// current slot's writer, which is a perfectly healthy-looking rotation
+		// and is what every signal would report; naming that value explicitly
+		// is what makes the difference legible when this goes red.
+		It("moves the endpoint one lead BEFORE the slot boundary", func(ctx SpecContext) {
+			// Below (replicas−1) × slotLength, which is the operator's bound,
+			// and wide enough that a sample can sit several seconds inside the
+			// window without racing either end of it.
+			lead := 8 * time.Second
+			Expect(lead).To(BeNumerically("<", time.Duration(replicas-1)*slotLength),
+				"the spec's own lead is outside the operator's bound and would be refused as "+
+					"LeadTimeOutOfRange, which is not what this spec is testing")
+
+			By(fmt.Sprintf("setting spec.rotation.leadTime to %s", lead))
+			setLead(ctx, &lead)
+			DeferCleanup(func(ctx SpecContext) {
+				By("clearing spec.rotation.leadTime")
+				setLead(ctx, nil)
+			})
+
+			// One full slot, so the operator has certainly reconciled on the
+			// new generation and its requeue is already on the lead's grid.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(slotLength):
+			}
+
+			for i := 0; i < 2; i++ {
+				insideLeadWindow(ctx, lead)
+				now := time.Now()
+				slot := slotAt(now)
+				ahead := slotAt(now.Add(lead))
+
+				// With slotsFromWriteToPurge unset the writer of slot s is the
+				// pod that purges in s+1. Read one lead ahead, that is the
+				// writer of the slot about to begin.
+				wantWriter := fmt.Sprintf("slapd-%d", (ahead+1)%replicas)
+				unleaded := fmt.Sprintf("slapd-%d", (slot+1)%replicas)
+				Expect(wantWriter).NotTo(Equal(unleaded),
+					"sample %d: the leaded and unleaded answers coincide, so this sample could "+
+						"not tell them apart — the window was mis-timed", i)
+
+				writer := writeSelector(ctx)
+				Expect(writer).To(Equal(wantWriter),
+					"sample %d at %s, %s before the slot boundary with leadTime=%s: the write "+
+						"Service selects %s. It must already name %s — the writer of the slot "+
+						"that has not begun yet. %s is the UNLEADED answer, the pod the endpoint "+
+						"would name if leadTime were accepted and ignored, which is exactly the "+
+						"handover the field exists to move off: the outgoing writer starts "+
+						"purging at the boundary with the connections still pointed at it "+
+						"(slot %d of %d, t=%s)",
+					i, now.UTC().Format(time.RFC3339), time.Until(nextBoundary(now)).Round(time.Second),
+					lead, writer, wantWriter, unleaded, slot, replicas, slotLength)
+
+				GinkgoWriter.Printf("lead sample %d  %s  slot=%d ahead=%d writer=%s (unleaded "+
+					"would be %s)\n", i, now.UTC().Format(time.RFC3339), slot, ahead, writer, unleaded)
+
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(slotLength / 2):
+				}
+			}
 		})
 
 		// The feature's claim, and its precondition, measured together.

@@ -277,6 +277,7 @@ back-mdb — no `slapindex` run, no downtime.
 | `spec.rotation.enabled` | off | converged into every pod's `olcAccessLogPurge` |
 | `spec.rotation.slotLength` | none, and **required when enabled** | converged |
 | `spec.rotation.slotsFromWriteToPurge` | `1` | signed, taken mod `replicas`; `v mod replicas = 0` is refused and reported |
+| `spec.rotation.leadTime` | `0` — the endpoint moves at the boundary | not written to slapd at all; it shifts only *when* the write Service is repointed |
 
 `spec.ldap.passwordHash` governs only what slapd hashes on a client's behalf. The
 root passwords the operator generates are hashed by the operator before they reach
@@ -394,12 +395,59 @@ paying, so no number is given here; ADR-037 declines to fix numbers it has not
 measured, and so does this guide. A client that holds connections for hours gets
 nothing from the rotation, and no operator-side setting can change that.
 
+#### `leadTime`: moving the endpoint *before* the boundary
+
+The two halves of the rotation do not cost the same. Measured on a two-provider
+cluster: with the rotation on and the writes **pinned** to one pod, throughput was
+indistinguishable from a cluster with no rotation at all — staggering the purges is
+free. With the writes **following** the endpoint, throughput fell 2.8 % and dropped
+iterations doubled. Staggering costs nothing; moving the writes costs, and it costs
+in one place: **99.9 % of that loss landed in the first 30 s after a slot boundary**,
+69 % of it inside the client's 20 s connection lifetime.
+
+The mechanism is the handover. With no lead the endpoint moves *at* the boundary, so
+the pod that stops taking writes starts purging at the same instant — and every
+connection that has not yet aged out is still pointed at it, delivering writes into
+an active purge.
+
+`spec.rotation.leadTime` is how long **before** each boundary the endpoint moves:
+
+```yaml
+spec:
+  rotation:
+    enabled: true
+    slotLength: "6h"
+    leadTime: "60s"     # unset = 0 = the endpoint moves at the boundary
+```
+
+**Set it above your clients' maximum connection lifetime.** With a lead at least
+that long, every connection pointed at the outgoing writer has been closed and
+redialled before that pod begins purging. That is the whole rule, and it is yours:
+the lifetime is a property of your client, not of the cluster, so **the operator
+does not derive it, does not default it, and no number is recommended here** —
+nothing has measured one. Unset means zero, which is the behaviour of every cluster
+that predates the field.
+
+It is a lookahead and only a lookahead. The purge grid is untouched — the interval
+stays `replicas × slotLength` and pod `k` still purges at `k × slotLength` from the
+epoch — so setting or clearing a lead never rewrites a pod's `olcAccessLogPurge` and
+never rolls a pod.
+
+**One bound, and it is the only thing checked:** `leadTime` must be at least zero and
+strictly below `(replicas − 1) × slotLength`. At or beyond that the lead reaches back
+past the instant the incoming writer *started* purging, so the endpoint would hand
+writes to a pod that purges during its own write slot. A value outside the bound is
+reported as `RotationConfigured=False/LeadTimeOutOfRange` and the whole rotation is
+withheld — the cluster keeps purging on the default interval. Nothing else is
+checked: a lead too short to help your clients is a configuration you chose, and the
+operator will not second-guess it.
+
 The current writer and the next rotation are published on the SlapdCluster as
 `WriteEndpointRotating`:
 
 | Reason | What it means |
 |---|---|
-| `WriterSelected` | the message names the pod the endpoint selects and the instant it moves next |
+| `WriterSelected` | the message names the pod the endpoint selects and the instant it moves next. With a `leadTime` in force that instant is the **endpoint move**, one lead before the slot boundary, and the message says so |
 | `NoEligibleWriter` | no pod could be chosen this pass — none Ready, or readiness could not be read at all. The selector is left exactly where it was and writes keep going there, because a Service selecting nothing is a total write outage. Nothing was repointed, and the message says so |
 
 Observation only: it gates nothing and withholds nothing.
@@ -425,6 +473,7 @@ never stops a running directory reconciling:
 | `SlotLengthNotWholeSeconds` | `500ms` passes admission and has no representation in `olcAccessLogPurge`, whose fields are `[ddd+]hh:mm[:ss]` |
 | `WriteSlotCollidesWithPurge` | `slotsFromWriteToPurge` resolved to slot 0 — the pod that is purging. Zero and every multiple of `replicas` land there, which is why the rule is modular and not a minimum. Nothing rotates; the default interval keeps the journals bounded |
 | `ScheduleDeclaredTwice` | `spec.accesslogPurge.interval` and `spec.rotation.enabled` both declare *when* the purge runs. Delete one |
+| `LeadTimeOutOfRange` | `spec.rotation.leadTime` is negative, or at or beyond `(replicas − 1) × slotLength`. Beyond that bound the lead reaches back past the instant the incoming writer started purging. Nothing rotates; the default interval keeps the journals bounded |
 | `PurgeIntervalNotUsable` | `spec.accesslogPurge.interval` is non-positive or finer than a second, so it has no representation on the server. The default interval is in force |
 
 Each SlapdDatabase then publishes `AccesslogPurgeConverged`:

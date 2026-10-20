@@ -208,7 +208,7 @@ spec:
   {{- $rot := .Values.rotation | default dict -}}
   {{- $hasRotEnabled := and (hasKey $rot "enabled") (not (kindIs "invalid" $rot.enabled)) -}}
   {{- $hasSlots := and (hasKey $rot "slotsFromWriteToPurge") (not (kindIs "invalid" $rot.slotsFromWriteToPurge)) -}}
-  {{- if or $hasRotEnabled $rot.slotLength $hasSlots }}
+  {{- if or $hasRotEnabled $rot.slotLength $hasSlots $rot.leadTime }}
   rotation:
     {{- if $hasRotEnabled }}
     enabled: {{ $rot.enabled }}
@@ -218,5 +218,12 @@ spec:
     {{- end }}
     {{- if $hasSlots }}
     slotsFromWriteToPurge: {{ $rot.slotsFromWriteToPurge }}
+    {{- end }}
+    {{- /* leadTime needs no falsy guard: unset and "0s" MEAN the same thing —
+           the endpoint moving at the boundary — so there is no value the
+           operator must be told about that `with` would swallow. Quoted for
+           the same reason slotLength is. */ -}}
+    {{- with $rot.leadTime }}
+    leadTime: {{ . | quote }}
     {{- end }}
   {{- end }}

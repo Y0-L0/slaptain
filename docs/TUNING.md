@@ -151,6 +151,10 @@ condition is `RotationConfigured=False/ScheduleDeclaredTwice` and it names both
 fields. Meanwhile the operator's default 24h interval stays in force, so nothing goes
 unpurged while you work out which one you meant.
 
+Form B is a whole feature rather than a second spelling of form A: it also moves the
+write endpoint, and it only helps deployments whose clients re-dial.
+[`PURGE-ROTATION.md`](PURGE-ROTATION.md) is the guide — read it before enabling it.
+
 Both durations are Go durations (`168h`, `24h`, `30m`) and must land on a whole
 second: `olcAccessLogPurge`'s fields are `[ddd+]hh:mm[:ss]` and there is nowhere to
 put a millisecond. The API server checks only the *grammar* — `0s` and `500ms` both
@@ -285,216 +289,27 @@ slapd. Stronger schemes need their module in the runtime image, and slaptain's d
 not ship `pw-argon2` today — asking for `{ARGON2}` produces a slapd that rejects
 every password write.
 
-### The purge rotation: what the operator checks, and what it only reports
+### The purge rotation lives in its own guide
 
-`spec.rotation` puts every read-write pod's accesslog purge on one absolute grid:
-with `n = spec.replicas` pods and a slot length `t`, every pod gets purge interval
-`T = n·t` and pod `k` gets phase `k·t`, counted from the epoch. That third value is
-a slaptain patch, not upstream's, so it needs a slaptain slapd image
-(`2.7.1-0+slaptain2` or later — `slapd -VV`).
+`spec.rotation` is form B of the schedule above: instead of one interval shared by
+every pod, each read-write pod gets its own purge **phase** on one absolute grid —
+with `n = spec.replicas` and a slot length `t`, interval `T = n·t` and pod `k` at
+phase `k·t` — and a second Service, `<cluster>-write`, follows the grid so the pod
+taking writes is never the pod purging.
 
-Opt-in, and off by default: nothing about an existing cluster's purge schedule
-changes until you set it.
+It is opt-in and off by default, and the placement facts are all that belong here:
+the four fields are converged per pod (`leadTime` excepted — it is never written to
+slapd at all, and only shifts *when* the write Service is repointed), and the third
+value of `olcAccessLogPurge` is a slaptain patch rather than upstream's, so it needs
+a slaptain image (`2.7.1-0+slaptain2` or later, `slapd -VV`).
 
-#### Turning it on
-
-Both charts render `spec.rotation`, and a chart that says nothing about rotation
-renders byte-identically to one from before the feature existed — an upgrade changes
-nothing for a cluster that has not asked.
-
-Single site, `charts/slapd`:
-
-```yaml
-# values.yaml
-replicas: 3
-replication:
-  enabled: true
-rotation:
-  enabled: true
-  slotLength: "6h"      # required when enabled; there is no default
-```
-
-A mesh, `charts/slapd-mesh` — under `cluster:`, and applied unchanged at every site
-like everything else in that chart:
-
-```yaml
-cluster:
-  replicas: 2
-  rotation:
-    enabled: true
-    slotLength: "6h"
-```
-
-`charts/slapd-mesh/examples/rotation.yaml` is that block as a stackable overlay:
-`-f examples/three-site.yaml -f examples/rotation.yaml`.
-
-The values name no site, no endpoint and no pod — a schedule is a shape, and every
-site derives the same grid from the same `replicas`. The grid is nonetheless per
-**site**, over that site's own read-write pods; a write sent to another site lands
-where the client sent it, which is a mesh accepting writes at any provider rather
-than a gap in the rotation.
-
-Do not declare `spec.accesslogPurge.interval` alongside this. The two are the two
-forms of one decision — *when* the purge runs — and setting both is refused by name
-(`ScheduleDeclaredTwice`). Under rotation the interval is `replicas × slotLength`
-and there is nothing left to declare.
-
-Leave `slotsFromWriteToPurge` unset unless you are measuring. Unset is `1`: "purge
-the slot **after** writing", so the write endpoint names the pod that purges next —
-it has just stopped taking writes and works its journal down while somebody else
-takes them. `-1` is the other experiment, "purge the slot **before** writing", and
-it is the same answer as `replicas − 1` because the value is read modulo `replicas`
-— which is the point of the sign: `2` means "the slot before" only until somebody
-adds a pod, while `-1` keeps meaning it.
-
-The rule is `v mod replicas ≠ 0`, not a minimum. Zero *and every multiple of
-`replicas`* put the write on the pod that is purging, so `3` on a three-pod cluster
-is as wrong as `0` and looks far more reasonable. That rule needs `spec.replicas`,
-which no CRD marker can see, so the operator reports it — naming the slot the value
-**resolved to** rather than echoing what you typed, since `-1` and `replicas − 1`
-are one answer and only one of them is on your screen.
-
-Note what the chart does *not* do — it restates neither default nor any other, so
-the day the operator's changes, your cluster follows.
-
-**Before you set it, check both prerequisites.** The image must carry the
-purge-phase patch (above), and the clients must be the kind this helps — see
-*It benefits clients that open short-lived connections*, below. Neither is
-something the operator can arrange for you, and the second decides whether the
-feature does anything at all.
-
-**Staggering alone changes nothing a client can see.** This is measured, not
-cautionary: de-synchronising the providers' purges lands on the synchronised arm and
-nowhere near the arm where the write target did not purge (ADR-037, third
-amendment). What the stagger buys is a pod that is *not* purging for the write
-endpoint to sit on — a prerequisite, not the benefit.
-
-#### The write endpoint
-
-Turning the rotation on publishes a second client Service, `<cluster>-write`,
-selecting exactly one read-write pod: by default the one that purges in the next
-slot, and in general the one `slotsFromWriteToPurge` names. It moves
-at every slot boundary, in lockstep with the grid, so the pod taking writes is never
-the pod purging. It answers on the same ports as `<cluster>` and honours
-`spec.service.type`, so a client that dials `<cluster>:389` today writes to
-`<cluster>-write:389` instead and changes nothing else.
-
-**Send writes there and no purge runs where your writes land.** Reads stay on
-`<cluster>` (or `<cluster>-readonly`): spreading them is the point of having
-providers. Writes sent anywhere else remain perfectly legal — every pod is a
-provider and accepts a write — they just cost you the stall the rotation exists to
-remove. The endpoint is a recommendation, not an enforcement.
-
-**It benefits clients that open short-lived connections.** A Kubernetes Service
-steers *new* connections; it does not re-wire an established one, so a client holding
-one connection keeps writing to the pod it first reached, however often the endpoint
-moves. A connection-pooling client therefore needs a maximum connection lifetime that
-is short relative to `slotLength` — the shorter the ratio, the larger the share of
-writes that lands on the current target. We have not measured where that ratio stops
-paying, so no number is given here; ADR-037 declines to fix numbers it has not
-measured, and so does this guide. A client that holds connections for hours gets
-nothing from the rotation, and no operator-side setting can change that.
-
-#### `leadTime`: moving the endpoint *before* the boundary
-
-The two halves of the rotation do not cost the same. Measured on a two-provider
-cluster: with the rotation on and the writes **pinned** to one pod, throughput was
-indistinguishable from a cluster with no rotation at all — staggering the purges is
-free. With the writes **following** the endpoint, throughput fell 2.8 % and dropped
-iterations doubled. Staggering costs nothing; moving the writes costs, and it costs
-in one place: **99.9 % of that loss landed in the first 30 s after a slot boundary**,
-69 % of it inside the client's 20 s connection lifetime.
-
-The mechanism is the handover. With no lead the endpoint moves *at* the boundary, so
-the pod that stops taking writes starts purging at the same instant — and every
-connection that has not yet aged out is still pointed at it, delivering writes into
-an active purge.
-
-`spec.rotation.leadTime` is how long **before** each boundary the endpoint moves:
-
-```yaml
-spec:
-  rotation:
-    enabled: true
-    slotLength: "6h"
-    leadTime: "60s"     # unset = 0 = the endpoint moves at the boundary
-```
-
-**Set it above your clients' maximum connection lifetime.** With a lead at least
-that long, every connection pointed at the outgoing writer has been closed and
-redialled before that pod begins purging. That is the whole rule, and it is yours:
-the lifetime is a property of your client, not of the cluster, so **the operator
-does not derive it, does not default it, and no number is recommended here** —
-nothing has measured one. Unset means zero, which is the behaviour of every cluster
-that predates the field.
-
-It is a lookahead and only a lookahead. The purge grid is untouched — the interval
-stays `replicas × slotLength` and pod `k` still purges at `k × slotLength` from the
-epoch — so setting or clearing a lead never rewrites a pod's `olcAccessLogPurge` and
-never rolls a pod.
-
-**One bound, and it is the only thing checked:** `leadTime` must be at least zero and
-strictly below `(replicas − 1) × slotLength`. At or beyond that the lead reaches back
-past the instant the incoming writer *started* purging, so the endpoint would hand
-writes to a pod that purges during its own write slot. A value outside the bound is
-reported as `RotationConfigured=False/LeadTimeOutOfRange` and the whole rotation is
-withheld — the cluster keeps purging on the default interval. Nothing else is
-checked: a lead too short to help your clients is a configuration you chose, and the
-operator will not second-guess it.
-
-The current writer and the next rotation are published on the SlapdCluster as
-`WriteEndpointRotating`:
-
-| Reason | What it means |
-|---|---|
-| `WriterSelected` | the message names the pod the endpoint selects and the instant it moves next. With a `leadTime` in force that instant is the **endpoint move**, one lead before the slot boundary, and the message says so |
-| `NoEligibleWriter` | no pod could be chosen this pass — none Ready, or readiness could not be read at all. The selector is left exactly where it was and writes keep going there, because a Service selecting nothing is a total write outage. Nothing was repointed, and the message says so |
-
-Observation only: it gates nothing and withholds nothing.
-
-**Turning the rotation off** leaves `<cluster>-write` in place and widens it to the
-whole read-write fleet, so a client still following it keeps writing. It is not
-deleted — clients were told to follow that name — and it is not left pinned to one
-pod, because with the rotation off nothing phases that pod's purge any more and every
-write would land on a provider that purges. A cluster that never rotated never grows
-the Service at all.
-
-The API server checks only that `slotLength` parses as a Go duration. Everything
-else is the operator's, and each is published on the SlapdCluster as
-`RotationConfigured` — reported, never refused, so a schedule you cannot honour
-never stops a running directory reconciling:
-
-| Reason | What it means |
-|---|---|
-| `RotationActive` | the grid is in force; the message states the interval and the spacing |
-| `RotationDisabled` | `enabled` is unset or false — the good case, not a fault |
-| `SlotLengthMissing` | `enabled: true` with no `slotLength`. There is no default on purpose |
-| `SlotLengthNotPositive` | `0s` passes admission and would put every pod's phase at zero — the synchronised purge the feature exists to remove |
-| `SlotLengthNotWholeSeconds` | `500ms` passes admission and has no representation in `olcAccessLogPurge`, whose fields are `[ddd+]hh:mm[:ss]` |
-| `WriteSlotCollidesWithPurge` | `slotsFromWriteToPurge` resolved to slot 0 — the pod that is purging. Zero and every multiple of `replicas` land there, which is why the rule is modular and not a minimum. Nothing rotates; the default interval keeps the journals bounded |
-| `ScheduleDeclaredTwice` | `spec.accesslogPurge.interval` and `spec.rotation.enabled` both declare *when* the purge runs. Delete one |
-| `LeadTimeOutOfRange` | `spec.rotation.leadTime` is negative, or at or beyond `(replicas − 1) × slotLength`. Beyond that bound the lead reaches back past the instant the incoming writer started purging. Nothing rotates; the default interval keeps the journals bounded |
-| `PurgeIntervalNotUsable` | `spec.accesslogPurge.interval` is non-positive or finer than a second, so it has no representation on the server. The default interval is in force |
-
-Each SlapdDatabase then publishes `AccesslogPurgeConverged`:
-
-| Reason | What it means |
-|---|---|
-| `Converged` | every pod that was read carries its own phase |
-| `RotationDisabled` | the cluster is not rotating; the value is this database's own age and interval |
-| `RetentionNotUsable` | `accesslogPurge.retention` is non-positive or finer than a second. **Reported, and the operator's 7-day default written anyway** — a mistyped duration must not become an unbounded journal |
-| `PurgeDisabled` | `accesslogPurge.enabled` is `false`. No purging on this journal at all; the growth is yours |
-| `PurgePhaseUnsupported` | a named pod's slapd refused the phase. That image carries no purge-phase patch; the operator wrote the two-field value instead, so the journal stays bounded and that pod simply does not take its phase |
-| `NoReachablePod` | nothing could be read. `Unknown`, never `False` — unreadable evidence is not evidence |
-
-A pod that could not be read is named in the message and never counts against the
-verdict.
-
-Sizing is yours. The operator will not refuse a rotation whose phases are too long
-for your write rate, and will not shorten one to keep a purge small. The arithmetic
-is ADR-037's capacity condition — every provider logs every write, including the ones
-it receives by syncrepl, while only the inactive ones purge — against your own
-storage's measured delete rate.
+Everything operational — **the client-side precondition that decides whether the
+feature helps you at all**, how to turn it on, the sizing arithmetic, the lead-time
+window and how it closes as the write rate rises, and every condition reason the
+operator publishes — is in **[`PURGE-ROTATION.md`](PURGE-ROTATION.md)**. Read it
+before setting `spec.rotation.enabled`: a rotation whose clients hold their
+connections, or whose `leadTime` is mis-sized for the write rate, measures *worse*
+than no rotation at all.
 
 ### `cn=monitor`: always present, nothing to set
 

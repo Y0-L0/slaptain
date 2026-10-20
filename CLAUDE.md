@@ -594,6 +594,25 @@ treat a green mutation result as suspicious until you have done both. A test
 whose teeth were "proven" by a check that never ran is worse than an untested
 one, because it reads as coverage.
 
+**Verify the checker, not just the result.** A mutation check is the special
+case; the general one is that any step which *reports* on the work can be
+broken in a way that reads as success. This effort paid for it six times: a
+`grep -c` that matched the "not found" error text and reported a hit; a
+case-sensitive `olcSyncRepl` that reported zero syncrepl stanzas and nearly
+became a defect report; a mutation that came back green because it needed
+`make manifests` to reach the generated CRD; a test table asserting against
+the same constant the code built from, so misspelling it moved both sides
+together; an `until ! pgrep -f "…"` whose pattern matched the waiting shell
+itself and could never exit; and a `config` subcommand that reported
+`multisite=0` while the values it rendered carried three sites.
+
+The shape is always the same: **the reassuring answer and the empty answer are
+indistinguishable unless something was built in advance to tell them apart.**
+So when a check surprises you — especially when it surprises you *pleasantly* —
+verify the check before believing it. A test that cannot fail, a sweep that
+cannot match, a wait that cannot end and a dump that cannot disagree all look
+exactly like success.
+
 **Not dogmatic:** behavior-preserving refactors under already-green tests need no new red —
 the existing tests are the guard. Red-first applies to new behavior and bug fixes. If a test
 will not go red for the intended reason, treat it as a broken test and say so — do not paper

@@ -3,6 +3,59 @@
 **Status:** Proposed
 **Date:** 2026-10-17
 
+## Notation
+
+This document was written over four days and **two of its symbols changed
+meaning along the way**. The table below is what they mean NOW; the note after
+it says where the superseded senses still stand. The old amendments are not
+rewritten — their reasoning is the record — but no symbol in them should be
+read with a later meaning.
+
+| symbol | meaning | whose number |
+|---|---|---|
+| `n` | read-write pods in the rotation; `spec.replicas` | declared |
+| `t` | slot length: how long a pod holds the write endpoint, and the spacing between neighbouring pods' purge phases; `spec.rotation.slotLength` | the administrator's |
+| `T` | rotation period and purge interval, `T = n·t` | derived |
+| `v` | signed slot displacement from a pod's write slot to its own purge slot, mod `n`; `spec.rotation.slotsFromWriteToPurge`, default `+1` | the administrator's |
+| `d` | lead time: how long BEFORE a slot boundary the write endpoint hands over; `spec.rotation.leadTime` | the administrator's |
+| `P` | purge duration, `P = w·n·t / r` | derived from `w` and `r` |
+| `τ` | the clients' maximum connection lifetime | the client's — the operator cannot see it |
+| `w` | write rate reaching a provider, local plus replicated | the deployment's |
+| `r` | delete rate a provider sustains while purging | the deployment's storage; **moves with purge size** |
+
+**Two superseded senses, both live in earlier amendments:**
+
+- **`d` meant `v`** in the second amendment and everything before the ninth —
+  the write/purge slot displacement, since renamed `slotsFromWriteToPurge`.
+  A `d` in amendment 2 is **not** a lead time; the lead did not exist yet.
+- **`D` meant the drain time** in amendments 2 through 10, an unmeasured
+  quantity. The eleventh amendment establishes that the drain time IS the
+  client connection lifetime and renames it `τ`. There is no `D` any more.
+
+### The one relation, derived once
+
+A feasible lead satisfies
+
+    τ  ≤  d  ≤  (n−1)·t − P
+
+The lower bound is the client's: a lead shorter than `τ` leaves connections
+pointing at a pod that is about to purge. The upper bound is the server's, and
+it comes from counting slots. With `v = +1` a pod writes in slot `s` and purges
+in slot `s+1`, so its *previous* purge began `n` slots earlier, at slot `s+1−n`.
+From the start of that purge to the start of the writer slot is `(n−1)·t`; the
+lead reaches back `d` from the boundary into that span, and what remains must
+still cover `P`.
+
+**`t − P` is the `n = 2` case of this, not a different rule.** At two providers
+`(n−1)·t − P` is `t − P`, and `n = 2` is the only shape anyone has measured, so
+`docs/PURGE-ROTATION.md` states the reduced form. Three providers or more have
+not been measured and the general form is the one to size against.
+
+Rearranged for `t`, the same inequality is a FLOOR on the slot length,
+`t ≥ τ / ((n−1) − n·w/r)`, which is feasible exactly when the cluster is inside
+decision 1's capacity condition `w ≤ r·(n−1)/n`. A lead adds no constraint a
+deployment did not already have.
+
 ## Context
 
 `accesslog_purge()` collects every expired entry with one uncapped search and
@@ -987,6 +1040,14 @@ verified against the real binary and the branch is unit-tested, which is not
 the same as having seen it. And this is a `cn=config` change on the
 replication path validated on one site: **multi-site is unvalidated.**
 
+> **Superseded, and narrowed.** Multi-site is no longer unvalidated as a
+> whole. The post-consolidation API (ninth amendment) ran on a fresh
+> three-site mesh — that is where the withheld-purge defect was *measured* —
+> and a full mesh cycle has since run twice. What remains unvalidated is
+> narrower and should be read in place of the sentence above: **the lead time
+> has only ever run on one site.** Amendments 11 and 12 are single-site load
+> measurements, and nothing has exercised `leadTime` across a mesh.
+
 ## Amendment, 2026-10-18 (seventh): the connection lifetime is a precondition, not a risk
 
 Decision 2 carries a paragraph headed "Unverified, and load-bearing", which
@@ -1438,8 +1499,10 @@ against ~140 s of lag it was nowhere near the edge, but the rule is
 
 ### Correction 2: there is no single correct lead, and the window closes
 
-`τ < d < t − P` with `P = w·n·t / r`. The upper bound is a function of the
-write rate, so at `t = 600s` and `r ≈ 2000/s`:
+`τ ≤ d ≤ t − P` with `P = w·n·t / r` — the `n = 2` reduction of the general
+`τ ≤ d ≤ (n−1)·t − P`, derived once under **Notation** at the top of this
+document, and `n = 2` is what was measured. The upper bound is a function of
+the write rate, so at `t = 600s` and `r ≈ 2000/s`:
 
 | offered | `w` | max feasible `d` |
 |---|---|---|

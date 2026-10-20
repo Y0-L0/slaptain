@@ -4,22 +4,31 @@ The accesslog purge stalls the writes of the pod that runs it. This plan
 implements the fix: per-pod purge phases plus a write endpoint that rotates in
 lockstep, so the pod taking writes is never the pod purging.
 
-Read [ADR-037](adrs/adr-037-purge-off-the-write-path.md) first, including all
-three amendments. This plan implements its decisions and does not re-argue them.
+Read [ADR-037](adrs/adr-037-purge-off-the-write-path.md) first, including its
+amendments and its **Notation** section — two symbols changed meaning while
+this work was running. This plan implements the ADR's decisions and does not
+re-argue them.
 
-## Resuming this work
+## Where this landed
 
-Nothing is implemented yet. The prerequisite — a slapd that can express a purge
-phase — exists as a local patch and a 2.6 image; see Phase 0 for what that
-leaves undone.
+**All six phases are implemented.** This section is a record of what shipped,
+not a plan for what might; each phase below keeps its original framing so the
+reasoning stays readable, and this list is the index.
 
-Current state:
+| phase | what it is | state |
+|---|---|---|
+| 0 | the phase parameter reaches the default image | landed — the patch is in `images/openldap-deb/debian/patches/series` and the default 2.7.1 pair expresses a phase (`2.7.1-0+slaptain2`) |
+| 1 | the decisions, as pure functions | landed |
+| 2 | API types | landed, then superseded by phase 5 |
+| 3 | converge the per-pod value | landed — three live pods at distinct phases, and **correct and useless by design** until phase 4 |
+| 4 | the write Service rotates | landed 2026-10-18 — this is the phase that moves a client-visible number |
+| 5 | decompose the purge directive by ownership | landed — unplanned, forced by a measured outage-class defect |
+| 6 | the lead time | landed 2026-10-20 — and it is what makes the rotation pay rather than cost |
 
-- `images/openldap-deb/local-patches/accesslog-purge-phase.patch` adds an
-  optional third value to `logpurge`, epoch-anchored. Built into the
-  `-ol26src` image pair by `images/openldap-deb/Containerfile.ol26src`.
-- The patch is **not** in `images/openldap-deb/debian/patches/series`, so the
-  default 2.7.1 pair cannot express a phase. That is Phase 0.
+The headline result, for anyone picking this up: **staggering the purges is
+free and moving the writes is what costs**, which inverts this plan's own
+premise. A rotation without a `leadTime` measures worse than no rotation at
+all. See ADR-037 amendments 11 and 12.
 
 ## What the measurement already settled — do not re-litigate
 
@@ -90,7 +99,8 @@ Without this the feature is unusable on 2.7.1, which is what every cluster runs.
 
 1. Add `accesslog-purge-phase.patch` to
    `images/openldap-deb/debian/patches/series`. It applies cleanly to 2.7.1 —
-   checked, seven hunks, offsets only — but has never been **built** there.
+   checked, seven hunks, offsets only. **Done:** it is in the series and the
+   default pair is built with it (`2.7.1-0+slaptain2`).
 2. `make build-openldap-deb && make build-slapd build-init`.
 3. Smoke-test: a three-field `logpurge` through `slaptest`, as in
    `Containerfile.ol26src`'s A/B — stock rejects it, patched accepts it.
@@ -113,6 +123,13 @@ func writeTarget(slot, n, d int32, eligible func(int32) bool) (int32, bool)
 
 `writeTarget` walks the preference order `d, d−1, … 1`, skips the pod purging
 this slot (offset 0), and takes the first for which `eligible` reports true.
+
+> **Superseded twice.** The `d` here is the *write/purge slot displacement*,
+> since renamed `v` / `slotsFromWriteToPurge` — not the lead time, which the
+> letter `d` now means (ADR-037 **Notation**). And the ascending-only walk was
+> replaced in phase 5: it degrades **in the direction of the sign**, wrapping
+> within the non-zero offsets, so `-1` degrades to `-2` rather than crossing to
+> `+1` (ADR-037 amendment 10).
 With `n = 2` and only the purging pod eligible it returns that pod — ADR-037's
 decided degenerate case, writes continuing badly beating writes not continuing.
 
@@ -242,11 +259,15 @@ steers new connections and does not re-wire established ones. Measured through a
 NodePort mirror of the endpoint, reading the writing pod out of each entry's own
 `entryCSN` `#sid#`: with the endpoint moved `slapd-1 → slapd-2`, a fresh
 connection wrote with sid `003` (slapd-2) and the connection held across the move
-wrote with sid `002` (slapd-1). That is this document's own "Known risks" entry
-observed, not a new finding: the rotation is for short-lived connections by
-design, and a pooling client needs a maximum connection lifetime short relative
-to `slotLength`. Where that ratio stops paying is unmeasured and no number is
-invented for it.
+wrote with sid `002` (slapd-1). That is the precondition observed, not a new
+finding: the rotation is for short-lived connections by design, and a pooling
+client needs a maximum connection lifetime short relative to `slotLength`.
+
+**Since measured, and it is the reason phase 6 exists.** The ratio that matters
+is not connection lifetime against `slotLength` but connection lifetime against
+the *lead*: with the endpoint moving at the boundary, every connection not yet
+aged out delivers writes into an active purge, every slot, by construction. The
+fix is `leadTime ≥ τ`, not a shorter slot. See ADR-037 amendments 11 and 12.
 
 ## Out of scope, deliberately
 
@@ -259,21 +280,43 @@ invented for it.
 - **Upstreaming the patch.** It is ours and local; the packaging fork carries it.
 - **Backup source selection** avoiding the purging pod.
 
-## Known risks
+## Known risks, as they stand now
 
-- **`D`, the drain time, is unmeasured**, so `T ≥ P + D` cannot be evaluated for
-  a real deployment and `d` cannot be fixed. The feature is sized on one half of
-  its own rule. The rotation is for short-lived connections by design; a pooled
-  client keeps writing to the old pod and the rotation does nothing for it.
-- **Operator downtime degrades to today**: purges keep firing from `cn=config`,
-  the writer stops rotating, and eventually the writer purges while taking
-  writes. No worse than unmitigated — but the write Service must not be left
-  selecting nothing.
-- **Phase 0 is on the critical path** and touches the image every cluster runs.
-- **Peak CSN lag was higher staggered** in two arms (34.7 s, 39.2 s against
-  19.6 s synchronised). If that inversion is real, rotation mildly worsens
-  replication lag while removing the client-visible stall. It does not change
-  the decision; it may change what the release notes have to say.
+Two of these were open questions when this plan was written and have since been
+answered by measurement. Both answers are recorded here rather than the
+questions.
+
+- **RESOLVED — the drain time had no measured value.** It has one, and it was
+  never a cluster property: the drain time **is** the clients' maximum
+  connection lifetime `τ`, measured at 60 s in the load arms (ADR-037 eleventh
+  amendment, which also retires the letter `D`). The sizing rule is the lead
+  window `τ ≤ d ≤ (n−1)·t − P`, both ends evaluable by a deployment that knows
+  its own clients and its own delete rate, and neither checkable by the
+  operator. What the drain time cannot be satisfied by is `v`: with the
+  endpoint moving at the boundary the drain window is zero whatever `t` is,
+  which is why **phase 6 exists**.
+- **RESOLVED — the lead works.** `leadTime: 0` against `leadTime: 180s`, one
+  variable, same binary: 281x fewer dropped iterations and a 59x lower
+  worst-case write latency, with the per-boundary stall gone rather than
+  smaller (ADR-037 twelfth amendment).
+- **STILL OPEN — the lead is sized once and the window closes as the write rate
+  rises.** A deployment that grows into its lead loses the protection
+  *silently*, and the symptom is the unleaded failure returning, which reads as
+  "the feature does not work". Nothing checks this and nothing can.
+- **STILL OPEN — the purge is moved, not removed.** The pod that is not taking
+  writes still stalls its own syncrepl replay while it deletes, so the residue
+  is replication lag on the slot rhythm, recovering unaided every cycle.
+  Retention must sit well above the purge duration.
+- **STILL OPEN — the delete rate moves with purge size**, so the capacity
+  condition is evaluated against a number that is not constant. No figure for
+  it is quoted anywhere; a deployment measures its own at its own purge size.
+- **STILL OPEN — operator downtime degrades to today**: purges keep firing from
+  `cn=config`, the writer stops rotating, and eventually the writer purges
+  while taking writes. No worse than unmitigated — but the write Service must
+  not be left selecting nothing.
+- **STILL OPEN — the lead has only run on one site.** The post-consolidation
+  API ran on a three-site mesh and a full mesh cycle has run twice, but
+  amendments 11 and 12 are single-site load measurements.
 
 ## Phase 5 — decompose the purge directive by ownership (ADR-024 R6, ADR-037 ninth)
 
@@ -344,7 +387,7 @@ one available: every replicated database on every read-write pod carries *some*
 database, and it would have caught the outage.
 
 
-## Phase 5 — the lead time (2026-10-20)
+## Phase 6 — the lead time (2026-10-20)
 
 Load measurement inverted the plan's premise: **staggering the purges is free;
 moving the writes is what costs.** With rotation on and writes pinned,
@@ -368,5 +411,7 @@ three-field-to-two-field transition, and the 2.7.1 purge-timing log line
 backported to the 2.6 build so purge duration and delete rate can be read
 rather than inferred.
 
-See ADR-037 amendment 11 for the measurement, the feasibility arithmetic and
-what was deliberately not decided.
+See ADR-037 amendment 11 for the measurement that forced this phase, the
+feasibility arithmetic and what was deliberately not decided — and amendment 12
+for the measurement of the lead actually working, plus the three things
+amendment 11 got wrong.

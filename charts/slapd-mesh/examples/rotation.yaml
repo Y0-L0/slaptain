@@ -18,12 +18,16 @@
 # slapd-write Service naming whichever of its two pods is not about to purge.
 # Send WRITES to slapd-write; reads stay on slapd as before.
 #
-# Before you copy this, check the two prerequisites — a slapd image carrying
-# the purge-phase patch (2.7.1-0+slaptain2 or later), and clients whose
-# connections are short-lived relative to slotLength. Both are spelled out in
-# charts/slapd-mesh/values.yaml and in docs/TUNING.md, which also carries the
-# sizing arithmetic. 6h below is an illustration, not a recommendation: ADR-037
-# fixes no number for it and neither does this file.
+# Before you copy this, check the three prerequisites — a slapd image carrying
+# the purge-phase patch (2.7.1-0+slaptain2 or later); clients whose connections
+# are short-lived relative to slotLength; and a leadTime sized above those
+# clients' maximum connection lifetime. The third is not optional: with the
+# endpoint moving AT the slot boundary, a two-provider cluster under load
+# measured 93,686 ops/s and 16.0M dropped iterations against 99,245 ops/s and
+# 57,167 with a lead, at a worst-case write latency 59x higher. All three are
+# spelled out in charts/slapd-mesh/values.yaml and in docs/PURGE-ROTATION.md,
+# which carries the sizing arithmetic. The numbers below are illustrations, not
+# recommendations: ADR-037 fixes none of them and neither does this file.
 
 # One thing this overlay must NOT do: declare an interval. The schedule is the
 # cluster's and it is declared ONCE, in one of two mutually exclusive forms —
@@ -41,6 +45,19 @@ cluster:
   rotation:
     enabled: true
     slotLength: "6h"
+    # leadTime is d: how long BEFORE each slot boundary the write endpoint hands
+    # over to the next pod, so that connections opened just before the handover
+    # have aged out by the time the outgoing pod starts purging.
+    #
+    # 5m HERE IS AN ILLUSTRATION, NOT A RECOMMENDATION. Size it yourself: it
+    # must sit above your clients' maximum connection lifetime τ — a client
+    # property the operator cannot see — and below (replicas−1) × slotLength
+    # minus the purge duration P = write_rate × replicas × slotLength /
+    # delete_rate, which is a property of your write rate and your storage.
+    # Measure your own delete rate at your own purge size; the upper bound
+    # closes as the write rate rises, and a lead grown into stops protecting
+    # silently. docs/PURGE-ROTATION.md works the arithmetic through.
+    leadTime: "5m"
     # slotsFromWriteToPurge is deliberately absent: unset takes the operator's
     # 1 — "purge the slot after writing", which hands the endpoint on and then
     # immediately works the journal down. -1 is the other experiment ("purge

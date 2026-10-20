@@ -1060,6 +1060,13 @@ spec:
                       purges was free; moving the writes was what cost, and it cost only at the
                       handover.
 
+                      And measured again with the lead in place, one variable changed: the
+                      unleaded arm lost 100 % of its dropped iterations in one contiguous block
+                      after every boundary, while the leaded arm showed flat background across
+                      the whole slot with no boundary structure at all, at a worst-case write
+                      latency two orders of magnitude lower. The per-boundary stall is GONE,
+                      not smaller (ADR-037 twelfth amendment).
+
                       So set it above your clients' maximum connection lifetime τ: with d >= τ,
                       no connection still points at the old writer when that pod begins purging.
                       THE OPERATOR CANNOT DERIVE τ — it is a property of your client, not of the
@@ -1081,6 +1088,16 @@ spec:
                       value is checked: a lead that is too short for your clients is a
                       configuration the operator will not second-guess.
 
+                      That is the operator's guard, and it is weaker than the FEASIBILITY
+                      bound, which is τ ≤ d ≤ (n−1)·t − P for purge duration P = w·n·t / r.
+                      At n = 2 — the only shape measured — the upper bound reduces to t − P,
+                      which is why docs/PURGE-ROTATION.md states it in that form; it is the
+                      reduction, not a second rule. Both ends need numbers the operator does
+                      not have (τ is the client's, w and r are the deployment's), so neither
+                      is enforced. Note that the upper bound CLOSES as the write rate rises:
+                      a lead sized once and then grown into stops protecting silently, and the
+                      symptom is the unleaded failure returning.
+
                       A Go duration string: "30s", "1m", "90s". A POINTER for the reason
                       slotLength is one — metav1.Duration is a struct, omitempty does not apply,
                       and the value form would serialise an unset field as "0s". The grammar is
@@ -1089,75 +1106,79 @@ spec:
                       drops field-level validation markers on it.
                     type: string
                   slotLength:
-                    description: |-
-                      slotLength is t, the time each pod spends as the write target, and the
-                      spacing between neighbouring pods' purge phases. The resulting purge
-                      interval written to every pod is T = spec.replicas × t.
-
-                      REQUIRED when enabled is true, and there is NO DEFAULT. ADR-037 fixes no
-                      number for t on purpose: its only guidance is an expectation about
-                      deployments — OpenLDAP's own default purges roughly daily, and "a
-                      production-shaped deployment is likelier to sit at 6 or 12 hours" — which
-                      is not a value the operator may invent. A default here would be a schedule
-                      imposed on every cluster that said nothing, and changing it later would
-                      re-phase every fleet that had accepted it.
-
-                      Sizing is yours (ADR-037 decision 6): the operator will not refuse a
-                      rotation whose phases are too long for your write rate, and it will not
-                      shorten one to keep a purge small. The arithmetic is the capacity
-                      condition write rate ≤ delete rate × (n−1)/n against your own storage —
-                      every provider logs every write, including the ones it receives by
-                      syncrepl, while only the inactive ones purge. The hazard is measured:
-                      draining ~250,000 entries in one cycle restarted both providers and cost
-                      255 s of replication lag.
-
-                      Set it no shorter than you can afford a purge to take: a purge still
-                      running when its next fire comes due makes the daemon skip that cycle, so
-                      the pod whose purge ran long is also the pod whose phase has moved. The
-                      bound at this end is (n−v)·t ≥ P — see slotsFromWriteToPurge.
-
-                      The operator derives the whole schedule from this one value — interval
-                      T = spec.replicas × t, phase ordinal × t — so there is no second number to
-                      keep consistent with it, and no interval of yours for slapd to fire on
-                      part-way through a phase (ADR-037's second amendment moves the interval off
-                      SlapdDatabase for exactly that reason).
-
-                      WHAT ADMISSION CHECKS IS THE GRAMMAR, AND ONLY THE GRAMMAR. The CEL rule
-                      on this struct says the string parses as a Go duration; it does not say
-                      the duration is usable, and "0s" satisfies it. A zero or negative slot
-                      length, and one finer than a whole second, are rejected by the OPERATOR
-                      with a condition naming this cluster, not by the API server.
-
-                      Why that matters rather than being a technicality: with t = 0 every pod's
-                      phase k·t is zero, so the whole fleet purges at the same instant — which
-                      is precisely the synchronised purge this feature exists to remove, and it
-                      would arrive silently, behind a value the API server had just pronounced
-                      valid. A rule that promises more than it checks is the failure ADR-037
-                      names in its own closing argument: a record of an intention is not a
-                      record of a state.
-
-                      One limit the API cannot express: olcAccessLogPurge's fields are
-                      [ddd+]hh:mm[:ss], whole seconds, so a slot length that does not land on a
-                      whole number of seconds — or whose derived interval or phase does not —
-                      has no representation on the server. The admission rule accepts Go's full
-                      duration grammar, including "500ms"; refusing what cannot be written is
-                      the operator's job, not the API server's.
-
-                      A Go duration string: "6h", "90m", "12h30m". A POINTER because
-                      metav1.Duration is a struct and omitempty does not apply to one — the
-                      value form would serialise an unset field as "0s", claiming a slot length
-                      nobody chose and erasing the distinction between "not set" and "set to
-                      zero" that "required when enabled, no default" rests on.
-
-                      The shape is checked by the CEL rule on this struct rather than by a
-                      Pattern marker here, and that is forced rather than chosen: controller-gen
-                      renders metav1.Duration as a bare `type: string` and DROPS field-level
-                      validation markers on it (verified against controller-gen v0.20.0 — the
-                      same Pattern marker renders on a *string field and vanishes on this one).
-                      Without some rule `slotLength: banana` is admitted and the error surfaces
-                      later as a decode failure in whatever typed client reads the object — a
-                      rejection in an operator log instead of in the reply to the apply that
-                      caused it.
+                    description: "slotLength is t, the time each pod spends as the
+                      write target, and the\nspacing between neighbouring pods' purge
+                      phases. The resulting purge\ninterval written to every pod is
+                      T = spec.replicas × t.\n\nREQUIRED when enabled is true, and
+                      there is NO DEFAULT. ADR-037 fixes no\nnumber for t on purpose:
+                      its only guidance is an expectation about\ndeployments — OpenLDAP's
+                      own default purges roughly daily, and \"a\nproduction-shaped
+                      deployment is likelier to sit at 6 or 12 hours\" — which\nis
+                      not a value the operator may invent. A default here would be
+                      a schedule\nimposed on every cluster that said nothing, and
+                      changing it later would\nre-phase every fleet that had accepted
+                      it.\n\nSizing is yours (ADR-037 decision 6): the operator will
+                      not refuse a\nrotation whose phases are too long for your write
+                      rate, and it will not\nshorten one to keep a purge small. The
+                      arithmetic is the capacity\ncondition write rate ≤ delete rate
+                      × (n−1)/n against your own storage —\nevery provider logs every
+                      write, including the ones it receives by\nsyncrepl, while only
+                      the inactive ones purge. The hazard is measured:\ndraining ~250,000
+                      entries in one cycle restarted both providers and cost\n255
+                      s of replication lag.\n\nSet it no shorter than you can afford
+                      a purge to take: a purge still\nrunning when its next fire comes
+                      due makes the daemon skip that cycle, so\nthe pod whose purge
+                      ran long is also the pod whose phase has moved. The\nbound at
+                      that end is (n−v)·t ≥ P — see slotsFromWriteToPurge.\n\nSince
+                      leadTime landed, the binding constraint on t is the LEAD WINDOW\nrather
+                      than the bare purge duration. A feasible lead needs\nτ ≤ d ≤
+                      (n−1)·t − P — for client connection lifetime τ, purge duration\nP
+                      = w·n·t / r, write rate w and delete rate r — and rearranging
+                      that for\nt gives a floor:\n\n\tt  ≥  τ / ( (n−1) − n·w/r )\n\nwhich
+                      is where the margin actually lives: at the bottom of a measured\ndelete
+                      rate it can approach the slot length itself. At n = 2 the upper\nbound
+                      reduces to t − P, and n = 2 is the only shape anyone has measured.\nSee
+                      leadTime, and docs/PURGE-ROTATION.md for the arithmetic worked\nthrough
+                      with a table.\n\nThe operator derives the whole schedule from
+                      this one value — interval\nT = spec.replicas × t, phase ordinal
+                      × t — so there is no second number to\nkeep consistent with
+                      it, and no interval of yours for slapd to fire on\npart-way
+                      through a phase (ADR-037's second amendment moves the interval
+                      off\nSlapdDatabase for exactly that reason).\n\nWHAT ADMISSION
+                      CHECKS IS THE GRAMMAR, AND ONLY THE GRAMMAR. The CEL rule\non
+                      this struct says the string parses as a Go duration; it does
+                      not say\nthe duration is usable, and \"0s\" satisfies it. A
+                      zero or negative slot\nlength, and one finer than a whole second,
+                      are rejected by the OPERATOR\nwith a condition naming this cluster,
+                      not by the API server.\n\nWhy that matters rather than being
+                      a technicality: with t = 0 every pod's\nphase k·t is zero, so
+                      the whole fleet purges at the same instant — which\nis precisely
+                      the synchronised purge this feature exists to remove, and it\nwould
+                      arrive silently, behind a value the API server had just pronounced\nvalid.
+                      A rule that promises more than it checks is the failure ADR-037\nnames
+                      in its own closing argument: a record of an intention is not
+                      a\nrecord of a state.\n\nOne limit the API cannot express: olcAccessLogPurge's
+                      fields are\n[ddd+]hh:mm[:ss], whole seconds, so a slot length
+                      that does not land on a\nwhole number of seconds — or whose
+                      derived interval or phase does not —\nhas no representation
+                      on the server. The admission rule accepts Go's full\nduration
+                      grammar, including \"500ms\"; refusing what cannot be written
+                      is\nthe operator's job, not the API server's.\n\nA Go duration
+                      string: \"6h\", \"90m\", \"12h30m\". A POINTER because\nmetav1.Duration
+                      is a struct and omitempty does not apply to one — the\nvalue
+                      form would serialise an unset field as \"0s\", claiming a slot
+                      length\nnobody chose and erasing the distinction between \"not
+                      set\" and \"set to\nzero\" that \"required when enabled, no
+                      default\" rests on.\n\nThe shape is checked by the CEL rule
+                      on this struct rather than by a\nPattern marker here, and that
+                      is forced rather than chosen: controller-gen\nrenders metav1.Duration
+                      as a bare `type: string` and DROPS field-level\nvalidation markers
+                      on it (verified against controller-gen v0.20.0 — the\nsame Pattern
+                      marker renders on a *string field and vanishes on this one).\nWithout
+                      some rule `slotLength: banana` is admitted and the error surfaces\nlater
+                      as a decode failure in whatever typed client reads the object
+                      — a\nrejection in an operator log instead of in the reply to
+                      the apply that\ncaused it."
                     type: string
                   slotsFromWriteToPurge:
                     description: |-
@@ -1183,13 +1204,25 @@ spec:
                       to rather than echoing what was typed, since -1 and n-1 are the same
                       answer and only one of them is what you wrote.
 
-                      What v costs: ADR-037 bounds it at both ends and can evaluate only one.
-                      A pod must have finished purging before it writes again
-                      ((n-v)·t >= P, for purge duration P = T x write rate / delete rate) and
-                      writes must have drained before it purges ((v)·t >= D, for drain time D).
-                      D HAS NO MEASURED VALUE AT ALL, so the sizing rule T >= P + D can only be
-                      half-evaluated today and v stays a parameter with a measured range rather
-                      than a decided number.
+                      What v costs: ADR-037 bounds it at both ends, and both ends now have
+                      values. A pod must have finished purging before it writes again
+                      ((n−v)·t ≥ P, for purge duration P = w·n·t / r), and writes must have
+                      drained off a pod before it purges. The drain time the second bound needs
+                      is the CLIENT CONNECTION LIFETIME τ — ADR-037's eleventh amendment names
+                      it as such, correcting this ADR's own earlier letter for it, and measures
+                      it at 60 s in the load arms. It is a property of the client population,
+                      not of the cluster, and the operator cannot see it.
+
+                      Which is why the drain half is not v's to satisfy. With the endpoint
+                      moving AT the slot boundary the drain window is ZERO whatever t and v
+                      are, so the lever is leadTime, not this field: set a lead above τ and the
+                      drain bound is met, leaving v carrying only the purge half.
+
+                      v THEREFORE STAYS AT ITS DEFAULT 1. The eleventh amendment considered -1
+                      for the lagging hazard and declined it — it trades a client-lifetime
+                      problem for a replication-freshness one and inverts the intended
+                      write-then-purge ordering, while the lead attacks the cause instead. -1
+                      and the deferred cooldown 2 remain experiments, not recommendations.
 
                       A name stating the two endpoints and the direction of travel is the only
                       construction that survives a negative: "writeSlotsBeforePurge: -1" has to

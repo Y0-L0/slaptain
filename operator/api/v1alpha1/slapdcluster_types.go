@@ -1028,11 +1028,33 @@ type SlapdMonitoringConfig struct {
 // not taking writes. Spreading them over n·D slots would disturb every pod
 // throughout the period and defeat the purpose.
 //
-// WHAT IS NOT PROVEN. The rotation itself has never been measured — both arms
-// of ADR-037's table pinned writes to one pod and varied only which pod purged.
-// A Service selector change does not move established connections, so a client
-// that pools them may keep writing to the former target; the scheme needs the
-// bulk of writes to follow, not all of them.
+// WHAT IS MEASURED, AND WHAT THE ROTATION DOES NOT REMOVE. The rotation has
+// been measured under load on a two-provider cluster at 100,000 ops/s, and the
+// result turns on one thing: with the endpoint moving AT the slot boundary the
+// rotation COSTS throughput, and with a leadTime set above the clients'
+// connection lifetime it does not. ADR-037's eleventh amendment separates the
+// two halves — staggering the purges is free, moving the writes is what costs
+// — and its twelfth measures a lead removing the per-boundary stall rather
+// than shrinking it: the loss folds flat across the slot with no boundary
+// structure left in it.
+//
+// What stays is the purge itself. The pod that is NOT taking writes still
+// stalls its own syncrepl replay while it deletes, so the disturbance is moved
+// off the write path and the residue is replication lag — which is what
+// decision 1 predicted and the twelfth amendment observed. Size retention well
+// above the purge duration, not just above anything else.
+//
+// THE CLIENT CONNECTION LIFETIME IS A PRECONDITION, NOT A RISK. A Kubernetes
+// Service steers NEW connections and never re-wires an established one. That
+// is how the mechanism works, it was known when the rotation was chosen, and
+// ADR-037's seventh amendment withdraws the earlier framing that treated it as
+// an open risk the design's validity waited on. The consequence is a
+// requirement on the deployment, not an uncertainty in the feature: a client
+// that holds a connection for the life of its process keeps writing to the pod
+// it first reached and gains nothing here. Bound your clients' maximum
+// connection lifetime τ, set leadTime above it, and send writes to
+// <cluster>-write. A deployment that turns this on without doing so measures
+// WORSE than one that leaves it off.
 //
 // The rule below carries slotLength's GRAMMAR check, which cannot live on the
 // field itself (see SlotLength). It accepts Go's unsigned duration syntax and
@@ -1081,7 +1103,21 @@ type SlapdRotationConfig struct {
 	// Set it no shorter than you can afford a purge to take: a purge still
 	// running when its next fire comes due makes the daemon skip that cycle, so
 	// the pod whose purge ran long is also the pod whose phase has moved. The
-	// bound at this end is (n−v)·t ≥ P — see slotsFromWriteToPurge.
+	// bound at that end is (n−v)·t ≥ P — see slotsFromWriteToPurge.
+	//
+	// Since leadTime landed, the binding constraint on t is the LEAD WINDOW
+	// rather than the bare purge duration. A feasible lead needs
+	// τ ≤ d ≤ (n−1)·t − P — for client connection lifetime τ, purge duration
+	// P = w·n·t / r, write rate w and delete rate r — and rearranging that for
+	// t gives a floor:
+	//
+	//	t  ≥  τ / ( (n−1) − n·w/r )
+	//
+	// which is where the margin actually lives: at the bottom of a measured
+	// delete rate it can approach the slot length itself. At n = 2 the upper
+	// bound reduces to t − P, and n = 2 is the only shape anyone has measured.
+	// See leadTime, and docs/PURGE-ROTATION.md for the arithmetic worked
+	// through with a table.
 	//
 	// The operator derives the whole schedule from this one value — interval
 	// T = spec.replicas × t, phase ordinal × t — so there is no second number to
@@ -1149,13 +1185,25 @@ type SlapdRotationConfig struct {
 	// to rather than echoing what was typed, since -1 and n-1 are the same
 	// answer and only one of them is what you wrote.
 	//
-	// What v costs: ADR-037 bounds it at both ends and can evaluate only one.
-	// A pod must have finished purging before it writes again
-	// ((n-v)·t >= P, for purge duration P = T x write rate / delete rate) and
-	// writes must have drained before it purges ((v)·t >= D, for drain time D).
-	// D HAS NO MEASURED VALUE AT ALL, so the sizing rule T >= P + D can only be
-	// half-evaluated today and v stays a parameter with a measured range rather
-	// than a decided number.
+	// What v costs: ADR-037 bounds it at both ends, and both ends now have
+	// values. A pod must have finished purging before it writes again
+	// ((n−v)·t ≥ P, for purge duration P = w·n·t / r), and writes must have
+	// drained off a pod before it purges. The drain time the second bound needs
+	// is the CLIENT CONNECTION LIFETIME τ — ADR-037's eleventh amendment names
+	// it as such, correcting this ADR's own earlier letter for it, and measures
+	// it at 60 s in the load arms. It is a property of the client population,
+	// not of the cluster, and the operator cannot see it.
+	//
+	// Which is why the drain half is not v's to satisfy. With the endpoint
+	// moving AT the slot boundary the drain window is ZERO whatever t and v
+	// are, so the lever is leadTime, not this field: set a lead above τ and the
+	// drain bound is met, leaving v carrying only the purge half.
+	//
+	// v THEREFORE STAYS AT ITS DEFAULT 1. The eleventh amendment considered -1
+	// for the lagging hazard and declined it — it trades a client-lifetime
+	// problem for a replication-freshness one and inverts the intended
+	// write-then-purge ordering, while the lead attacks the cause instead. -1
+	// and the deferred cooldown 2 remain experiments, not recommendations.
 	//
 	// A name stating the two endpoints and the direction of travel is the only
 	// construction that survives a negative: "writeSlotsBeforePurge: -1" has to
@@ -1175,6 +1223,13 @@ type SlapdRotationConfig struct {
 	// 69 % of it inside the client's 20 s connection lifetime. Staggering the
 	// purges was free; moving the writes was what cost, and it cost only at the
 	// handover.
+	//
+	// And measured again with the lead in place, one variable changed: the
+	// unleaded arm lost 100 % of its dropped iterations in one contiguous block
+	// after every boundary, while the leaded arm showed flat background across
+	// the whole slot with no boundary structure at all, at a worst-case write
+	// latency two orders of magnitude lower. The per-boundary stall is GONE,
+	// not smaller (ADR-037 twelfth amendment).
 	//
 	// So set it above your clients' maximum connection lifetime τ: with d >= τ,
 	// no connection still points at the old writer when that pod begins purging.
@@ -1196,6 +1251,16 @@ type SlapdRotationConfig struct {
 	// slot — nonsense independent of any measurement. Nothing else about the
 	// value is checked: a lead that is too short for your clients is a
 	// configuration the operator will not second-guess.
+	//
+	// That is the operator's guard, and it is weaker than the FEASIBILITY
+	// bound, which is τ ≤ d ≤ (n−1)·t − P for purge duration P = w·n·t / r.
+	// At n = 2 — the only shape measured — the upper bound reduces to t − P,
+	// which is why docs/PURGE-ROTATION.md states it in that form; it is the
+	// reduction, not a second rule. Both ends need numbers the operator does
+	// not have (τ is the client's, w and r are the deployment's), so neither
+	// is enforced. Note that the upper bound CLOSES as the write rate rises:
+	// a lead sized once and then grown into stops protecting silently, and the
+	// symptom is the unleaded failure returning.
 	//
 	// A Go duration string: "30s", "1m", "90s". A POINTER for the reason
 	// slotLength is one — metav1.Duration is a struct, omitempty does not apply,

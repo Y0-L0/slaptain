@@ -27,8 +27,15 @@ So the client must bound its maximum connection lifetime `τ`, and the deploymen
 must satisfy
 
 ```
-τ  <  leadTime  <  slotLength − P        P = write_rate × replicas × slotLength / delete_rate
+τ  ≤  leadTime  ≤  (replicas − 1) × slotLength − P
+
+                   P = write_rate × replicas × slotLength / delete_rate
 ```
+
+At **two** read-write pods — the only shape anyone has measured, and the one
+every figure in this document comes from — that upper bound reduces to
+`slotLength − P`, which is the form used from here on. It is the *reduction*,
+not a different rule.
 
 The lower bound is **the client's**: a lead shorter than the connection lifetime
 leaves connections pointing at a pod that is about to purge. The upper bound is
@@ -315,8 +322,15 @@ P  =  w × n × t / r        = w × T / r
 `leadTime` is
 
 ```
-τ  <  d  <  t − P
+τ  ≤  d  ≤  (n−1)·t − P          and at n = 2:          τ  ≤  d  ≤  t − P
 ```
+
+The general form is the left one; the right is its `n = 2` reduction, and
+`n = 2` is what has been measured. ADR-037 derives the slot count once, under
+**Notation** at the top of that document: with `v = +1` the incoming writer's
+previous purge began `n` slots back, so the span the lead reaches into is
+`(n−1)·t` and what is left of it must still cover `P`. The table and the floor
+below are worked at `n = 2`.
 
 A lead is feasible exactly when the cluster is inside its purge capacity — it
 adds no constraint a deployment did not already have. What it adds is a **floor
@@ -348,15 +362,14 @@ multi-second worst-case latency. That reads as *"the feature does not work"*
 when the truth is *"the lead is now mis-sized"*. Re-derive `d` whenever your
 write rate moves.
 
-### Two notes on the inequality's upper bound
+### A note on the inequality's upper bound
 
-ADR-037's eleventh amendment writes the upper bound as `(n−1)·t − P`, and the
-measurement above writes it as `t − P`. **The two coincide at `n = 2`**, which
-is the only shape anyone has measured. At three providers or more they do not,
-and nothing has been measured there — treat `t − P` as the conservative reading
-until something has.
+`t − P` above is the `n = 2` reduction of `(n−1)·t − P`, as ADR-037's Notation
+section derives. **At three providers or more they differ**, and nothing has
+been measured there: size against the general form, and read `t − P` as the
+conservative one.
 
-The operator checks neither. Its one enforced bound is
+The operator checks neither bound. Its one enforced bound is
 `d < (n−1) × slotLength`, reported as `LeadTimeOutOfRange`: at or beyond that
 the lead reaches back past the instant the incoming writer *started* purging, so
 the endpoint would hand writes to a pod that purges during its own write slot —

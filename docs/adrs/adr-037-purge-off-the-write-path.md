@@ -1556,3 +1556,81 @@ The 2.6 build reports `2.6.10+dfsg-1+slaptainphase1` both before and after the
 logging backport, so `slapd -VV` can no longer tell the two apart. The
 `dch --local` suffix needs a bump per patch-set change, the way the 2.7 path
 bumps its Debian revision.
+
+## Amendment, 2026-10-20 (thirteenth): the purge stops setting the ceiling
+
+A ramp to saturation, same stage profile as the knee hunt that first
+characterised this directory:
+
+| configuration | achieved |
+|---|---|
+| purge switched off (`none`), previous build | 268,819 - 275,347 ops/s |
+| **purge ON, rotated, 90 s lead** | **275,703 ops/s** |
+| purge ON, unrotated | ~128,000 ops/s |
+
+**The purge costs the ceiling nothing once it is off the write path.** It used
+to cap this directory at roughly 128k; rotated with a correctly sized lead it
+reaches the top of the range the directory achieves with purging disabled
+entirely.
+
+### This is a bigger claim than "writes do not stall"
+
+Earlier amendments frame the benefit as removing a per-cycle write stall. That
+undersells it. Before the rotation the purge **set the knee**, and quantised it
+by interval × ramp rate. After it, the **server** sets the knee and the purge is
+invisible to it. The feature removes the purge as a throughput constraint, not
+merely as a latency spike.
+
+### The knee is the server's, and the lead was still inside its window
+
+| time | ach/s | drop/s | mod p50 | mod p99 |
+|---|---|---|---|---|
+| 21:28:30 | 265,604 | 59.8 | 1.45 | 7.26 |
+| 21:30:30 | **275,703** | 3,401 | 13.83 | 42.52 |
+| 21:31:00 | 270,177 | 12,895 | 13.99 | 103 |
+
+`modify` p50 climbs 1.45 → 2.31 → 7.40 → 13.83 → 30 ms through the crossing. A
+*generator* ceiling leaves the median flat; only the server's own saturation
+lifts it. That discriminator fires cleanly here.
+
+And it was not the lead giving out. At the peak `w = 827` writes/s, so the
+maximum feasible `d` was `t·(1 − n·w/r) = 104 s` against the 90 s in force. The
+pre-registered prediction was that `d = 90 s` would fail above ~285k; the server
+tipped at 275.7k, below it. **The prediction was not tested, and was not
+violated** — the two limits never met.
+
+**No boundary structure before the knee.** Folded onto the slot across the clean
+window, drops were 10-177/s scattered over the whole period with no
+concentration anywhere — against the unleaded arm's 24,000/s locked into offsets
+30-180 s. The lead held from 100k all the way to the server's limit.
+
+### Which constraint binds, and when it would not
+
+At `n = 2` the purge capacity ceiling `w ≤ r·(n−1)/n` sits at roughly 333k
+offered on this hardware, 21 % above the server's own knee at 275k. So at this
+deployment's write share — 0.3 % of a `search:997,modify:3` mix — the capacity
+condition is **not** the binding constraint.
+
+That ordering is a property of the write share, not of the design. A
+write-heavier mix moves `w` up for the same offered rate and inverts it, at
+which point the capacity condition binds first and the sizing rule in Notation
+becomes the one that matters. Worth stating rather than leaving a reader to
+conclude the condition is academic.
+
+### The caveat that stays attached
+
+**The purge-off comparison is cross-binary.** Those runs predate the image that
+carries the purge-logging and runqueue-lock patches. Neither should touch the
+data path, and neither was measured to confirm it. So the honest form is
+"reaches the range measured purge-free on the previous build", not an exact
+match.
+
+The comparison that carries no such caveat is the pair in amendment 12 —
+93,686 against 99,245 ops/s at a 100k hold, same binary, same afternoon, one
+variable.
+
+Nothing here disturbs amendment 12's three corrections. The lead still moves
+the cost to replication rather than removing it; there is still no single
+correct lead, because the window closes as the write rate rises; and `r` is
+still higher than this ADR long assumed and still degrades with purge size.
+This result sits on top of those, not instead of them.

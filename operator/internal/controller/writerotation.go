@@ -163,14 +163,22 @@ func (r *SlapdClusterReconciler) reconcileWriteService(
 		ready = readyOrdinals(podList.Items, sc.Name)
 	}
 
-	slot := rotationSlot(now, plan.SlotLength, plan.Replicas)
+	// The slot the endpoint steers by, read one LEAD ahead (ADR-037,
+	// spec.rotation.leadTime). With no lead this is the slot current at `now`
+	// and the whole pass is what it was before the field existed; with one, the
+	// endpoint has already moved to the next slot's writer while the current
+	// slot's purge is still running, so a connection no older than the lead
+	// never delivers into the purge that starts at the boundary.
+	slot := writerSlot(now, plan.LeadTime, plan.SlotLength, plan.Replicas)
 	// heldReadOnly is ADR-036's authorship gate. It is Proposed and populates
 	// nothing, so the term is inert; it is passed rather than omitted so the
 	// day it lands is a change at one call site.
 	writer, ok := writeTarget(slot, plan.Replicas, plan.SlotsFromWriteToPurge, eligibleForWrites(ready, nil))
 
-	requeue := nextSlotBoundary(now, plan.SlotLength)
-	setCondition(&sc.Status.Conditions, writeRotationCondition(sc, writer, ok, now.Add(requeue)))
+	// The requeue fires when the WRITER changes — one lead before the next slot
+	// boundary — not when the purge grid turns over.
+	requeue := nextWriterMove(now, plan.LeadTime, plan.SlotLength)
+	setCondition(&sc.Status.Conditions, writeRotationCondition(sc, writer, ok, now.Add(requeue), plan.LeadTime))
 
 	svc, apply := r.writeService(sc, writer, ok)
 	if !apply {
@@ -189,7 +197,12 @@ func (r *SlapdClusterReconciler) reconcileWriteService(
 	if moved {
 		log.Info("write endpoint repointed",
 			"cluster", sc.Name, "service", svc.Name, "slot", slot,
-			"purgingPod", statefulSetPodName(sc.Name, slot),
+			// The pod purging in the slot the writer was chosen AGAINST. With a
+			// lead that slot is the one about to begin, not the one running —
+			// calling it "purgingPod" would misname it at exactly the instant
+			// the lead exists for.
+			"purgingPodOfSlot", statefulSetPodName(sc.Name, slot),
+			"leadTime", plan.LeadTime,
 			"writer", svc.Spec.Selector[labelStatefulSetPodName],
 			"nextRotation", now.Add(requeue).UTC().Format(time.RFC3339))
 	}

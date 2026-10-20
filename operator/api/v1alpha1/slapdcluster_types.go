@@ -1041,6 +1041,7 @@ type SlapdMonitoringConfig struct {
 // value being usable — "0s" matches it — and its message is worded to claim no
 // more than it checks.
 // +kubebuilder:validation:XValidation:rule="!has(self.slotLength) || self.slotLength.matches('^([0-9]+([.][0-9]+)?(ns|us|µs|ms|s|m|h))+$')",message="rotation.slotLength must be a Go duration such as 6h, 90m or 12h30m"
+// +kubebuilder:validation:XValidation:rule="!has(self.leadTime) || self.leadTime.matches('^([0-9]+([.][0-9]+)?(ns|us|µs|ms|s|m|h))+$')",message="rotation.leadTime must be a Go duration such as 30s, 1m or 90s"
 type SlapdRotationConfig struct {
 	// enabled turns the rotation on: per-pod purge phases plus a write endpoint
 	// that moves with them.
@@ -1162,6 +1163,48 @@ type SlapdRotationConfig struct {
 	// positive and before is negative, and no convention paragraph is needed.
 	// +optional
 	SlotsFromWriteToPurge *int32 `json:"slotsFromWriteToPurge,omitempty"`
+	// leadTime is d, how long BEFORE a slot boundary the write endpoint moves
+	// to the pod that will hold the next slot.
+	//
+	// Why it exists, measured. With no lead the endpoint moves AT the boundary,
+	// so the pod that stops taking writes starts purging at the same instant and
+	// every connection that has not yet aged out delivers its writes into an
+	// active purge. A two-provider run with rotation on and writes following the
+	// endpoint lost 2.8 % of throughput against the same rotation with writes
+	// pinned, and 99.9 % of that loss landed in the first 30 s after a boundary,
+	// 69 % of it inside the client's 20 s connection lifetime. Staggering the
+	// purges was free; moving the writes was what cost, and it cost only at the
+	// handover.
+	//
+	// So set it above your clients' maximum connection lifetime τ: with d >= τ,
+	// no connection still points at the old writer when that pod begins purging.
+	// THE OPERATOR CANNOT DERIVE τ — it is a property of your client, not of the
+	// cluster — so there is no default and no recommended value here. Unset
+	// means zero, which is the endpoint moving at the boundary: exactly the
+	// behaviour of every cluster that had no such field.
+	//
+	// It shifts WHO takes writes and WHEN the endpoint moves, and nothing else.
+	// The purge grid is untouched: the interval stays spec.replicas × slotLength
+	// and pod k still purges at k × slotLength from the epoch, so turning a lead
+	// on or off never rewrites a pod's olcAccessLogPurge.
+	//
+	// THE ONE BOUND, and the operator reports it rather than the API server
+	// refusing it, because it needs spec.replicas: d must stay below
+	// (spec.replicas − 1) × slotLength. At or beyond that the lead reaches back
+	// past the instant the incoming writer STARTED purging, so the endpoint
+	// would hand writes to a pod that is going to purge during its own write
+	// slot — nonsense independent of any measurement. Nothing else about the
+	// value is checked: a lead that is too short for your clients is a
+	// configuration the operator will not second-guess.
+	//
+	// A Go duration string: "30s", "1m", "90s". A POINTER for the reason
+	// slotLength is one — metav1.Duration is a struct, omitempty does not apply,
+	// and the value form would serialise an unset field as "0s". The grammar is
+	// checked by the CEL rule on this struct rather than by a Pattern marker
+	// here: controller-gen renders metav1.Duration as a bare `type: string` and
+	// drops field-level validation markers on it.
+	// +optional
+	LeadTime *metav1.Duration `json:"leadTime,omitempty"`
 }
 
 // ExternalPeerReplicationState summarises the replication health of one external peer.

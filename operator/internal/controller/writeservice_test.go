@@ -725,7 +725,7 @@ func TestWriteRotationCondition(t *testing.T) {
 	sc.Generation = 11
 	next := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
 
-	cond := writeRotationCondition(sc, 2, true, next)
+	cond := writeRotationCondition(sc, 2, true, next, 0)
 	if cond.Type != writeEndpointCondition {
 		t.Fatalf("Type = %q, want %q — the condition is named positively, like every other one this "+
 			"operator publishes", cond.Type, writeEndpointCondition)
@@ -760,8 +760,8 @@ func TestWriteRotationConditionDistinguishesNoWriterFromPodZero(t *testing.T) {
 	_, sc := writeFixture()
 	next := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
 
-	chosen := writeRotationCondition(sc, 0, true, next)
-	none := writeRotationCondition(sc, 0, false, next)
+	chosen := writeRotationCondition(sc, 0, true, next, 0)
+	none := writeRotationCondition(sc, 0, false, next, 0)
 
 	if chosen.Status == none.Status && chosen.Reason == none.Reason {
 		t.Fatalf("a chosen pod-0 and a no-writer verdict both render as %s/%s — the second means the "+
@@ -790,7 +790,7 @@ func TestWriteRotationConditionDistinguishesNoWriterFromPodZero(t *testing.T) {
 func TestWriteRotationConditionHandlesAnUnknownNextRotation(t *testing.T) {
 	_, sc := writeFixture()
 
-	cond := writeRotationCondition(sc, 1, true, time.Time{})
+	cond := writeRotationCondition(sc, 1, true, time.Time{}, 0)
 	if strings.Contains(cond.Message, "0001") {
 		t.Fatalf("message %q renders the zero time; say the next rotation is unknown instead",
 			cond.Message)
@@ -802,7 +802,7 @@ func TestWriteRotationConditionHandlesAnUnknownNextRotation(t *testing.T) {
 
 // A nil cluster must not panic, like every other pure resolver in this package.
 func TestWriteRotationConditionNilClusterIsInert(t *testing.T) {
-	cond := writeRotationCondition(nil, 0, false, time.Time{})
+	cond := writeRotationCondition(nil, 0, false, time.Time{}, 0)
 	if cond.Type != writeEndpointCondition {
 		t.Fatalf("Type = %q, want %q", cond.Type, writeEndpointCondition)
 	}

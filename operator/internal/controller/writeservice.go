@@ -361,7 +361,7 @@ func eligibleForWrites(ready map[int32]bool, heldReadOnly map[int32]bool) func(i
 // A nil cluster yields a condition with no ObservedGeneration, as
 // rotationConfiguredFor does.
 func writeRotationCondition(
-	sc *ldapv1alpha1.SlapdCluster, writer int32, ok bool, next time.Time,
+	sc *ldapv1alpha1.SlapdCluster, writer int32, ok bool, next time.Time, lead time.Duration,
 ) metav1.Condition {
 	cond := metav1.Condition{
 		Type:               writeEndpointCondition,
@@ -371,9 +371,22 @@ func writeRotationCondition(
 		cond.ObservedGeneration = sc.Generation
 	}
 
+	// With a lead in force `next` is the instant the ENDPOINT MOVES, which is
+	// one lead before the slot boundary the purge grid turns on — so it is
+	// named as a move rather than as a rotation, and the lead is spelled out.
+	// Without one the two instants coincide and the wording is left exactly as
+	// it shipped before leadTime existed: a cluster that set no lead must read
+	// byte-identically to one running the version that had no such field.
 	when := "the next rotation instant is not known"
 	if !next.IsZero() {
 		when = "next rotation at " + next.UTC().Format(time.RFC3339)
+	}
+	if lead > 0 {
+		when = "the next endpoint move instant is not known"
+		if !next.IsZero() {
+			when = "next endpoint move at " + next.UTC().Format(time.RFC3339)
+		}
+		when += fmt.Sprintf(", %s ahead of the slot boundary", lead)
 	}
 
 	if !ok {
@@ -397,4 +410,45 @@ func writeRotationCondition(
 	}
 	cond.Message = fmt.Sprintf("the write endpoint selects %s; %s", target, when)
 	return cond
+}
+
+// writerSlot returns the slot the write endpoint steers by: the slot whose
+// purge is current at now+lead rather than at now (ADR-037, spec.rotation.leadTime).
+//
+// The lead exists because the handover is where the cost is. With no lead the
+// endpoint moves AT the boundary, so the pod that stops taking writes begins
+// purging at the same instant and every connection that has not aged out
+// delivers into an active purge — measured as 99.9 % of a 2.8 % throughput loss
+// landing in the first 30 s after a boundary. Reading the grid one lead FORWARD
+// moves the endpoint that much earlier, which is the whole mechanism.
+//
+// It is a lookahead and only a lookahead: the purge grid is rotationSlot's and
+// is untouched, so a lead changes who takes writes and never when anybody
+// purges. A zero lead is rotationSlot exactly, which is the compatibility
+// guarantee the field rests on.
+//
+// A NEGATIVE lead would read the grid backwards — the endpoint moving LATE,
+// strictly worse than today — and the rotation gate refuses one with a
+// condition before it can reach here. This is pure arithmetic and defines the
+// case rather than guarding it: now+lead is simply earlier, and the answer
+// stays a valid slot.
+func writerSlot(now time.Time, lead, t time.Duration, n int32) int32 {
+	return rotationSlot(now.Add(lead), t, n)
+}
+
+// nextWriterMove returns how long until the write endpoint moves next: one lead
+// before the next slot boundary.
+//
+// The requeue has to fire when the WRITER changes, not when the purge grid
+// turns over. Asking nextSlotBoundary about now+lead gives exactly that — the
+// next boundary after now+lead is B, the writer changes at B−lead, and the wait
+// is B−lead−now, which is what nextSlotBoundary already returned from now+lead.
+//
+// Every property nextSlotBoundary guarantees carries through unchanged, and the
+// strictly-positive one is the load-bearing one: a non-positive requeue is a hot
+// loop against the API server. Exactly one lead before a boundary the answer is
+// a full slot, not zero — the move has just happened and the next one is a whole
+// slot away.
+func nextWriterMove(now time.Time, lead, t time.Duration) time.Duration {
+	return nextSlotBoundary(now.Add(lead), t)
 }

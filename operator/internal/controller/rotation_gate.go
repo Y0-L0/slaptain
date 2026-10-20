@@ -106,6 +106,15 @@ const (
 	// representation on the server — non-positive, or finer than the whole
 	// seconds olcAccessLogPurge counts in.
 	reasonPurgeIntervalNotUsable = "PurgeIntervalNotUsable"
+	// reasonLeadTimeOutOfRange: spec.rotation.leadTime is negative, or at or
+	// beyond (spec.replicas − 1) × slotLength. Beyond that bound the lead
+	// reaches back past the instant the incoming writer started purging, so the
+	// endpoint would hand writes to a pod purging during its own write slot.
+	// The bound needs spec.replicas, which is why it is the operator's to
+	// report rather than the API server's to refuse — and it is the ONLY thing
+	// checked about the value: a lead too short for the client's connection
+	// lifetime is a configuration the operator will not second-guess.
+	reasonLeadTimeOutOfRange = "LeadTimeOutOfRange"
 )
 
 // rotationPlan is the cluster's whole purge-schedule decision, resolved once
@@ -128,6 +137,7 @@ const (
 type rotationPlan struct {
 	Active                bool
 	SlotLength            time.Duration // t, form B only
+	LeadTime              time.Duration // d, form B only: how early the endpoint moves
 	Interval              time.Duration // always positive: n·t, declared, or the default
 	Replicas              int32         // n
 	SlotsFromWriteToPurge int32         // v, resolved into [1, n-1]
@@ -249,9 +259,44 @@ func evaluateRotation(sc *ldapv1alpha1.SlapdCluster) rotationPlan {
 		resolved = 1
 	}
 
+	// d, the lead: how far BEFORE a slot boundary the write endpoint moves.
+	// Unset is zero, which is the endpoint moving at the boundary — the
+	// behaviour of every cluster that predates the field.
+	//
+	// ONE bound, and it is the only thing checked. (n−1)·t is the instant the
+	// incoming writer STARTED purging; a lead reaching that far back hands
+	// writes to a pod that will still be purging during its own write slot,
+	// which is nonsense independent of any measurement. A negative lead is the
+	// same refusal from the other end: it would move the endpoint LATE, which
+	// is strictly worse than no lead at all.
+	//
+	// What is NOT checked: whether the lead exceeds the clients' connection
+	// lifetime. That is the number the lead exists to beat, and the operator
+	// cannot know it — it is a property of the client, not of the cluster. A
+	// lead too short to help is a configuration an administrator chose, and
+	// refusing it would be the operator inventing a requirement it cannot
+	// evaluate.
+	lead := time.Duration(0)
+	if r.LeadTime != nil {
+		lead = r.LeadTime.Duration
+	}
+	if bound := time.Duration(n-1) * t; lead < 0 || (lead > 0 && lead >= bound) {
+		return fault(reasonLeadTimeOutOfRange,
+			fmt.Sprintf("spec.rotation.leadTime is %s, which must be at least zero and less than "+
+				"(spec.replicas − 1) × slotLength = %s. The endpoint moves one lead before each "+
+				"slot boundary; at or beyond that bound the lead reaches back past the instant "+
+				"the incoming writer started purging, so the writes would be handed to a pod "+
+				"that purges during its own write slot (a negative lead moves the endpoint LATE, "+
+				"which is worse than no lead at all). The bound needs spec.replicas, which is "+
+				"why the operator reports it rather than the API server refusing it. Nothing "+
+				"rotates meanwhile; every pod purges on the operator's default interval of %s",
+				lead, bound, formatLogAge(defaultPurgeInterval)))
+	}
+
 	plan := rotationPlan{
 		Active:                true,
 		SlotLength:            t,
+		LeadTime:              lead,
 		Interval:              time.Duration(n) * t,
 		Replicas:              n,
 		SlotsFromWriteToPurge: resolved,
@@ -263,6 +308,13 @@ func evaluateRotation(sc *ldapv1alpha1.SlapdCluster) rotationPlan {
 		"slot(s) later. Sizing is yours (ADR-037 decision 6) — the operator will not refuse a "+
 		"rotation whose phases are too long for your write rate",
 		t, n, plan.Interval, t, plan.SlotsFromWriteToPurge)
+	if lead > 0 {
+		// Appended rather than woven in, so a cluster with no lead reads
+		// byte-identically to one running the version that had no such field.
+		plan.Message += fmt.Sprintf(". The write endpoint moves %s BEFORE each slot boundary, so "+
+			"a connection no older than that lead never delivers writes into the purge that "+
+			"starts at it", lead)
+	}
 	return plan
 }
 

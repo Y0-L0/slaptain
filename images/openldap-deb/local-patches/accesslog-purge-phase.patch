@@ -36,13 +36,26 @@ Description: logpurge takes an optional phase, aligning the purge to a fixed gri
  .
  A task is still inserted due immediately, so configuring a phase purges once
  off-grid and every subsequent run is aligned.
+ .
+ The runqueue entry's scheduling fields are written under slapd_rq.rq_mutex.
+ ldap_pvt_runqueue_resched() reads interval (and now phase and aligned) while
+ holding that mutex, and the daemon thread calls it concurrently with a config
+ modification. The existing code took the lock only when inserting a new task
+ and left the live update of re->interval.tv_sec unlocked; that write is moved
+ inside the lock along with the two new ones. A SIGSEGV was observed 13 s after
+ a three-value to two-value logpurge change on a server whose purge task had
+ been running every 100 s, and not on a server whose purge task had never run.
+ .
+ log_cf_gen() does not hold rq_mutex on entry: the mutex is a plain
+ (non-recursive) pthread mutex, and log_cf_gen() already takes it itself in the
+ SLAP_CONFIG_DEL path for LOG_PURGE, which would self-deadlock were it held.
 Forwarded: no
 Author: Dominik Epple <dominik.epple@gmail.com>
-Last-Update: 2026-10-18
+Last-Update: 2026-10-20
 ---
 --- a/include/ldap_rq.h
 +++ b/include/ldap_rq.h
-@@ -30,6 +30,8 @@
+@@ -33,6 +33,8 @@
  	char *tname;
  	char *tspec;
  	void *pool_cookie;
@@ -53,7 +66,7 @@ Last-Update: 2026-10-18
  typedef struct runqueue_s {
 --- a/libraries/libldap/rq.c
 +++ b/libraries/libldap/rq.c
-@@ -170,7 +170,21 @@
+@@ -182,7 +182,21 @@
  	LDAP_STAILQ_REMOVE( &rq->task_list, entry, re_s, tnext );
  
  	if ( !defer ) {
@@ -87,7 +100,7 @@ Last-Update: 2026-10-18
  	struct re_s *li_task;
  	Filter *li_oldf;
  	Entry *li_old;
-@@ -121,7 +123,7 @@
+@@ -123,7 +125,7 @@
  			"DESC 'Operation types to log' "
  			"EQUALITY caseIgnoreMatch "
  			"SYNTAX OMsDirectoryString )", NULL, NULL },
@@ -96,7 +109,7 @@ Last-Update: 2026-10-18
  		log_cf_gen, "( OLcfgOvAt:4.3 NAME 'olcAccessLogPurge' "
  			"DESC 'Log cleanup parameters' "
  			"EQUALITY caseIgnoreMatch "
-@@ -806,8 +808,8 @@
+@@ -857,8 +859,8 @@
  	struct log_info *li = on->on_bi.bi_private;
  	int rc = 0;
  	slap_mask_t tmask = 0;
@@ -107,7 +120,7 @@ Last-Update: 2026-10-18
  
  	switch( c->op ) {
  	case SLAP_CONFIG_EMIT:
-@@ -843,6 +845,14 @@
+@@ -894,6 +896,14 @@
  			cyclebv.bv_val = agebv.bv_val + agebv.bv_len;
  			log_age_unparse( li->li_cycle, &cyclebv, sizeof( agebuf ) - agebv.bv_len );
  			agebv.bv_len += cyclebv.bv_len;
@@ -122,7 +135,7 @@ Last-Update: 2026-10-18
  			value_add_one( &c->rvalue_vals, &agebv );
  			break;
  		case LOG_SUCCESS:
-@@ -907,6 +917,8 @@
+@@ -964,6 +974,8 @@
  			}
  			li->li_age = 0;
  			li->li_cycle = 0;
@@ -131,7 +144,7 @@ Last-Update: 2026-10-18
  			break;
  		case LOG_SUCCESS:
  			li->li_success = 0;
-@@ -999,17 +1011,36 @@
+@@ -1071,19 +1083,45 @@
  				li->li_cycle = log_age_parse( c->argv[2] );
  				if ( li->li_cycle < 1 ) {
  					rc = 1;
@@ -151,26 +164,37 @@ Last-Update: 2026-10-18
  					struct re_s *re = li->li_task;
 -					if ( re )
 +					li->li_phased = c->argc > 3;
++					/* ldap_pvt_runqueue_resched() reads interval,
++					 * phase and aligned under rq_mutex, so the
++					 * live-update path writes them under it too.
++					 * Previously only the insert branch below took
++					 * the lock, leaving re->interval.tv_sec to a
++					 * racing unlocked write.
++					 */
++					ldap_pvt_thread_mutex_lock( &slapd_rq.rq_mutex );
 +					if ( re ) {
  						re->interval.tv_sec = li->li_cycle;
 -					else if ( li->li_open ) {
+-						ldap_pvt_thread_mutex_lock( &slapd_rq.rq_mutex );
 +						re->phase.tv_sec = li->li_phase;
 +						re->aligned = li->li_phased;
 +					} else if ( li->li_open ) {
- 						ldap_pvt_thread_mutex_lock( &slapd_rq.rq_mutex );
  						li->li_task = ldap_pvt_runqueue_insert( &slapd_rq,
  							li->li_cycle, accesslog_purge, li,
  							"accesslog_purge", li->li_db ?
  								li->li_db->be_suffix[0].bv_val :
  								c->be->be_suffix[0].bv_val );
+-						ldap_pvt_thread_mutex_unlock( &slapd_rq.rq_mutex );
 +						if ( li->li_task ) {
 +							li->li_task->phase.tv_sec = li->li_phase;
 +							li->li_task->aligned = li->li_phased;
 +						}
- 						ldap_pvt_thread_mutex_unlock( &slapd_rq.rq_mutex );
  					}
++					ldap_pvt_thread_mutex_unlock( &slapd_rq.rq_mutex );
  				}
-@@ -2537,6 +2568,10 @@
+ 			}
+ 			break;
+@@ -2681,6 +2719,10 @@
  		li->li_task = ldap_pvt_runqueue_insert( &slapd_rq,
  				li->li_cycle, accesslog_purge, li,
  				"accesslog_purge", li->li_db->be_suffix[0].bv_val );

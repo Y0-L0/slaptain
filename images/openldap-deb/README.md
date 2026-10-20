@@ -19,7 +19,7 @@ for the user-facing version/tag contract.
 | Forked on | 2026-09-11 |
 | Upstream source | `openldap-2.7.1.tgz` from <https://www.openldap.org/software/download/OpenLDAP/openldap-release/> |
 | Upstream sha256 | `253db80f301258ea69cda1184766d57395b836aaabf41157eb0316eb0fac1341` (pinned in `Containerfile`, verified at build time) |
-| Package version | `2.7.1-0+slaptain2` |
+| Package version | `2.7.1-0+slaptain3` |
 
 Upstream packaging: <https://salsa.debian.org/openldap-team/openldap>
 
@@ -27,7 +27,9 @@ Upstream packaging: <https://salsa.debian.org/openldap-team/openldap>
 
 1. **`debian/changelog`** — our own entries on top of Debian's, recording
    everything below: `2.7.1-0+slaptain1` for the rebase onto 2.7.1,
-   `2.7.1-0+slaptain2` for the local patch in item 8.
+   `2.7.1-0+slaptain2` for the local patch in item 8, `2.7.1-0+slaptain3` for
+   taking `slapd_rq.rq_mutex` around that patch's live update of a running
+   purge task.
 2. **`debian/configure.options`** — dropped `--enable-perl=mod`,
    `--enable-sql=mod`, `--with-odbc=unixodbc`. `back-perl` and `back-sql` were
    removed upstream in 2.7; configure rejects the options.
@@ -62,6 +64,20 @@ Upstream packaging: <https://salsa.debian.org/openldap-team/openldap>
    Debian's own series. **`local-patches/` is the source of truth**: the copy
    under `debian/patches/` exists because the 2.7 build only ever sees
    `debian/`, and the two must stay byte-identical.
+
+9. **`local-patches/accesslog-purge-logging.patch`** — 2.6 ONLY, and
+   deliberately not in `debian/patches/series`. It backports 2.7.1's
+   `accesslog_purge:  dn="…" etime=… nentries=…` summary line, which 2.6.x does
+   not have at any log level, so a 2.6 server gives no way to read how long a
+   purge took or how many entries it deleted — both of which a purge schedule
+   has to be sized against. 2.7 already emits it; applying this there would
+   duplicate the block.
+
+   Kept as its own file rather than folded into item 8 because it is a
+   different change with a different subject: one places the purge, the other
+   measures it, and only one of them is wanted on 2.7. `local-patches/*.patch`
+   is copied in glob order, so the logging patch lands before the phase patch
+   and the phase patch's later hunks apply at an offset.
 
 That is 14 of Debian's 17 patches applying unchanged, one refreshed and two
 retired — 15 entries in `series`, plus one of ours at the end, which is the

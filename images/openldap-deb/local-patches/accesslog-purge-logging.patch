@@ -1,0 +1,58 @@
+Description: log the duration and size of each accesslog purge (2.6 backport)
+ accesslog_purge() in 2.7 ends with a summary line under LDAP_DEBUG_SYNC:
+ .
+   accesslog_purge: dn="<suffix>" etime=<s>.<us> nentries=<n>
+ .
+ It is the only record of how long a purge took and how many entries it
+ deleted. 2.6.x emits nothing at all, so on a 2.6 server running at the sync
+ log level a purge is invisible: its duration and its delete rate can only be
+ inferred from sampling something else, and a purge that takes tens of seconds
+ is shorter than a comfortable sampling interval.
+ .
+ Both quantities are needed to size a purge schedule. The purge holds the
+ accesslog environment's single writer for its whole duration, so the duration
+ bounds how long a provider can be blocked, and the delete rate decides whether
+ a given interval can keep up with the write rate at all.
+ .
+ This backports that block unchanged from 2.7.1, together with the one
+ assignment it depends on: 2.7 sets op->o_qtime at the start of the purge and
+ derives the age cutoff from it, while 2.6 derives the cutoff from
+ slap_get_time(). Only the timestamp is added here; the cutoff arithmetic is
+ left exactly as 2.6 has it, so the purge selects the same entries as before.
+ .
+ Nothing is emitted below LDAP_DEBUG_SYNC, which is where 2.7 puts it.
+Forwarded: no
+Author: Dominik Epple <dominik.epple@gmail.com>
+Last-Update: 2026-10-20
+---
+--- a/servers/slapd/overlays/accesslog.c
++++ b/servers/slapd/overlays/accesslog.c
+@@ -716,6 +716,7 @@
+ 	ava.aa_value.bv_val = timebuf;
+ 	ava.aa_value.bv_len = sizeof(timebuf);
+ 
++	gettimeofday( &op->o_qtime, NULL );
+ 	old -= li->li_age;
+ 	slap_timestamp( &old, &ava.aa_value );
+ 
+@@ -792,6 +793,20 @@
+ 		ch_free( pd.dn );
+ 	}
+ 
++	if ( LogTest( LDAP_DEBUG_SYNC ) ) {
++		struct timeval now;
++		gettimeofday( &now, NULL );
++		now.tv_sec -= op->o_qtime.tv_sec;
++		now.tv_usec -= op->o_qtime.tv_usec;
++		if ( now.tv_usec < 0 ) {
++			--now.tv_sec; now.tv_usec += 1000000;
++		}
++		Debug( LDAP_DEBUG_SYNC, "accesslog_purge: "
++				"dn=\"%s\" etime=%d.%06d nentries=%d\n",
++				li->li_db->be_suffix[0].bv_val,
++				(int)now.tv_sec, (int)now.tv_usec, pd.used );
++	}
++
+ 	ldap_pvt_thread_mutex_lock( &slapd_rq.rq_mutex );
+ 	ldap_pvt_runqueue_stoptask( &slapd_rq, rtask );
+ 	ldap_pvt_thread_mutex_unlock( &slapd_rq.rq_mutex );

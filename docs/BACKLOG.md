@@ -3092,3 +3092,32 @@ recorded here rather than fixed in passing.
   assign it a name provably outside the lab's own set.
 - Red first: `config` over one described and one undescribed context, asserted
   to produce two distinct site names and two distinct `serverIDIndex` values.
+
+## The 2.6 build's version string no longer discriminates
+
+`images/openldap-deb/Containerfile.ol26src` stamps the package with
+`dch --local '+slaptainphase'`, a fixed suffix. Adding
+`accesslog-purge-logging.patch` to `local-patches/` therefore produced a
+binary that reports `2.6.10+dfsg-1+slaptainphase1` — **identical to the build
+without it**. `slapd -VV` can no longer tell the two apart, and neither can
+anything else: the `-ol26src` images carry no label naming their patch set.
+
+Found when a measurement session rolled a cluster onto the new build and had
+no way to confirm from the running pod which patches it carried. The 2.7 path
+does not have this problem: it bumps a vendored Debian revision
+(`2.7.1-0+slaptain2` → `+slaptain3`) per patch-set change.
+
+This matters more than a cosmetic version string, because the two builds differ
+in what they can be asked to do — one emits purge timings and one is silent —
+and `docs/OPENLDAP-VERSIONS.md` already warns that `-ol26` and `-ol26src`
+differ by three characters with a quiet failure mode.
+
+### Shape of a fix (not written)
+
+- Derive the `dch --local` suffix from the patch set rather than hard-coding it
+  — a short hash of the sorted `local-patches/*.patch` contents would do, and
+  changes exactly when the patches do.
+- Or stamp an OCI label naming the applied patches, which the 2.7 images also
+  lack.
+- Red first: build twice with a patch added in between, assert the reported
+  version differs.

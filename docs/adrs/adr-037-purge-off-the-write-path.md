@@ -1394,3 +1394,102 @@ crash has not recurred, which is consistent with the fix and is not proof of it.
 And the 2.7.1 purge-timing log line is backported to the 2.6 build, because
 `P` and `r` were being inferred from a 30 s scrape against a ~45 s event. They
 are now read directly: `etime=5.402305 nentries=803`, both providers agreeing.
+
+## Amendment, 2026-10-20 (twelfth): the lead works, and three things the eleventh got wrong
+
+Measured at 100,000 ops/s on the 15.2M-entry fixture. `n = 2`, `t = 600s`
+(interval 20m, phases 0 and 600s), retention 15m, `slotsFromWriteToPurge: 1`,
+client `τ` 60s jittered 48-60s, mix `search:997,modify:3` so `w = 300`
+writes/s. 75-minute hold per arm, same binary, same afternoon, **one variable**:
+
+| arm | achieved | dropped | worst write latency |
+|---|---|---|---|
+| `leadTime: 0` | 93,686/s | 16,044,943 | 137,626 ms |
+| `leadTime: 180s` | **99,245/s** | **57,167** | **2,314 ms** |
+
+281x fewer dropped iterations, 59x lower worst-case write latency, `modify`
+p99 flat at 1.9-2.9 ms for the hour, 0.012 % of 458M operations dropped.
+
+**The per-boundary stall is gone, not smaller.** Folded onto the slot, the
+unleaded arm loses 100 % of its drops in one contiguous 150 s block after each
+boundary — 15,000-25,000/s per bin — while the leaded arm shows ~2/s flat
+across the whole slot with no boundary structure at all. That is ordinary
+background, not a shrunken spike.
+
+**No pre-feature baseline exists on this binary.** The slapd image changed
+between the earlier arms and these, so any comparison across that boundary is
+a cross-binary one and is not quoted here. The claim is `d = 0` against
+`d = 180s`, which is the comparison that isolates the lead.
+
+### Correction 1: a lead does not remove the cost, it moves it
+
+The eleventh amendment reads as though the lead eliminates the purge's
+disturbance. It does not. **The purge still happens** — on the pod not taking
+writes — and that pod's syncrepl replay stalls while it deletes. `contextCSN`
+spread alternates between 0.01 s and 96-150 s on the slot rhythm and recovers
+unaided every cycle.
+
+So the rotation removes the stall **from the write path**, and the residue is
+**replication lag**. That is what decision 1 predicted from the hand-made
+peer-only purge; it is now observed. The sizing consequence is that retention
+must exceed the purge duration by a comfortable margin — at 15m retention
+against ~140 s of lag it was nowhere near the edge, but the rule is
+`retention ≫ P`, not `retention ≫` anything else.
+
+### Correction 2: there is no single correct lead, and the window closes
+
+`τ < d < t − P` with `P = w·n·t / r`. The upper bound is a function of the
+write rate, so at `t = 600s` and `r ≈ 2000/s`:
+
+| offered | `w` | max feasible `d` |
+|---|---|---|
+| 100k | 300 | 420 s |
+| 200k | 600 | 240 s |
+| 250k | 750 | 150 s |
+| 280k | 840 | 96 s |
+| 300k | 900 | **60 s = τ — window empty** |
+
+`d = 180s` is correct at 100k and **infeasible above roughly 220k**. A
+deployment that sets a lead once and then grows into it loses the protection
+**silently**, and the symptom is the unleaded failure returning — which reads
+as "the feature does not work" rather than "the lead is now mis-sized".
+
+Neither bound is checked by the operator, and neither can be: the lower one is
+a client property and the upper one needs `w` and `r`.
+
+### Correction 3: the delete rate is higher than the record said, and it moves
+
+This ADR's figures assumed `r ≈ 1,000/s` under load. Measured directly from the
+backported log line it is **1,960-2,570/s** under exactly that load — the old
+number was inferred from a 30 s scrape against what turns out to be a
+1.5-second event at idle.
+
+Worse for anyone sizing from it, **`r` is not constant and appears to degrade
+with purge size**: ~2,400-3,100/s on 4,400-entry purges, 2,570/s on 187k,
+1,960/s on 353k. If that holds, `P` grows faster than linearly in the interval
+and the capacity condition is being evaluated against a moving number. No
+figure for `r` should be quoted; a deployment measures it **at its own purge
+size**.
+
+### Two measurement notes
+
+At `logLevel: 16640` the stats logging buries the purge line at high rates —
+`kubectl logs` reaches back only seconds. **16384** (`LDAP_DEBUG_SYNC` without
+`LDAP_DEBUG_STATS`) keeps the instrumentation and removes the flood.
+
+When the log line is unreadable, **the `contextCSN` spread peak is a usable
+proxy for `P`**: 139 s observed against 136 s predicted from `r`, 2 % apart.
+
+### The runqueue-lock fix has held
+
+Zero restarts across six three-field-to-two-field transitions on the fixed
+build plus the rolling upgrade itself, against one crash in four on the
+unfixed one. Not proof — it was 1-in-3 before and these are different
+conditions — but consistent with the race being real and fixed.
+
+### A discriminator we lost
+
+The 2.6 build reports `2.6.10+dfsg-1+slaptainphase1` both before and after the
+logging backport, so `slapd -VV` can no longer tell the two apart. The
+`dch --local` suffix needs a bump per patch-set change, the way the 2.7 path
+bumps its Debian revision.

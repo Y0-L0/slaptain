@@ -348,7 +348,12 @@ t  ≥  τ / ( (n−1) − n·w/r )
 At the bottom of a measured delete rate that floor can approach the slot length
 itself, which is where the margin actually lives.
 
-The window closes as the write rate rises. At `t = 600 s` and `r ≈ 2,000/s`:
+The window closes as the write rate rises. Two columns below, at `t = 600 s`:
+one computed at the **assumed** `r ≈ 2,000/s` this document carried before the
+rate was measured, one at the **measured** `r ≈ 2,500/s`. The gap is the point.
+A 25 % error in a rate you have to measure yourself is the difference between a
+workable lead and an impossible one — at 300k the assumed rate says no lead
+exists and the measured rate says 168 s is comfortable.
 
 The table below is indexed by *offered* rate because that is what the arms were
 driven at, but **`w` is the write rate, not the offered one.** The two move
@@ -358,12 +363,12 @@ surely — so a cluster left sitting with a lead sized for one workload can lose
 the protection when the workload changes shape, with the offered rate never
 moving.
 
-| offered | `w` | max feasible `d` |
-|---|---|---|
-| 100k | 300 | 420 s |
-| 200k | 600 | 240 s |
-| 250k | 750 | 150 s |
-| 280k | 840 | 96 s |
+| offered | `w` | max `d` at assumed `r = 2,000` | max `d` at measured `r = 2,500` |
+|---|---|---|---|
+| 100k | 300 | 420 s | 456 s |
+| 200k | 600 | 240 s | 312 s |
+| 250k | 750 | 150 s | 240 s |
+| 280k | 840 | 96 s | 197 s |
 | 300k | 900 | 60 s — equals `τ`; the window is **empty** |
 
 So a lead of 180 s is correct at 100k and **infeasible above about 220k**.

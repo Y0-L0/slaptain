@@ -1713,3 +1713,43 @@ condition stands, and the lead window stands — they are all more stable with a
 flat `r` than with a falling one. What changes is that a deployment sizing from
 this document has one number and a stated uncertainty, instead of a
 degradation it was told to design around.
+
+## Amendment, 2026-10-20 (sixteenth): correcting `r` moved every number derived from it
+
+The fifteenth said "nothing else moves". That was wrong. Both the lead window
+and the capacity ceiling are functions of `r`, so correcting it from the
+assumed ~2,000/s to the measured ~2,500/s moves every figure derived from them
+— and in the direction that makes configurations *possible* that the earlier
+numbers called impossible.
+
+| `t = 600 s` | at assumed `r = 2,000` | at measured `r = 2,500` |
+|---|---|---|
+| max `d` at 100k offered | 420 s | 456 s |
+| max `d` at 200k | 240 s | 312 s |
+| max `d` at 280k | 96 s | 197 s |
+| max `d` at 300k | **none** (≤ τ) | 168 s |
+| capacity ceiling | 333,000 ops/s | **417,000 ops/s** |
+
+At 300k the old figure says no lead is possible at all and the measured one
+says 168 s is comfortable. **A 25 % error in `r` is the difference between a
+workable configuration and an impossible one**, which is the strongest argument
+in this document for measuring it rather than taking a figure from here.
+
+Amendment 13's "roughly 333k, 21 % above the server's knee" becomes **417k, 51 %
+above it** — the ordering is unchanged and the margin is wider, so the
+conclusion that the capacity condition is not binding at this write share
+stands and is more comfortable than stated.
+
+**The assumed figures are kept beside the measured ones** in `docs/PURGE-ROTATION.md`
+rather than replaced. A reader shown only the right answer learns nothing about
+how much it depends on a rate they have to measure themselves; a reader shown
+both learns the sensitivity, which is the transferable part.
+
+### What was deliberately not retrofitted
+
+The ramp of amendment 13 ran at `d = 90 s`, sized when `r` was believed to be
+~2,000/s and expected to fail above ~285k. It tipped at 275,703 with no
+boundary structure, and at the measured rate `d = 90 s` had room throughout.
+**The run is consistent with both rates and discriminates neither.** Its
+sizing is left as it was: restating it with the figure learned afterwards
+would make it look like it had confirmed a prediction it never tested.

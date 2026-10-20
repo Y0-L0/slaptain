@@ -633,6 +633,19 @@ Conflating the two is how somebody mutation-tests a dashboard query and
 concludes it is sound. For a CHECK, prove it red. For a READING, get it twice
 by routes that fail differently.
 
+**And the second route has to be independent of the first — which includes
+being independent of you.** A reading you already believe is one you will
+confirm; the failure mode is not laziness, it is that the belief selects which
+corroboration you go looking for. **A person who did not form the belief counts
+as an independent route**, and is often the only one available. This was
+demonstrated four times in a day across two sessions working on one feature:
+each found a flaw in the other's record — a degradation that was two
+instruments disagreeing, a set of derived figures that moved when their input
+was corrected, a geometry attributed to the wrong author — and neither caught
+their own, in either direction. So when a number matters and you cannot get it
+by a second instrument, get it read by somebody who has not already concluded
+what it says.
+
 **Not dogmatic:** behavior-preserving refactors under already-green tests need no new red —
 the existing tests are the guard. Red-first applies to new behavior and bug fixes. If a test
 will not go red for the intended reason, treat it as a broken test and say so — do not paper

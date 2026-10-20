@@ -345,6 +345,14 @@ itself, which is where the margin actually lives.
 
 The window closes as the write rate rises. At `t = 600 s` and `r ≈ 2,000/s`:
 
+The table below is indexed by *offered* rate because that is what the arms were
+driven at, but **`w` is the write rate, not the offered one.** The two move
+together only while the mix is fixed. A write-heavier mix at an unchanged
+offered rate raises `w` by the same arithmetic and closes the window just as
+surely — so a cluster left sitting with a lead sized for one workload can lose
+the protection when the workload changes shape, with the offered rate never
+moving.
+
 | offered | `w` | max feasible `d` |
 |---|---|---|
 | 100k | 300 | 420 s |

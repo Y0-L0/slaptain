@@ -638,7 +638,8 @@ That second rebuild left the pod **1260 entries short** of its peers (4391 vs
 4. **Rebuild from data, not from replication.** ADR-014's restore path
    (`slapcat` a peer, `slapadd` the new pod) does not consult cookies and has
    no own-sid blind spot. That may be the honest answer for a pod that lost its
-   disk, with syncrepl only catching up the tail.
+   disk, with syncrepl only catching up the tail. Developed in its own entry
+   below — four open hazards and two measurements that would decide it.
 
 ### What this is not
 
@@ -647,6 +648,124 @@ It is not ITS#9398. That hunt is what produced this: six rounds of torture
 scale-down retiring two sids) failed to provoke a single `sync cookie is stale`
 line on a single site, with and without the ADR-034 session-log source and
 accesslog checkpointing. The storm stayed away; this came out instead.
+
+## Rebuild a lost pod from its own backup instead of a full refresh — four open hazards, and no measured problem yet
+
+Direction 4 of the entry above, developed. A pod that loses its PVCs today
+recovers by full refresh from a peer: the seed plus the whole DIT over the
+wire. If the cluster already takes scheduled backups, the artifact plus a delta
+is the cheaper shape — `slapadd` what S3 holds, then let syncrepl carry the
+tail. `SlapdDatabase.spec.bootstrapFrom` already loads an artifact offline, so
+the format and the loader exist.
+
+**The API question that prompted this.** `SlapdScheduledBackup.spec.databaseRef`
+points database-ward, one schedule per SlapdDatabase. The proposal adds the
+reverse link — a `scheduledBackupRef` on `SlapdDatabase` (and, as the natural
+extension, on `SlapdCluster`, applying to every database it owns).
+
+Two things to settle before that field exists:
+
+- **Availability is already observable.** The operator can list `SlapdBackup`s
+  and filter on `databaseRef` — which is exactly what the scheduled-backup
+  controller does for retention. So "the operator needs to know a backup
+  exists" does not justify the field. What justifies it is **intent**: which
+  artifact is this database's recovery source when several schedules or buckets
+  exist. Same distinction `slctl aws --from <kind>/<name>` is built on, and it
+  should be argued that way or not at all.
+- **Inline, rejected.** Inlining a schedule into `SlapdDatabase` rebuilds the
+  fused-CR shape ADR-028 refused (packaging unit is a chart, not a fused CR),
+  and on a mesh the CR is byte-identical at every site — so an inline S3 target
+  silently commits every site to one bucket. A ref keeps that a decision.
+
+### Prerequisites, agreed
+
+- **ADR-036 first.** A restored pod starts with a non-zero cookie, so it never
+  takes the `syncrepl.c:734-736` full-refresh fallback. ADR-036's
+  create-`olcReadOnly` gate is what keeps it from stamping its own sid before
+  it has converged.
+- **Backup age must sit inside the accesslog retention window**, or the
+  provider answers stale-cookie and the restore buys nothing. This couples the
+  cron period to `accesslogPurge.retention` for the first time — and since
+  ADR-037 the *schedule* half lives on the cluster while retention stays on the
+  database, so the two halves of the constraint are declared in two places.
+- **The artifact is the local site's.** Cross-site restore stays a human
+  operation; whole-site loss is ADR-036's explicitly undecidable case, where
+  `SlapdForceWritable` carries the human assertion.
+
+**One correction worth recording**, because the opposite is the intuitive
+reading: a restored artifact is **not** a false receipt by construction.
+`syncprov.c:3043-3056` suppresses per sid at `value <= cookie`, and the
+artifact's vector describes exactly what the artifact contains, so entries the
+rebuilt pod authored *after* the backup sit above its own-sid watermark and are
+sent normally. The artifact is a genuine watermark. It becomes a lie only if
+the pod takes a local write between `slapadd` and first convergence — which is
+the ADR-036 window, and the whole reason the gate is a prerequisite rather than
+a neighbour.
+
+### Open hazards, in the order they could reshape the design
+
+1. **A poisoned artifact propagates the ADR-036 loss.** ADR-036 produces a pod
+   whose `contextCSN` is correct and whose contents are short. Back that pod up
+   and the artifact inherits the shortfall *with a watermark asserting
+   completeness*, and it sits in S3 for the retention period; restore from it
+   and the loss is re-injected into a healthy pod, which replicates the
+   watermark onward. ADR-014 deliberately does not gate on convergence
+   (`requireConverged` designed and deferred), and `SourceSuffixHealthy` covers
+   the analogous ADR-025 glue case — there is no counterpart here, because per
+   ADR-036 no CSN check can see it. Latent today, since artifacts are only read
+   by explicit human restores; an automatism makes it the default recovery path,
+   which is how a latent corruption becomes a propagation mechanism. **What
+   makes an artifact trustworthy enough to auto-restore from is unanswered.**
+2. **Where the offline `slapadd` runs.** It is offline-only and single-writer,
+   and ADR-014 gets that by scaling the whole cluster to 0 — which inverts the
+   point here. So it has to happen inside the rebuilt pod's own startup, an
+   init-container step, shape-compatible with ADR-034's offline converger. Two
+   constraints follow: the source cannot arrive as pod-template env (ADR-013's
+   roll-trigger count is zero) and must come by ConfigMap-by-name or be
+   discovered by the init container; and it must not be a Job, because any pod
+   object naming the PVC is an ADR-018 deletion lease blocking pod re-roll.
+3. **What detects "this PVC was lost".** Nothing today distinguishes *fresh
+   pod, empty PVC, green-field cluster* from *rebuilt pod, empty PVC, cluster
+   with history*. ADR-025's one-way `status.dataObserved` latch answers a
+   neighbouring question at cluster level, not per pod. Getting the predicate
+   wrong in the green-field direction `slapadd`s a stale artifact over a new
+   install, automatically, with no human in the loop — the one failure here
+   that cannot be taken back, so it is the central decision, not an
+   implementation detail. Smaller and related: `bootstrapFrom` is one-shot via
+   `restoreApplied`, a guard whose shape does not carry to something that fires
+   on every loss — a crash-looping pod must not restore on every restart.
+4. **Every refusal needs a defined degradation.** ADR-025's destroy-last glue
+   preflight and ADR-014's own preflights are fine terminal states for a human
+   restore; here the pod still has to come up. Each refusal must fall back to
+   full refresh, and the condition text has to make "I recovered the slow way,
+   and why" legible — otherwise silent slow recoveries are indistinguishable
+   from fast ones. Same for the retention window: older than the log, fall
+   back, never fail.
+
+### What would decide it — both unmeasured
+
+- **The full-refresh cost at target DIT size.** We have canary propagation from
+  `docs/UPGRADING.md` and nothing on refresh duration. Four minutes makes this
+  a lot of new failure surface for nothing; four hours makes it obvious. This
+  number belongs in the Context of any ADR before its Decision — ADR-037's
+  lesson, where a plausible optimisation (shortening the purge interval) was
+  *refuted* by measurement rather than merely rejected.
+- **Whether it changes the ITS#9398 storm.** `dataloss_recovery_test.go`
+  measures the storm red on 2.7.1 after exactly this scenario, reproduced twice
+  more on the three-site mesh (2473 and 9237 lines) with the purge established
+  as irrelevant. So the storm lives in the baseline path this feature replaces.
+  Better (shorter present phase), worse, or unchanged is unknown — and an
+  accidental mitigation would be a far stronger argument for the feature than
+  recovery speed.
+
+### What this is not
+
+Not a replacement for `SlapdRestore` or `bootstrapFrom`, both of which stay
+human-initiated cluster-level operations. Not a cross-site recovery path. And
+not scoped yet: the per-pod rebuild *operation* does not exist — `bootstrapFrom`
+shares the artifact format and the offline load with it and essentially nothing
+else — so this may well belong to ADR-023, whose rolling replacement already
+rebuilds pods one ordinal at a time and needs a seed step regardless.
 
 ## ~~A database cannot ask for its sessionlog to come from the accesslog~~ — DONE (2026-10-15, ADR-034)
 

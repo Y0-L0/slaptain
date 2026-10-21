@@ -1753,3 +1753,53 @@ boundary structure, and at the measured rate `d = 90 s` had room throughout.
 **The run is consistent with both rates and discriminates neither.** Its
 sizing is left as it was: restating it with the figure learned afterwards
 would make it look like it had confirmed a prediction it never tested.
+
+## Amendment, 2026-10-22 (seventeenth): what "staggering does nothing" actually covered, and the decomposition that follows
+
+The third amendment measured that staggering purge phases without moving the
+write endpoint lands on the synchronised arm, and concluded that per-pod phases
+are a prerequisite of rotation rather than a cheaper alternative. That
+conclusion stands for what it tested. It was then used, in the release
+discussion for this feature, to argue that the configuration should not be
+**exposed at all** — and that inference does not follow.
+
+**The arms measured writer throughput.** The benefit claimed for staggering
+alone is a different quantity: this ADR's own context records that reads keep
+flowing at **~75 %** on a purging provider, so with a synchronised purge the
+whole fleet drops to ~75 % read capacity at the same instant, once per
+interval, while a staggered one degrades a single pod at a time. No arm
+isolated that. For a read-heavy deployment — and for how replication-lag spikes
+distribute across the fleet — it is plausibly a real difference.
+
+So the honest statement is **inert for writer throughput, measured at n = 2 and
+100k ops/s; unmeasured for fleet read capacity**. Not refuted.
+
+The arithmetic for the writer generalises and is worth stating so nobody
+re-measures it: with a pinned writer, that pod purges once per interval `T`
+either way, for the same duration. Staggering changes *who else* is stalled at
+that moment, and nobody else was taking writes. That is n-independent.
+
+### The decomposition
+
+Under ADR-039, the two halves of `spec.rotation` become independently settable
+as **tier-2 surfaces**, each carrying its own evidence, while the Helm charts
+continue to offer only the coupled form that was measured end to end:
+
+- **Purge staggering without endpoint rotation** — the case above. Evidence
+  that travels with it: inert for writer throughput (measured); fleet read
+  capacity unmeasured.
+- **Endpoint rotation without purge staggering** — this ADR's own second
+  reason to want rotation, that it keeps every provider's own sid advancing
+  (ADR-036), which is the ITS#9580 dormancy class ADR-008's amendment
+  describes. Genuinely independent of purging, and **never measured as its own
+  arm**: every arm of the 2026-10-20 run had purge staggering on.
+
+Two consequences for the API if this is built. Without purge phases,
+`slotsFromWriteToPurge` has no referent — there is no purge slot to displace
+from — and `leadTime`'s entire rationale evaporates, since the boundary-coupled
+purge is what created the stall it corrects. Two of the four fields go
+meaningless, which argues for a mode enum rather than two booleans, and against
+the decomposition being a trivial refactor of the existing switch.
+
+The coupled form remains the only tier-1 shape, because it is the only one with
+an end-to-end measurement behind it.

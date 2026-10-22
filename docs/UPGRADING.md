@@ -6,7 +6,7 @@ needs this file.
 
 ---
 
-## Unreleased — ADR-024 R6: `accesslogPurge` becomes an object, and a stored string stops the operator
+## v0.4.0 — ADR-024 R6: `accesslogPurge` becomes an object, and a stored string stops the operator
 
 `SlapdDatabase.spec.replication.accesslogPurge` was a two-token string,
 `"7+00:00 1+00:00"`. It is now an object — `{enabled, retention}` — because the

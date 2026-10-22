@@ -134,10 +134,11 @@ jobs:
       - name: Stage the CRDs as a release asset
         run: cat charts/operator/crds/*.yaml > dist/slaptain-crds.yaml
 
-      # There is no CHANGELOG.md in this repo; the commit-derived notes come
-      # from generate_release_notes below and this body is prepended to them.
-      # The heredoc is quoted (the body contains backticks), so the
-      # placeholders stand in for the variables and sed fills them in.
+      # Three sources, in reading order: the tag's CHANGELOG.md section (what
+      # changed), this body (how to pull it), and GitHub's commit-derived notes
+      # from generate_release_notes below. The heredoc is quoted (the body
+      # contains backticks), so the placeholders stand in for the variables and
+      # sed fills them in.
       - name: Build release notes
         env:
           OWNER: ${{ github.repository_owner }}
@@ -194,6 +195,18 @@ jobs:
           (amd64, arm64) and windows (amd64).
 
           EOF_NOTES
+          # The tag's own section from CHANGELOG.md goes FIRST, above the
+          # boilerplate, because "what changed" is what a reader came for. A tag
+          # with no section ships without one rather than failing the release —
+          # loudly, so the omission is visible in the job log.
+          if awk -v t="## ${GITHUB_REF_NAME}" \
+               '$0==t{f=1;next} f&&/^## /{exit} f{print}' CHANGELOG.md > changelog-section.md \
+             && [ -s changelog-section.md ]; then
+            { cat changelog-section.md; echo; cat release-notes.md; } > notes.tmp
+            mv notes.tmp release-notes.md
+          else
+            echo "::warning::no CHANGELOG.md section for ${GITHUB_REF_NAME}; release notes carry boilerplate only"
+          fi
           sed -i \
             -e "s|__OWNER__|${OWNER}|g" \
             -e "s|__REPO__|${REPO}|g" \

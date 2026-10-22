@@ -1,4 +1,4 @@
-openldap (2.7.1-0+slaptain3) UNRELEASED; urgency=medium
+openldap (2.7.1-0+slaptain3) unstable; urgency=medium
 
   * patches/accesslog-purge-phase.patch: take slapd_rq.rq_mutex around the
     live update of an existing purge task. ldap_pvt_runqueue_resched()
@@ -21,7 +21,7 @@ openldap (2.7.1-0+slaptain3) UNRELEASED; urgency=medium
 
  -- slaptain <noreply@chuck-chuck-chuck.net>  Tue, 20 Oct 2026 12:00:00 +0200
 
-openldap (2.7.1-0+slaptain2) UNRELEASED; urgency=medium
+openldap (2.7.1-0+slaptain2) unstable; urgency=medium
 
   * Add patches/accesslog-purge-phase.patch: slapo-accesslog's `logpurge`
     takes an optional third value, the phase, and the purge task then fires
@@ -39,7 +39,7 @@ openldap (2.7.1-0+slaptain2) UNRELEASED; urgency=medium
 
  -- slaptain <noreply@chuck-chuck-chuck.net>  Sun, 18 Oct 2026 12:00:00 +0200
 
-openldap (2.7.1-0+slaptain1) UNRELEASED; urgency=medium
+openldap (2.7.1-0+slaptain1) unstable; urgency=medium
 
   * Non-maintainer fork of the Debian openldap packaging, rebased from
     2.6.14+dfsg-2 onto pristine upstream 2.7.1 (built with DFSG_NONFREE=1,

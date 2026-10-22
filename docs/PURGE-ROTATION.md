@@ -8,6 +8,35 @@ The design record is
 half. Where a tunable *lives* — which field is on which resource, and why — is
 [`TUNING.md`](TUNING.md).
 
+> **Experimental (ADR-039 tier 2). Read this before turning it on.**
+>
+> This is new, it is off by default, and the project does not yet claim it is
+> fit for production. What *is* claimed: it is implemented, it is measured, and
+> the operator reports honestly what it did. What is not claimed: that anybody
+> has run it long enough to know how it behaves in your deployment.
+>
+> Three things make it unlike a conventional slapd deployment, all deliberate:
+>
+> - **It needs a patched slapd.** The per-pod purge *phase* is a third value of
+>   `olcAccessLogPurge` that upstream OpenLDAP does not have; it is our patch
+>   (`images/openldap-deb/`). A stock build refuses the three-value form, the
+>   operator falls back to the two-value one, and
+>   `AccesslogPurgeConverged=False/PurgePhaseUnsupported` names the version you
+>   need. Nothing breaks — but nothing rotates either.
+> - **It couples your load balancer to the database's internal schedule.**
+>   Rotating the write target of a multi-provider cluster is ordinary, supported
+>   OpenLDAP; doing it *in step with each provider's purge* is not something a
+>   conventional on-VM deployment does, and there is little field experience to
+>   draw on anywhere.
+> - **Its benefit is conditional on your clients**, as the next section
+>   explains. A deployment that turns this on without short-lived write
+>   connections measures WORSE than one that leaves it off.
+>
+> Known use cases are narrow: migrations, and bulk provisioning where write
+> clients are short-lived. **Feedback is wanted, positive or negative** — open
+> an issue with what you ran and what you measured. The arms nobody has run are
+> listed in ADR-037's seventeenth amendment.
+
 ---
 
 ## Read this first: the feature only pays for clients that re-dial

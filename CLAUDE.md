@@ -41,6 +41,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 ```
 .
 ├── Makefile                        # Root build targets (see Makefile Targets below)
+├── CHANGELOG.md                    # Per-tag release notes; publish.yml prepends the matching `## v<tag>` section. No section = a release with no notes
 ├── .github/workflows/              # CI: test / lint / codeql / security on every push; publish-main (sha-<hash> images
 │                                   # on main) and publish (v* tag → images, charts, slctl binaries, CRD bundle, release)
 ├── hack/verify-generated.sh        # The generated-files drift check behind `make verify-generated`

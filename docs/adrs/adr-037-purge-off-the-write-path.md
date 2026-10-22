@@ -1,6 +1,11 @@
 # ADR-037: The accesslog purge runs where the writes are not
 
-**Status:** Proposed
+**Status:** Proposed — and it ships in v0.4.0 that way, deliberately.
+Implemented, measured and released; what is missing is the operating experience
+that would let the project assert it is fit for production, so under ADR-039 it
+is a **tier-2** surface: configurable, honestly reported, carrying its own
+evidence, and not something we claim you should run yet. Not to be confused
+with ADR-004/005/006/007, which say Proposed because nobody updated them.
 **Date:** 2026-10-17
 
 ## Notation

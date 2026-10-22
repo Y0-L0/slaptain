@@ -906,6 +906,21 @@ type SlapdClusterSpec struct {
 	// moves in lockstep so the pod taking writes is never the pod purging. The
 	// interval becomes spec.replicas x slotLength. Unset changes nothing — see
 	// SlapdRotationConfig.
+	//
+	// EXPERIMENTAL, and off by default (ADR-039 tier 2). Implemented, measured
+	// and honestly reported; NOT yet asserted fit for production — what is
+	// missing is operating experience, not code. It requires a slapd carrying
+	// our accesslog-purge-phase patch, which upstream OpenLDAP does not have: a
+	// stock build refuses the three-value olcAccessLogPurge, the operator falls
+	// back to the two-value form, and AccesslogPurgeConverged reports
+	// PurgePhaseUnsupported naming the version you need — so nothing breaks,
+	// but nothing rotates either. It also couples your write endpoint to each
+	// provider's own purge schedule, which little field experience anywhere
+	// covers, and its benefit is conditional on short client connection
+	// lifetimes (see leadTime): turn it on without them and you measure WORSE
+	// than leaving it off. Known use cases are narrow — migrations, and bulk
+	// provisioning with short-lived write clients. Feedback wanted, positive or
+	// negative. User guide: docs/PURGE-ROTATION.md.
 	// +optional
 	Rotation SlapdRotationConfig `json:"rotation,omitempty"`
 }
@@ -974,6 +989,19 @@ type SlapdMonitoringConfig struct {
 }
 
 // SlapdRotationConfig configures the purge/write rotation (ADR-037).
+//
+// EXPERIMENTAL — ADR-039 tier 2. Off by default. It is implemented, measured
+// and honestly reported, and the project does NOT yet assert it is fit for
+// production: what is missing is operating experience, not code. Three things
+// make it unlike a conventional slapd deployment. It requires a slapd carrying
+// our accesslog-purge-phase patch, which upstream does not have — a stock build
+// refuses the three-value olcAccessLogPurge, the operator falls back to the
+// two-value form, and AccesslogPurgeConverged reports PurgePhaseUnsupported
+// naming the version you need. It couples the write endpoint to each provider's
+// own purge schedule, which little field experience anywhere covers. And its
+// benefit is conditional on client connection lifetime (see leadTime). Known
+// use cases are narrow: migrations, and bulk provisioning with short-lived
+// write clients. Feedback wanted. User guide: docs/PURGE-ROTATION.md.
 //
 // The problem it solves: accesslog_purge() deletes expired journal entries in
 // an unpaced loop holding the accesslog environment's single LMDB writer, and

@@ -36,6 +36,11 @@ stopping `SlapdDatabase` reconciliation cluster-wide in every namespace. Not a
 patch release under any reading. `docs/UPGRADING.md` already carries the
 migration under a heading that still says `## Unreleased`.
 
+**Status 2026-10-22: items 1-6 are done and committed; 7 and 8 remain.** The
+0.4.0 branch is merged into local `main` and nothing is pushed. What is left is
+the multi-site e2e cycle — it needs lab access, so it needs a go/no-go — and
+then the tag.
+
 Pre-tag checklist:
 
 1. **Finalise `images/openldap-deb/debian/changelog`** — the top entry is

@@ -1,8 +1,11 @@
 # ADR-040: What a data-plane image is called, and which one a cluster runs
 
 **Status:** Accepted 2026-10-22 — after decisions 1 and 2 were tested against
-the tree and both had to be corrected; see the notes inside each. Supersedes
-ADR-021's choice of OpenLDAP 2.7 as the default (decision 8).
+the tree and both had to be corrected; see the notes inside each. **Amended the
+same day**, reversing decision 8 and deleting decision 4: read the amendment
+before any decision section. ADR-021's choice of OpenLDAP 2.7 as the default
+**stands**; what this ADR changes is the default *flavour* (pure, not patched)
+and the reason 2.7 is held.
 **Date:** 2026-10-22
 
 ## Context
@@ -159,7 +162,13 @@ the feature. A green suite on one line says nothing about the other.
 patch directory so it cannot drift from what was applied. `slapd -VV` stays the
 second independent route to the same fact.
 
-### 4. A cluster records the data-plane version it was born with
+### 4. A cluster records the data-plane version it was born with — ~~DELETED~~
+
+> **Superseded the same day; never implemented.** The probe must mount the PVC
+> (an ADR-018 deletion lease) and the cache goes stale in exactly the migration
+> it exists to protect. The selector replaces it: the user's declaration *is*
+> the record. See the amendment, §"Decision 4 is deleted, not implemented".
+> Kept for the argument, not the conclusion.
 
 The operator's compiled-in default applies to **new clusters only**. An
 existing cluster keeps what it was created with until a human changes it.
@@ -251,7 +260,16 @@ The mechanism for the second cycle already exists: `SLAPD_TAG_SUFFIX` points
 the whole suite at another slapd pair, so this is a second *run*, not a second
 harness.
 
-### 8. The default version is OpenLDAP 2.6 — chosen now, revisable on evidence
+### 8. The default version is OpenLDAP 2.6 — ~~REVERSED~~
+
+> **Reversed the same day: the default stays OpenLDAP 2.7 and becomes `pure`.**
+> The weighing below is the error, not the facts. ITS#10597 is temporary and
+> self-resolving (2.7.2, inside the same format line, no migration); a
+> migration is permanent. Trading a time-limited bug for a permanent migration
+> is the wrong trade. See the amendment, §"Decision 8 is reversed". Point 2 —
+> that whatever fixes ITS#9398 is available on both versions — survives intact
+> and is reinforced: the exposure is not version-specific, and as of
+> 2026-10-23 it is not purge-specific either (`docs/ITS-9398-REPRODUCTION.md`).
 
 This inverts ADR-021. It is a choice made on today's evidence, not a conclusion
 waiting on a measurement, because the project is alpha and the way to settle it
@@ -286,18 +304,30 @@ dominant argument. Revisit then, not before.
 
 ### Execution order
 
-The decision is taken now; the flip is sequenced, because until a cluster
-records the version it was born with (decision 4), moving the default hands
-every cluster that said nothing an image that cannot open its own volume.
+> **Rewritten by the amendment.** The original order existed to sequence a
+> *version* flip behind born-with pinning. There is no version flip — 2.7
+> stays — and no born-with pinning. What remains is a **flavour** flip, which
+> carries no format risk at all: pure and patched 2.7.1 open the same volumes.
 
-1. Pin the Debian version in `Containerfile.ol26` (decision 1).
+1. Pin the Debian version in `Containerfile.ol26` (decision 1). **Landed.**
 2. Patch out of `series` → build the pure 2.7.1 pair → mesh cycle → invert the
-   alias (decision 2).
-3. Born-with pinning and the volume preflight (decisions 4 and 5).
-4. **Then** flip the default to 2.6, and both 2.6 flavours enter the tier-1 e2e
-   rotation while 2.7 leaves it.
+   alias (decision 2). Build axis and pure pair **landed**; cycle B validated
+   the pair (109/2, both failures explained); the alias inversion is open.
+3. The selector (`spec.images.slapd.select.{storageFormat,flavour}`), and the
+   volume preflight that refuses legibly (decision 5).
+4. **Then** flip the default flavour to `pure`, gated on its two prerequisites
+   — a validated pure pair (met) and the version-string collision fixed (open,
+   `docs/BACKLOG.md`). `lmdb0.9` becomes reachable through the selector rather
+   than through a tag.
 
-Steps 1 and 2 are independent of the version choice and can land first.
+Steps 1 and 2 are independent of the flavour choice and landed first.
+
+**The ordering risk inverted with decision 8.** It used to be "do not move the
+default before a cluster records its format". It is now "do not make `pure` the
+default while a pure build still reports `+slaptain3`" — because the shipped
+`PurgePhaseUnsupported` condition tells operators to verify the patch with
+`slapd -VV`, and on the day pure becomes the default that instruction misleads
+the majority.
 
 **This is an order of LANDING, not of releases.** All four can ship in one
 release and are intended to — a release is a snapshot, and what must happen in
@@ -432,29 +462,60 @@ upstream's and not ours.
 
 ## Consequences
 
+> **Reconciled with the amendment, 2026-10-23.** This section sits after the
+> amendment but was written before it, and for a day it asserted the reversed
+> decision 8 as though it were live — the default moving to 2.6, and every
+> cluster eventually paying a dump/reload. Both are now corrected below. The
+> bullets the amendment did not touch are unchanged.
+
 - **`image.tag | default .Chart.AppVersion` survives as an identity** for the
   default case, because the tag still leads with the slaptain version. No third
   version line, no change to `scripts/image-tag.sh`'s two streams.
 - **Nine pushable images instead of seven** (a pure 2.7.1 pair joins), plus the
   derivation and sanitising of the OpenLDAP component.
-- **`accesslog-purge-phase.patch` moves** out of `debian/patches/series` into
+- **`accesslog-purge-phase.patch` moved** out of `debian/patches/series` into
   the `local-patches/` mechanism the 2.6 source build already uses, so
-  patchedness becomes a build axis rather than a property of the packaging
-  fork. It should move once, when this lands.
+  patchedness is a build axis (`SLAPTAIN_PATCHES`) rather than a property of
+  the packaging fork. **Landed**, with a symmetric build gate: a patched build
+  must accept the three-value `logpurge` and a pure one must refuse it, so
+  "pure" is a verified property rather than a claim.
 - **Two tier-1 cells, and a standing bill of two mesh cycles per release**
-  (decision 7). That is the price of promising that nobody must run a patched
-  slapd in production, and it is a recurring cost, not a one-off. It is
-  affordable only because `SLAPD_TAG_SUFFIX` already points the suite at
-  another pair — the second cycle needs a run, not a harness.
-- **ADR-021 is superseded on its central choice** (decision 8): 2.6 becomes the
-  default and 2.7 becomes the tier-2 line. ADR-021's own rationale for 2.7 was
-  already retracted by its 2026-10-04 amendment; what this ADR adds is the
-  replacement and the order in which it is safe to execute.
-- **Every cluster created after the flip will eventually pay an LMDB
-  dump/reload** to reach 2.7, whenever that becomes the right move. Bounded and
-  documented (`docs/OPENLDAP-VERSIONS.md`), and ADR-023 exists to make it
-  cheaper — but it is a real debt taken deliberately, in exchange for not
-  defaulting onto a known use-after-free.
+  (decision 7). The tier-1 version line is **2.7**, in both flavours. That is
+  the price of promising that nobody must run a patched slapd in production,
+  and it is a recurring cost, not a one-off. It is affordable only because
+  `SLAPD_TAG_SUFFIX` already points the suite at another pair — the second
+  cycle needs a run, not a harness.
+- **ADR-021 keeps its central choice; what it loses is its reason.** 2.7 stays
+  the default (decision 8, reversed by the amendment). ADR-021 held 2.7 for
+  ITS#9580, which its own 2026-10-04 amendment retracted — the storm is
+  ITS#9398 and no release fixes it. 2.7 is now held for a different reason
+  entirely: **whoever takes the default never migrates.** The 2.6 line becomes
+  the tier-2 one, reachable through the selector's `storageFormat: lmdb0.9`.
+- **No cluster that takes the default ever pays an LMDB dump/reload.** That is
+  the shape the amendment was chosen for, and it inverts what this section
+  originally said. A deployment that overrides to `lmdb0.9` does so knowing it
+  may migrate later; ADR-023 is the path we owe that group, and its headline
+  use case is exactly this break without the ADR-014 outage — designed,
+  plausible, and unvalidated.
+- **The 2.7-only ITS#10597 use-after-free is accepted, deliberately and
+  temporarily.** It is a read-heavy-load bug fixed only in master, and 2.7.2
+  carries the fix *inside the same format line*, so default users receive it
+  with no migration. The trade is a time-limited bug against a permanent one;
+  2.7.2 is also what would reopen decision 8's revisit condition.
+- **The selector is the API surface**, replacing decision 4's probe-and-cache
+  entirely: `spec.images.slapd.select.{storageFormat,flavour}`, defaulting to
+  `lmdb1.0` + `pure`, driving **both** images — which makes ADR-021's "pin both
+  or neither" unviolatable rather than merely documented. Keyed on the storage
+  format rather than a version, so newer slapd builds (security fixes included)
+  keep shipping under the same selection and the only thing that can strand a
+  volume is the axis the user pinned. Not yet implemented.
+- **The `pure` default has a blocker, not just prerequisites.** A pure build
+  currently reports `2.7.1-0+slaptain3`, identical to a patched one, while the
+  shipped `PurgePhaseUnsupported` condition tells operators to verify the patch
+  with `slapd -VV`. Latent while pure is the exception; on the day it becomes
+  the default it misleads the majority. `docs/BACKLOG.md` carries the fix
+  shape. Decision 3's "second independent route to provenance" does not exist
+  on the axis that matters until this lands.
 - **Existing pins break.** Anyone pinning `spec.images.*.tag` must re-pin. At
   0.x, and under ADR-035's pre-1.0 rule, the clean design wins; it needs an
   `UPGRADING.md` entry and its own release.

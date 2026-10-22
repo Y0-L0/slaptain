@@ -1,13 +1,20 @@
 # ADR-021: OpenLDAP 2.7.1 by default from a vendored packaging fork; 2.6 kept as `-ol26`
 
-**Status:** Accepted 2026-09-11 — **superseded on its central choice by
-ADR-040 decision 8 (2026-10-22): the default is OpenLDAP 2.6, and 2.7 becomes
-the tier-2 line.** Everything else here stands: the dual-image shape, the
-vendored packaging fork, the version-scheme rule and the LMDB break are all
-still in force, and the two lines simply trade places. The headline reason
-given below for 2.7 was already retracted by this ADR's own 2026-10-04
-amendment; ADR-040 supplies the replacement and the order in which the flip is
-safe to execute.
+**Status:** Accepted 2026-09-11 — **its central choice STANDS; its reason does
+not.** ADR-040 decision 8 briefly superseded it (2026-10-22: default 2.6, 2.7
+to tier 2) and was **reversed the same day** by that ADR's amendment: 2.7
+remains the default, 2.6 remains the `-ol26` line, and the two do not trade
+places. What ADR-040 does change is the default *flavour* — the unsuffixed
+build becomes pure, so running our patches becomes a deliberate act — and the
+reason 2.7 is held. The headline reason given below was already retracted by
+this ADR's own 2026-10-04 amendment (the storm is ITS#9398, which no release
+fixes); the replacement is ADR-040's: **whoever takes the default never
+migrates**, and trading the time-limited ITS#10597 for a permanent LMDB
+dump/reload is the wrong way round. Everything else here stands: the dual-image
+shape, the vendored packaging fork, the version-scheme rule and the LMDB break.
+
+> Note for anyone reading the 2026-10-22 history: decision 8 was accepted and
+> reversed within one day. Read ADR-040's amendment, not its decision 8.
 **Date:** 2026-09-11
 
 ## Context

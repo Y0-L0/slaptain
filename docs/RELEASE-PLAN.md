@@ -281,10 +281,11 @@ for a migration the user experiences once either way.
 | ADR-040 (data-plane image identity) | done |
 | ADR-037 rotation decomposition — the `mode` enum | done |
 | Debian version pin, all three 2.6 paths | done |
-| slaptain patches as a build axis + the pure 2.7 pair | built; cycle B validates |
-| the alias inversion — unsuffixed means pure | after cycle B |
-| born-with data-plane pinning + the volume preflight | to build |
-| **default OpenLDAP version → 2.6** | to build |
+| slaptain patches as a build axis + the pure 2.7 pair | done; cycle B validated it (109/2, both explained) |
+| the alias inversion — unsuffixed means pure | to build |
+| the image **selector** (`select.{storageFormat,flavour}`) + the volume preflight | to build |
+| the version-string collision (a pure build reports `+slaptain3`) | to build — **blocks the `pure` default** |
+| ~~**default OpenLDAP version → 2.6**~~ | **withdrawn** — ADR-040 decision 8 reversed the same day; 2.7 stays. What flips is the default **flavour** to `pure` |
 | accesslog `syncprov-checkpoint` on by default | to build |
 | `syncprovSessionlogSource: Accesslog` by default | to build |
 
@@ -292,23 +293,28 @@ One `UPGRADING.md` entry, one migration for anyone moving 0.4 → 0.5.
 
 ### The two constraints that are real
 
-**1. The born-with backfill must record the OLD default.** This is the one
-place squashing creates a hazard rather than removing one. Existing clusters
-were created before the field existed, so the operator backfills on upgrade —
-and it must record **2.7**, the version they have actually been running, not
-whatever the compiled-in default has become. Record the new default instead and
-every silent cluster is handed a 2.6 image against a 2.7 LMDB, on the very
-upgrade that exists to prevent exactly that.
+**1. ~~The born-with backfill must record the OLD default.~~ GONE, and with it
+the release's only format hazard.** ADR-040's amendment deleted born-with
+pinning and reversed the version flip, so there is no backfill to get wrong and
+no cluster handed an image that cannot open its volume. The default stays 2.7;
+what moves is the **flavour**, and pure and patched 2.7.1 open the same
+volumes. The selector replaces the mechanism entirely — the user's declaration
+is the record.
 
-It is one line in the reconcile, it looks correct in review either way, and it
-wants its own red-first test. Build the pinning and its backfill *before* the
-default moves, in that order, within the release.
+The constraint that survives in its place is smaller but real: **do not make
+`pure` the default while a pure build still reports `2.7.1-0+slaptain3`.** The
+shipped `PurgePhaseUnsupported` condition tells operators to verify the patch
+with `slapd -VV`, and a pure build passes that test while carrying no patch —
+so on the day pure becomes the default, the instruction misleads the majority.
+Fix the version string first, in that order, within the release
+(`docs/BACKLOG.md`).
 
 **2. Sort the rest by REVERSIBILITY, which is what actually differs:**
 
-- **2.6 as the default** — expensive to undo (the LMDB format break), which is
-  precisely why born-with pinning comes first and why it applies to new
-  clusters only.
+- **`pure` as the default flavour** — cheap to undo: both flavours share a
+  storage format, so reverting is re-pinning an image, not a migration. This
+  row used to read "2.6 as the default", expensive to undo; the amendment
+  removed that cost from the release entirely.
 - **accesslog checkpoint** — a converged tunable; reverting is changing a value.
 - **`syncprovSessionlogSource: Accesslog`** — startup-only, converges at each
   pod's next restart, reverted the same way. Note it lands *gradually* across a
@@ -320,8 +326,31 @@ Worth stating plainly, because the rest of this release is better evidenced.
 The case for defaulting a `syncprov-checkpoint` on the accesslog database is
 `docs/its9398/control-checkpoint-1-1.log`, where `1 1` held the on-disk
 `contextCSN` current while `100 5` let it lag — the ITS#9398 precondition
-forming in one arm and not the other. That is one run, read as fragments, and
-the two arms want reading properly before the default ships.
+forming in one arm and not the other.
+
+**Read properly 2026-10-23, and the case got stronger and more expensive at
+once** (`docs/ITS-9398-REPRODUCTION.md` §Controls):
+
+- The arms are sound and the effect is real. `100 5` stormed at 1473/s with
+  the server naming the serverID present in on-disk `minCSN` and absent from
+  on-disk `contextCSN`. No purge ran in any arm — all three use a 7-day
+  retention over a one-minute run — so the checkpoint is acting on the
+  mechanism directly.
+- **`1 1` wins by ordering, not by a narrower race.** The log entry is added
+  before `minCSN` is modified, so `si_chkops = 1` checkpoints first
+  (`syncprov.c:2607`, `:2615`) and `contextCSN` lands before `minCSN` gains
+  the serverID. Read from source — **neither arm attempts a kill inside the
+  window**, so the protective ordering is reasoned, not measured.
+- **The cost is unmeasured and is now the gating unknown.** `1 1` is a
+  `contextCSN` write per logged operation into the environment whose single
+  LMDB writer already contends with every client write (ADR-037). At the rates
+  that work measured, nobody has tried it.
+- One arm's instrument did not run at all (`stale_on`, the SIGTERM row) —
+  filed in `docs/BACKLOG.md`. None of the four storm numbers came from a
+  checked instrument.
+
+**So this default is not ready to ship on this evidence.** It needs a
+kill-inside-the-window control and a cost measurement under load first.
 
 It is defensible to ship anyway under this project's alpha stance — choose now,
 let the runs accumulate, and this one is trivially reversible. What is not

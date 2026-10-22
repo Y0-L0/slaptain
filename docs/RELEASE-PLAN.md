@@ -255,15 +255,28 @@ worth much churn. The higher-leverage move is item 4.
    and the one conflict to expect there is `dataloss_recovery_test.go`.
 2. **ADR-039 (two tiers of support)** — drafted, `Proposed`. Blocking three
    separate decisions, which is why it comes first.
-3. **ADR-040 (data-plane image identity)** — drafted, `Proposed`. Tag scheme,
-   the pure/patched alias inversion, OCI labels, born-with pinning, the volume
-   preflight, capability probing over version strings.
+3. ~~**ADR-040 (data-plane image identity)**~~ — **Accepted 2026-10-22**, with
+   decisions 1 and 2 corrected by testing them against the tree, and two
+   decisions added: exactly one version line is tier 1 in both flavours
+   (bounding the bill at two mesh cycles per release), and the default version
+   becomes **OpenLDAP 2.6**, superseding ADR-021. The implementation is items 5
+   and 6 below plus 0.6.0 and 0.7.0.
 4. **The ADR-037 rotation decomposition** (seventeenth amendment) as tier-2
    surfaces, with the evidence attached to each.
-5. Image work: move `accesslog-purge-phase.patch` into `local-patches/`, build
-   the pure 2.7.1 pair, derive and sanitise the OpenLDAP tag component, invert
-   the alias. Breaking for anyone pinning `spec.images.*.tag` — own
-   `UPGRADING.md` entry.
+5. **Pin the Debian version** in `images/slapd/Containerfile.ol26` and its
+   `slapd-init` twin (ADR-040 decision 1). Independent of everything else, and
+   worth doing on its own: it makes the image reproducible and turns a Debian
+   point release into a reviewable commit instead of a silent difference
+   between two builds of the same source.
+6. Image work, **in this order** (ADR-040 decision 2): move
+   `accesslog-purge-phase.patch` out of `debian/patches/series` into the
+   `local-patches/` mechanism → build the pure 2.7.1 pair → **put it through a
+   multi-site e2e cycle** → only then invert the alias so unsuffixed means
+   pure. The cycle is not optional: the patch is not inert with the rotation
+   off (`slaptain3` takes `rq_mutex` on the reschedule path), so a green suite
+   on the patched line says nothing about the pure one. Derive and sanitise the
+   OpenLDAP tag component in the same pass. Breaking for anyone pinning
+   `spec.images.*.tag` — own `UPGRADING.md` entry.
 
 **Not in this release, or any: `feat/rid-allocation-ledger` is rejected**
 (2026-10-22). The approach will not be merged. Its 28 commits stay on the
@@ -285,7 +298,10 @@ ADR-024 R5: one customer per change. Each gets its own `UPGRADING.md` entry,
 because the point of spreading them out is that each migration is separately
 legible.
 
-- **OpenLDAP 2.6 as the default.** The case, assembled this session: ADR-021's
+- **OpenLDAP 2.6 as the default — decided 2026-10-22, ADR-040 decision 8.** Not
+  an open question any more; what remains is executing it after born-with
+  pinning, and letting the runs accumulate. **2.7.2 is what would invalidate
+  it.** The case, assembled this session: ADR-021's
   headline justification is retracted (on the unmerged branch); 2.7.1 carries
   ITS#10597, a shared `entryUUID` freed from an unlocked path on every search
   completing inside a write, fixed only in master, where 2.6 has no counterpart;

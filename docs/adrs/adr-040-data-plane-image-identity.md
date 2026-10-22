@@ -1,6 +1,8 @@
 # ADR-040: What a data-plane image is called, and which one a cluster runs
 
-**Status:** Proposed
+**Status:** Accepted 2026-10-22 — after decisions 1 and 2 were tested against
+the tree and both had to be corrected; see the notes inside each. Supersedes
+ADR-021's choice of OpenLDAP 2.7 as the default (decision 8).
 **Date:** 2026-10-22
 
 ## Context
@@ -91,10 +93,25 @@ slapd:0.4.0-ol2.6.10-slaptain     # our 2.6 source build
 ADR-021: both images or neither.
 
 The OpenLDAP component is **derived, never hand-written** — from
-`debian/changelog` for builds we compile, from `dpkg-query -W slapd` for the
-build we do not. Debian versions carry `+`, `~` and possibly an epoch, none
-legal in an OCI tag, so a sanitising rule is required and must be stable, or
-the tag moves for cosmetic reasons.
+`debian/changelog` for builds we compile. Debian versions carry `+`, `~` and
+possibly an epoch, none legal in an OCI tag, so a sanitising rule is required
+and must be stable, or the tag moves for cosmetic reasons.
+
+**And the prebuilt build must pin its Debian version.** The `-ol26` pair does a
+bare `apt-get install slapd`, so its version is whatever the archive serves at
+build time. That breaks this decision twice: the tag cannot be computed before
+`podman build -t` runs, and — worse — **the tag would change without any change
+in our tree**, because a Debian point release silently renames the artifact. So
+`Containerfile.ol26` pins the version explicitly (`slapd=<version>`), which
+makes it a declared fact in the tree rather than a property of the day.
+
+That pin is worth having on its own account, independently of tagging: it makes
+the image reproducible, and it turns a Debian point release into an explicit
+commit that can be reviewed and validated, rather than a silent difference
+between two builds of the same source. This was found by testing the decision
+against the tree before accepting it; the original wording said the version
+could be read with `dpkg-query`, which is true only *after* the build and
+therefore too late.
 
 `-debug` and `-asan` remain suffixes: they are build variants of a given
 OpenLDAP build, orthogonal to both axes.
@@ -114,6 +131,26 @@ names the required version.
 
 The patched line is expected to accumulate further patches over time, each for
 a stated reason; `accesslog-purge-phase.patch` is the first.
+
+**The inversion is sequenced, and the order is part of this decision.**
+`accesslog-purge-phase.patch` sits in `debian/patches/series`, so *every*
+`slapd:<tag>` ever built, and every e2e cycle ever run, used the patched build.
+A pure 2.7.1 pair does not exist and has never been through the suite.
+Inverting the alias first would therefore make the default image one that has
+never run our tests — precisely what ADR-039 tier 1 forbids. So:
+
+1. move the patch out of `series` into the `local-patches/` mechanism the 2.6
+   source build already uses, so patchedness becomes a build axis;
+2. build the pure pair;
+3. put it through a **multi-site e2e cycle**;
+4. only then invert the alias.
+
+The patch is **not inert when the rotation is off**, which is why step 3 cannot
+be skipped by arguing the two builds are equivalent in the default
+configuration: `2.7.1-0+slaptain3` takes `rq_mutex` around the purge task's
+reschedule and deliberately moves upstream's own unlocked `re->interval.tv_sec`
+write inside that lock. That path runs on every schedule change regardless of
+the feature. A green suite on one line says nothing about the other.
 
 ### 3. Provenance goes in OCI labels, derived not asserted
 
@@ -163,6 +200,91 @@ Note that the axis that actually matters today is **patched vs pure**, not 2.6
 vs 2.7 — the purge-phase patch exists in both source builds. A version matrix
 would have modelled the wrong thing.
 
+### 7. Exactly one version line is tier 1, in both flavours
+
+Tier 1 (ADR-039) is a standing promise of ongoing validation, so **every tier-1
+cell costs a multi-site e2e cycle every release, forever**. There are two
+independent axes here — patched vs pure, and 2.6 vs 2.7 — which is four cells,
+and four recurring mesh cycles is not affordable.
+
+So: **at any time exactly one OpenLDAP version line is tier 1, and within it
+BOTH flavours are tier 1. The other version line is tier 2 in both its
+flavours.** Two cells, two cycles.
+
+The cut falls on that axis and not another for two reasons, one forced and one
+chosen:
+
+- **Forced.** The project's commitment is that nobody is required to run a
+  patched slapd in production. That commitment is incompatible with pure at
+  tier 2, because tier 2 says in terms that the project does not assert fitness
+  for production. Both flavours of the default version are therefore tier 1,
+  and this is not a preference.
+- **Chosen.** A "default version" already implies a single answer, and
+  promising two is incoherent. ADR-021 effectively made this cut already — 2.7
+  default, 2.6 as the ADR-011 interop lane — without naming it. Naming it is
+  what makes the inverse expressible.
+
+Consequences worth stating. "Supported equally well" for the pure line means
+everything **that line can express**: the rotation cannot be among them, since
+a stock slapd refuses the three-value `olcAccessLogPurge` — consistent, because
+the rotation is tier 2 anyway. The rule scales without growing: a future 2.8
+does not add a cell, it *moves* the tier. And promoting the second line to
+tier 1 stays possible as a deliberate, priced decision — doubling the matrix is
+exactly the cost ADR-028's one-path rule exists to make visible rather than
+incur by drift.
+
+The mechanism for the second cycle already exists: `SLAPD_TAG_SUFFIX` points
+the whole suite at another slapd pair, so this is a second *run*, not a second
+harness.
+
+### 8. The default version is OpenLDAP 2.6 — chosen now, revisable on evidence
+
+This inverts ADR-021. It is a choice made on today's evidence, not a conclusion
+waiting on a measurement, because the project is alpha and the way to settle it
+is to run the chosen configuration and let the runs accumulate. One green cycle
+proves nothing; a hundred of them is what confidence is actually made of.
+
+In order of weight:
+
+1. **ITS#10597 is 2.7-only.** A shared `entryUUID` is freed from an unlocked
+   path on every client search that completes inside a write — a use-after-free
+   under read-heavy load, which is the ordinary shape of a directory workload.
+   Fixed only in master. The risk is unbounded.
+2. **The reason ADR-021 gave for 2.7 is retracted** (its 2026-10-04 amendment):
+   the storm is ITS#9398, not ITS#9580, and 2.7 fixed nothing because no
+   release has. Whatever does fix it — the `syncprov-checkpoint` on the log
+   database is the current candidate, with controls in `docs/its9398/` showing
+   `1 1` holding the on-disk `contextCSN` current where `100 5` does not — is
+   a configuration available on **both** versions, so it is not a reason to
+   prefer either.
+3. **"We did not mess this up" is the right posture for alpha software** asking
+   people to trust it with a directory. Debian's 2.6 is what every distribution
+   ships and every operator already knows, and the pure 2.6 line is literally
+   Debian's own binary.
+4. The cost of this choice — a dump/reload whenever a cluster eventually moves
+   to 2.7 (LMDB 1.0, `docs/OPENLDAP-VERSIONS.md`) — is **bounded and
+   documented**, and ADR-023 is designed to make it cheaper still.
+
+**What would invalidate it: OpenLDAP 2.7.2.** It carries the milestone for
+ITS#9398 and should carry ITS#10597's fix. When it ships, the version-specific
+case for 2.6 largely evaporates and in-place LMDB upgradeability becomes the
+dominant argument. Revisit then, not before.
+
+### Execution order
+
+The decision is taken now; the flip is sequenced, because until a cluster
+records the version it was born with (decision 4), moving the default hands
+every cluster that said nothing an image that cannot open its own volume.
+
+1. Pin the Debian version in `Containerfile.ol26` (decision 1).
+2. Patch out of `series` → build the pure 2.7.1 pair → mesh cycle → invert the
+   alias (decision 2).
+3. Born-with pinning and the volume preflight (decisions 4 and 5).
+4. **Then** flip the default to 2.6, and both 2.6 flavours enter the tier-1 e2e
+   rotation while 2.7 leaves it.
+
+Steps 1 and 2 are independent of the version choice and can land first.
+
 ### Revisit condition
 
 If slapd images ever become independently consumable — the operator supporting
@@ -181,15 +303,20 @@ is noticed rather than rediscovered.
   the `local-patches/` mechanism the 2.6 source build already uses, so
   patchedness becomes a build axis rather than a property of the packaging
   fork. It should move once, when this lands.
-- **2.6 and 2.7 both become reachable as deployment targets** — subject to
-  ADR-039's tiering, which is where the promotion is actually decided and
-  priced. Decisions 4 and 5 are what make that choice safe; they do not by
-  themselves promote anything.
-- **The default's OpenLDAP version becomes a decision that can be taken**,
-  in either direction, without breaking running clusters. Whether to take it —
-  ADR-021's rationale rests on a misattribution corrected on an unmerged
-  branch, and 2.7.1 carries ITS#10597 where 2.6 does not — is a separate
-  decision this ADR deliberately does not make.
+- **Two tier-1 cells, and a standing bill of two mesh cycles per release**
+  (decision 7). That is the price of promising that nobody must run a patched
+  slapd in production, and it is a recurring cost, not a one-off. It is
+  affordable only because `SLAPD_TAG_SUFFIX` already points the suite at
+  another pair — the second cycle needs a run, not a harness.
+- **ADR-021 is superseded on its central choice** (decision 8): 2.6 becomes the
+  default and 2.7 becomes the tier-2 line. ADR-021's own rationale for 2.7 was
+  already retracted by its 2026-10-04 amendment; what this ADR adds is the
+  replacement and the order in which it is safe to execute.
+- **Every cluster created after the flip will eventually pay an LMDB
+  dump/reload** to reach 2.7, whenever that becomes the right move. Bounded and
+  documented (`docs/OPENLDAP-VERSIONS.md`), and ADR-023 exists to make it
+  cheaper — but it is a real debt taken deliberately, in exchange for not
+  defaulting onto a known use-after-free.
 - **Existing pins break.** Anyone pinning `spec.images.*.tag` must re-pin. At
   0.x, and under ADR-035's pre-1.0 rule, the clean design wins; it needs an
   `UPGRADING.md` entry and its own release.

@@ -1,6 +1,13 @@
 # ADR-021: OpenLDAP 2.7.1 by default from a vendored packaging fork; 2.6 kept as `-ol26`
 
-**Status:** Accepted
+**Status:** Accepted 2026-09-11 — **superseded on its central choice by
+ADR-040 decision 8 (2026-10-22): the default is OpenLDAP 2.6, and 2.7 becomes
+the tier-2 line.** Everything else here stands: the dual-image shape, the
+vendored packaging fork, the version-scheme rule and the LMDB break are all
+still in force, and the two lines simply trade places. The headline reason
+given below for 2.7 was already retracted by this ADR's own 2026-10-04
+amendment; ADR-040 supplies the replacement and the order in which the flip is
+safe to execute.
 **Date:** 2026-09-11
 
 ## Context

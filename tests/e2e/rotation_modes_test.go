@@ -28,11 +28,30 @@ import (
 // specs discharge exactly that and claim nothing about whether either mode is
 // a good idea.
 //
-// ORDERED, and the order is load-bearing. WriteOnly runs first so that
-// slapd-write exists and names a pod; PurgeOnly can then assert that it was
-// RETIRED to the fleet rather than merely never created. Run the other way
-// round, PurgeOnly's write-half assertion would pass on a cluster where the
-// endpoint had never existed — true, and about the wrong thing.
+// ORDERED, and the order is load-bearing in BOTH halves.
+//
+// The write half: WriteOnly runs first so slapd-write exists and names a pod,
+// and PurgeOnly can then assert it was RETIRED to the fleet rather than merely
+// never created. Run the other way round, that assertion would pass on a
+// cluster where the endpoint had never existed — true, and about the wrong
+// thing.
+//
+// The purge half: each spec asserts the arity the OTHER one does not leave
+// behind, so every assertion here is a transition and not a state. Measured on
+// a three-site mesh 2026-10-22, with the arity logged per poll:
+//
+//	WriteOnly  poll 1 [3 3 3] FAILS (the fixture's coupled form) → poll 2 [2 2 2]
+//	PurgeOnly  poll 1 [2 2 2] FAILS (what WriteOnly left)        → poll 2 [3 3 3]
+//
+// That first-poll failure is the teeth: the assertion only passes because the
+// operator converged, not because the cluster was already there.
+//
+// The corollary is a warning. Run ONE of these in isolation — a --focus, a
+// bisect — and its incoming state may already satisfy it, so Eventually
+// succeeds on the first poll and the spec proves nothing. They are a pair.
+// (Learned by mutating the two expectations against each other, which passed:
+// the mutation inverted each spec to precisely the state the other had left,
+// so it was the MUTATION that was vacuous, not the specs. Verify the checker.)
 var _ = Describe("ADR-037: the rotation's halves split",
 	Label("purge-rotation", "rotation-modes"), Ordered, func() {
 

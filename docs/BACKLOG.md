@@ -2960,6 +2960,33 @@ identically with the purge rotation on and with a plain fleet-wide interval.
 `minCSN`** — or if there is a second route into the fatal state that needs no
 purge at all. Nobody has checked which.
 
+**A third data point, 2026-10-22**, from the v0.4.0 release validation: the
+storm appeared again on a three-site mesh (9358 lines on one pod), and on that
+pod the journal's oldest surviving entry was `20261022071312Z` while the pod
+itself started at `07:33:26Z` — the log reaches back *past the pod's own birth*,
+on a cluster under an hour old with a 48h retention. Nothing had been deleted,
+and no scheduled sweep could have run: the interval was 18h under the rotation
+and 24h while it was refused. Whether a sweep *ran* without deleting is still
+unmeasured — a log-level check for it was attempted and thrown out as unsound.
+
+That makes three independent runs in which the storm appeared with the purge
+having deleted nothing, which puts real weight on a sentence in
+`docs/ITS-9398-REPRODUCTION.md`: *"The exposure is not continuous. It is tied
+to purge sweeps… That moves the 'how do we avoid this' question away from
+'checkpoint the log DB' and toward the purge interval."* If the exposure is not
+tied to sweeps, that pivot loses its basis, and the mitigation question moves
+back to the log DB — which is where the same document notes nobody configures a
+checkpoint: not upstream's guide, not `slapo-accesslog(5)`, not Symas, and not
+upstream's own regression fixtures.
+
+**The configuration is confirmed susceptible by construction.** On the validated
+fixture the syncprov overlay on both accesslog databases is bare — no
+`olcSpCheckpoint`, no session log — while `syncprovCheckpoint: 500 15` lands on
+the *data* databases, and `syncprovSessionlogSource` is unset. A log DB's
+`contextCSN` is therefore written only on clean shutdown, which is the
+precondition exactly. The two databases that stormed were those two bare log
+DBs.
+
 That is exactly the branch's own Open question 4, still unanswered: *"Does
 `logpurge` reopen the window on a steady-state server? The purge path advances
 `minCSN` on disk with a real `be_modify` on its own timer

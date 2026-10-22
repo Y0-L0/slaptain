@@ -36,10 +36,36 @@ stopping `SlapdDatabase` reconciliation cluster-wide in every namespace. Not a
 patch release under any reading. `docs/UPGRADING.md` already carries the
 migration under a heading that still says `## Unreleased`.
 
-**Status 2026-10-22: items 1-6 are done and committed; 7 and 8 remain.** The
-0.4.0 branch is merged into local `main` and nothing is pushed. What is left is
-the multi-site e2e cycle — it needs lab access, so it needs a go/no-go — and
-then the tag.
+**Status 2026-10-22: items 1-7 are done; only the tag remains.** The 0.4.0
+branch is merged into local `main` and nothing is pushed.
+
+**The multi-site validation, in full.** Three cycles on a three-site mesh,
+pod-routed, images at `sha-0582604`.
+
+| cycle | result |
+|---|---|
+| rotation OFF | 107 passed / 2 failed / 7 skipped |
+| rotation ON (`E2E_ROTATION=1`) | 101 passed / 3 failed / 12 skipped |
+| `write-rotation` only, after the fixture fix | **6 passed / 0 failed** |
+
+**No product regression in any of them.** The reds, each run to ground:
+
+- *hot-add* and *exporter sidecar* (cycle 1) — collateral. `external_replication`
+  removes site-3 from the `SlapdMesh` and restores it, and because peer CA
+  volumes live in the pod template that rolls every pod twice; the hot-add spec
+  snapshotted mid-roll. The spec predates this branch by a month.
+- *dataloss recovery* (cycle 2) — the ITS#9398 storm, in the configuration we
+  knowingly ship. See the known-issue entry in `CHANGELOG.md`.
+- *exporter sidecar* (cycle 2) — collateral of that storm: ADR-030's probe
+  correctly ejected a pod that was no longer answering LDAP. The probe working,
+  not failing.
+- *write-rotation BeforeAll* (cycle 2) — **the one genuine defect, and it was in
+  the test.** Fixed in `129b774`; see cycle 3.
+
+**Two things the validation taught that are not about this release.** The suite
+had never been run against a cluster *deployed* with the rotation on, which is
+how the fixture gap survived. And a mesh membership change rolls every pod at
+every other site — a pod-template roll trigger ADR-013 does not list.
 
 Pre-tag checklist:
 
@@ -69,8 +95,9 @@ Pre-tag checklist:
    decides whether ADR-037's slot length is also a storm-exposure knob. Cheap
    enough to settle before the release; if it is not settled, the release notes
    should not imply it is.
-7. `make helm-lint verify-generated`, then a **multi-site e2e cycle** — this is
-   a replication-path change and CLAUDE.md requires it before merge.
+7. ~~`make helm-lint verify-generated`, then a **multi-site e2e cycle**~~ —
+   done 2026-10-22, see the status block above. Run the rotation cycle with
+   `E2E_ROTATION=1` or the feature's own specs never execute.
 8. Chart `version`/`appVersion` → `0.4.0`, bump commit, then tag.
 
 Deliberately **not** in 0.4.0: any default change, the image scheme, the

@@ -63,6 +63,29 @@ OpenLDAP 2.7.1, built from the vendored packaging fork in
 behaviour patch, not packaging, and `debian/changelog` records what it changes
 and why — including one deliberate change to stock behaviour it could not avoid.
 
+### Known issue: ITS#9398 after a pod loses its disk
+
+A pod that is rebuilt from replication (ADR-012 case 2) can come back with a
+`minCSN` on its accesslog database naming a serverID its `contextCSN` does not
+track. That pod then answers **every** consumer of that log with `sync cookie
+is stale`, permanently, while CSN convergence and every other health signal
+read green. Measured again on a three-site mesh on 2026-10-22: 9358
+stale-cookie lines on one pod.
+
+This is **ITS#9398**, filed upstream in 2020 and fixed in no release including
+master — the contemplated fix is blocked behind an explicitly postponed
+enhancement (ITS#9225). It is not new in 0.4.0 and not caused by the purge
+rotation.
+
+**Detect it**: `slctl inspect` reports it as `accesslog-mincsn`, and
+`tests/e2e.sh` runs that check at every site after the suite. **Clear it**: one
+write to the affected suffix from a pod carrying each missing serverID — note
+that serverID often lives at *another site*. `docs/its9398/its9398.sh heal`
+does this; measured taking a storming pod to zero in under 20 s. Rebuilding the
+pod also clears it. Background: `docs/ITS-9398-STORM-SIGNATURE.md` (the
+detector), `docs/ITS-9398-REPRODUCTION.md` (the mechanism),
+`docs/ITS-9398-HANDLING.md` (the options).
+
 ### Also in this release
 
 - The ITS#9398 investigation: `docs/ITS-9398-REPRODUCTION.md` (the bug in pure

@@ -83,6 +83,14 @@ EXPORTER_IMAGE   = $(REGISTRY)/$(PROJECT)/slapd-exporter:$(EXPORTER_IMAGE_TAG)
 # are OpenLDAP 2.7.1; these keep the previous Debian-package build reachable for
 # hot-migration / legacy-interop clusters (ADR-011). Pin them per SlapdCluster
 # with spec.images.{slapd,init}.tag=<tag>-ol26 — both, never one.
+# The Debian slapd version both 2.6 lines are pinned to (ADR-040 decision 1).
+# One variable so the slapd / slapd-init pair cannot drift apart — their tools
+# must match the server — and so the source build patches a fixed tree. It will
+# stop resolving when a stable point release retires it from the mirror; that
+# is the intended failure, and the fix is to bump it here and re-run the 2.6
+# e2e cycle.
+OPENLDAP_OL26_VERSION ?= 2.6.10+dfsg-1
+
 INIT_IMAGE_OL26  = $(REGISTRY)/$(PROJECT)/slapd-init:$(IMAGE_TAG)-ol26
 SLAPD_IMAGE_OL26 = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)-ol26
 
@@ -262,11 +270,13 @@ $(STAMPS)/slapd: $(SLAPD_SRCS) $(STAMPS)/openldap-deb $(STAMPS)/tag $(STAMPS)/re
 
 $(STAMPS)/init-ol26: $(INIT_OL26_SRCS) $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
 	$(CONTAINER_ENGINE) build -f images/slapd-init/Containerfile.ol26 \
+		--build-arg OPENLDAP_OL26_VERSION=$(OPENLDAP_OL26_VERSION) \
 		-t $(INIT_IMAGE_OL26) images/slapd-init/
 	@touch $@
 
 $(STAMPS)/slapd-ol26: $(SLAPD_OL26_SRCS) $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
 	$(CONTAINER_ENGINE) build -f images/slapd/Containerfile.ol26 \
+		--build-arg OPENLDAP_OL26_VERSION=$(OPENLDAP_OL26_VERSION) \
 		-t $(SLAPD_IMAGE_OL26) images/slapd/
 	@touch $@
 
@@ -276,6 +286,7 @@ $(STAMPS)/slapd-ol26: $(SLAPD_OL26_SRCS) $(STAMPS)/tag $(STAMPS)/registry | $(ST
 # local-patches/ rebuilds the .debs and both images below.
 $(STAMPS)/openldap-deb-ol26src: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
 	$(CONTAINER_ENGINE) build -f images/openldap-deb/Containerfile.ol26src \
+		--build-arg OPENLDAP_OL26_VERSION=$(OPENLDAP_OL26_VERSION) \
 		-t $(OPENLDAP_DEB_IMAGE_OL26SRC) images/openldap-deb/
 	@touch $@
 

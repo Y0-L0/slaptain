@@ -11,8 +11,14 @@ local patches applied. The decision and its reasoning are in
 | Image tag | OpenLDAP | Use it for |
 |---|---|---|
 | `<registry>/slaptain/slapd:<tag>` + `slapd-init:<tag>` | 2.7.1 (`2.7.1-0+slaptain2`) | everything — this is the default |
-| `<registry>/slaptain/slapd:<tag>-ol26` + `slapd-init:<tag>-ol26` | 2.6.x (Debian trixie binary) | legacy interop and hot-migration clusters that must match a 2.6 source (ADR-011) |
-| `<registry>/slaptain/slapd:<tag>-ol26src` + `slapd-init:<tag>-ol26src` | 2.6.x (Debian trixie **source** + local patches) | a **2.6** build carrying the local patches — measurement arms against `-ol26`, and 2.6 clusters that need a patched feature |
+| `<registry>/slaptain/slapd:<tag>-ol26` + `slapd-init:<tag>-ol26` | 2.6, Debian trixie binary, **pinned** (`OPENLDAP_OL26_VERSION`) | legacy interop and hot-migration clusters that must match a 2.6 source (ADR-011) |
+| `<registry>/slaptain/slapd:<tag>-ol26src` + `slapd-init:<tag>-ol26src` | 2.6, Debian trixie **source** + local patches, same pin | a **2.6** build carrying the local patches — measurement arms against `-ol26`, and 2.6 clusters that need a patched feature |
+
+The 2.6 version is pinned, not floated: one Makefile variable,
+`OPENLDAP_OL26_VERSION`, drives both binary images and the source build, so
+the pair cannot drift apart and the patches apply to a fixed tree. When a
+Debian point release retires it the build stops resolving — bump the variable
+and re-run the 2.6 e2e cycle (ADR-040 decision 1).
 
 The local patches are **not** exclusive to `-ol26src`. The default 2.7 pair
 carries them too, from `2.7.1-0+slaptain2` onward — that is what makes the

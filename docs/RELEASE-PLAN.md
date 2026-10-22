@@ -263,8 +263,12 @@ worth much churn. The higher-leverage move is item 4.
    and 6 below plus 0.6.0 and 0.7.0.
 4. **The ADR-037 rotation decomposition** (seventeenth amendment) as tier-2
    surfaces, with the evidence attached to each.
-5. **Pin the Debian version** in `images/slapd/Containerfile.ol26` and its
-   `slapd-init` twin (ADR-040 decision 1). Independent of everything else, and
+5. ~~**Pin the Debian version**~~ — **done 2026-10-22.** All three 2.6 paths are
+   pinned to `OPENLDAP_OL26_VERSION` (one Makefile variable, passed as a build
+   arg): both binary Containerfiles and the `apt-get source` in the ol26src
+   build, which was floating too. Verified by building both binary images and
+   by a mutation — a bogus version is rejected, so the pin is load-bearing
+   rather than decorative (ADR-040 decision 1). Independent of everything else, and
    worth doing on its own: it makes the image reproducible and turns a Debian
    point release into a reviewable commit instead of a silent difference
    between two builds of the same source.

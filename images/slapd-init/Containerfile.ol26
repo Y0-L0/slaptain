@@ -6,11 +6,38 @@
 
 FROM debian:trixie-slim
 
+# The Debian package version is PINNED, not floated (ADR-040 decision 1).
+#
+# An unpinned `apt-get install slapd` takes whatever the archive serves on the
+# day, which makes this image unreproducible and — once the tag carries the
+# OpenLDAP version — renames the artifact without any change in this tree. A
+# pin turns a Debian point release into a reviewable commit instead of a silent
+# difference between two builds of the same source.
+#
+# It will eventually fail to resolve, because a stable point release replaces
+# packages in the mirror and the old version leaves it. That failure is the
+# feature: bump OPENLDAP_OL26_VERSION, rebuild, and re-run the 2.6 e2e cycle —
+# which is exactly the review a new upstream slapd deserves and would otherwise
+# never get.
+ARG OPENLDAP_OL26_VERSION=2.6.10+dfsg-1
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        slapd \
-        ldap-utils \
+        slapd="${OPENLDAP_OL26_VERSION}" \
+        ldap-utils="${OPENLDAP_OL26_VERSION}" \
         python3 \
     && rm -rf /var/lib/apt/lists/*
+
+# slapcat/slapadd/slaptest must match the slapd this pair is deployed with
+# (CLAUDE.md, ADR-021: pin both images or neither).
+#
+# It cannot fail while BOTH packages are pinned to the same variable — apt
+# installs exactly those or fails outright. It is here for the edit that pins
+# one and lets the other float, which is the plausible way these two drift.
+RUN set -eux; \
+    s="$(dpkg-query -W -f='${Version}' slapd)"; \
+    u="$(dpkg-query -W -f='${Version}' ldap-utils)"; \
+    [ "$s" = "$u" ] || { echo "slapd $s != ldap-utils $u" >&2; exit 1; }; \
+    echo "OpenLDAP (Debian) $s"
 
 RUN groupmod -g 1024 openldap && \
     usermod -u 1024 -g 1024 openldap

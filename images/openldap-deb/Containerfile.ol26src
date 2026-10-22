@@ -27,7 +27,12 @@ RUN set -eux; \
 WORKDIR /build
 
 # Debian's 2.6 source package, integrity-checked by apt against the archive.
-RUN apt-get update && apt-get source slapd && rm -rf /var/lib/apt/lists/*
+ARG OPENLDAP_OL26_VERSION=2.6.10+dfsg-1
+# Pinned for the same reason the binary pair is (ADR-040 decision 1): an
+# unpinned `apt-get source` fetches whatever the archive serves today, so the
+# patches below would be applied to a moving target.
+RUN apt-get update && apt-get source slapd="${OPENLDAP_OL26_VERSION}" \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY local-patches /build/local-patches
 

@@ -144,7 +144,7 @@ func (r *SlapdClusterReconciler) reconcileWriteService(
 	if sc == nil {
 		return 0, nil
 	}
-	if !plan.Active {
+	if !plan.WriterActive {
 		meta.RemoveStatusCondition(&sc.Status.Conditions, writeEndpointCondition)
 		return 0, r.retireWriteService(ctx, sc)
 	}

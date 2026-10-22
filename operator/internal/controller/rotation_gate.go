@@ -115,6 +115,14 @@ const (
 	// checked about the value: a lead too short for the client's connection
 	// lifetime is a configuration the operator will not second-guess.
 	reasonLeadTimeOutOfRange = "LeadTimeOutOfRange"
+
+	// reasonFieldHasNoReferentInMode: a field was set that the chosen mode has
+	// no use for — slotsFromWriteToPurge or leadTime outside PurgeAndWrite.
+	// ADR-024 R4: a spec field that cannot be honoured is reported or refused,
+	// never ignored. Silently dropping it would leave the CR saying one thing
+	// and the cluster doing another, which is the state conditions exist to
+	// make impossible.
+	reasonFieldHasNoReferentInMode = "FieldHasNoReferentInMode"
 )
 
 // rotationPlan is the cluster's whole purge-schedule decision, resolved once
@@ -135,7 +143,13 @@ const (
 // bug to fix. Readiness belongs in writer SELECTION (writeTarget), which
 // persists nothing.
 type rotationPlan struct {
-	Active                bool
+	// The two halves, independently settable since ADR-037's seventeenth
+	// amendment. They are separate fields rather than one flag plus a mode
+	// because the consumers are already separate: the phase is written by the
+	// SlapdDatabase purge convergence, the writer is chosen by the cluster's
+	// write Service. Neither needs to know which mode produced its answer.
+	PhasesActive          bool
+	WriterActive          bool
 	SlotLength            time.Duration // t, form B only
 	LeadTime              time.Duration // d, form B only: how early the endpoint moves
 	Interval              time.Duration // always positive: n·t, declared, or the default
@@ -172,8 +186,21 @@ func evaluateRotation(sc *ldapv1alpha1.SlapdCluster) rotationPlan {
 	r := sc.Spec.Rotation
 	rotationWanted := r.Enabled != nil && *r.Enabled
 
+	// Unset means the coupled form, so a cluster that predates this field reads
+	// identically to one that never set it (ADR-013).
+	mode := r.Mode
+	if mode == "" {
+		mode = ldapv1alpha1.RotationModePurgeAndWrite
+	}
+	// Only the modes that STAGGER PHASES declare a purge schedule. WriteOnly
+	// declares none, so form A is its companion rather than a second
+	// declaration of the same thing — the narrowing ADR-037's seventeenth
+	// amendment forces on the ninth's exclusion.
+	declaresSchedule := mode != ldapv1alpha1.RotationModeWriteOnly
+
 	switch {
-	case rotationWanted && sc.Spec.AccesslogPurge != nil && sc.Spec.AccesslogPurge.Interval != nil:
+	case rotationWanted && declaresSchedule &&
+		sc.Spec.AccesslogPurge != nil && sc.Spec.AccesslogPurge.Interval != nil:
 		// Both forms. Neither is taken: the cluster falls back to the default
 		// interval, which keeps the journals bounded while the condition says
 		// what to delete.
@@ -228,6 +255,37 @@ func evaluateRotation(sc *ldapv1alpha1.SlapdCluster) rotationPlan {
 	}
 
 	n := declaredReplicas(sc)
+
+	// Fields the chosen mode has no use for. Checked BEFORE v and the lead are
+	// resolved, because those checks would otherwise report a bound on a value
+	// that has no referent in the first place — a true statement about the
+	// wrong problem.
+	if mode != ldapv1alpha1.RotationModePurgeAndWrite {
+		why := map[string]string{
+			ldapv1alpha1.RotationModePurgeOnly: "nothing moves the write endpoint in this mode, " +
+				"so there is no write slot to displace from and no boundary handover to arrive ahead of",
+			ldapv1alpha1.RotationModeWriteOnly: "this mode staggers no purge, so there is no purge " +
+				"slot to displace from and no boundary purge to arrive ahead of",
+		}[mode]
+		for _, f := range []struct {
+			set   bool
+			field string
+		}{
+			{r.SlotsFromWriteToPurge != nil, "spec.rotation.slotsFromWriteToPurge"},
+			{r.LeadTime != nil, "spec.rotation.leadTime"},
+		} {
+			if !f.set {
+				continue
+			}
+			return fault(reasonFieldHasNoReferentInMode,
+				fmt.Sprintf("%s is set, but spec.rotation.mode is %s and %s. The operator does not "+
+					"quietly drop a field you set (ADR-024 R4), so nothing rotates until you "+
+					"remove it or choose %s. Meanwhile every pod purges on the operator's "+
+					"default interval of %s",
+					f.field, mode, why, ldapv1alpha1.RotationModePurgeAndWrite,
+					formatLogAge(defaultPurgeInterval)))
+		}
+	}
 
 	// v is a SIGNED displacement taken mod n, so −1 and n−1 are one answer and
 	// a declared value survives a scale event. The rule is v mod n ≠ 0, not a
@@ -293,11 +351,20 @@ func evaluateRotation(sc *ldapv1alpha1.SlapdCluster) rotationPlan {
 				lead, bound, formatLogAge(defaultPurgeInterval)))
 	}
 
+	// WriteOnly declares no purge schedule, so the interval is whatever form A
+	// said or the operator's default — NOT n·t, which is a phase grid this mode
+	// does not write.
+	interval := time.Duration(n) * t
+	if !declaresSchedule {
+		interval = declaredInterval
+	}
+
 	plan := rotationPlan{
-		Active:                true,
+		PhasesActive:          declaresSchedule,
+		WriterActive:          mode != ldapv1alpha1.RotationModePurgeOnly,
 		SlotLength:            t,
 		LeadTime:              lead,
-		Interval:              time.Duration(n) * t,
+		Interval:              interval,
 		Replicas:              n,
 		SlotsFromWriteToPurge: resolved,
 		Status:                metav1.ConditionTrue,

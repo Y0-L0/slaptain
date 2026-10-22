@@ -327,8 +327,12 @@ func TestEvaluateRotation(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := evaluateRotation(tc.sc)
-			if got.Active != tc.wantActive {
-				t.Fatalf("Active = %v, want %v", got.Active, tc.wantActive)
+			// Every case in this table is the coupled default (no mode set),
+			// so the two halves move together; asserting both keeps the table
+			// honest if one of them ever stops.
+			if got.PhasesActive != tc.wantActive || got.WriterActive != tc.wantActive {
+				t.Fatalf("phases/writer = %v/%v, want both %v",
+					got.PhasesActive, got.WriterActive, tc.wantActive)
 			}
 			if got.Status != tc.wantStatus {
 				t.Fatalf("Status = %v, want %v", got.Status, tc.wantStatus)
@@ -415,7 +419,7 @@ func TestEvaluateRotation_AlwaysYieldsAUsableInterval(t *testing.T) {
 // this package is nil-safe for the same reason.
 func TestEvaluateRotation_NilClusterIsInert(t *testing.T) {
 	got := evaluateRotation(nil)
-	if got.Active {
+	if got.PhasesActive || got.WriterActive {
 		t.Fatal("a nil SlapdCluster must not produce an active rotation")
 	}
 	if got.Reason != reasonRotationDisabled {
@@ -510,5 +514,127 @@ func TestRotationConfiguredCondition(t *testing.T) {
 	}
 	if cond.ObservedGeneration != 7 {
 		t.Fatalf("ObservedGeneration = %d, want 7", cond.ObservedGeneration)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ADR-037 seventeenth amendment: the two halves are independently settable.
+//
+// Staggering the purges and moving the write endpoint are one feature today and
+// two decisions in principle. The amendment separates them as tier-2 surfaces
+// (ADR-039), each carrying its own evidence:
+//
+//	PurgeAndWrite  the measured one — 93,686/s at d=0 against 99,245/s at
+//	               d=180s, 281x fewer drops.
+//	PurgeOnly      inert for WRITER throughput (measured, n=2, 100k ops/s);
+//	               UNMEASURED for fleet read capacity, which is the quantity it
+//	               might actually buy, since reads run ~75 % on a purging
+//	               provider and this staggers which pod is degraded.
+//	WriteOnly      never measured as its own arm. Its rationale is ADR-036 /
+//	               ITS#9580 dormancy: every provider's own sid keeps advancing.
+//
+// Two consequences the amendment predicted, and the reason this is not just an
+// enum. Without purge phases `slotsFromWriteToPurge` has no purge slot to
+// displace from, and `leadTime` has no boundary-purge to arrive ahead of — so
+// in two of the three modes, two of the four fields lose their referent. ADR-024
+// R4 says a field that cannot be honoured is reported, never ignored.
+//
+// And the form-A exclusion has to NARROW. It exists because rotation declares
+// the purge schedule; WriteOnly declares none, so a fleet-wide interval is its
+// natural companion rather than a conflict.
+func TestEvaluateRotation_ModesSplitTheTwoHalves(t *testing.T) {
+	on := true
+	rot := func(mode string, tweak func(*ldapv1alpha1.SlapdRotationConfig)) ldapv1alpha1.SlapdRotationConfig {
+		r := ldapv1alpha1.SlapdRotationConfig{Enabled: &on, SlotLength: dur(6 * time.Hour), Mode: mode}
+		if tweak != nil {
+			tweak(&r)
+		}
+		return r
+	}
+
+	t.Run("unset mode is the coupled form, byte-identical to the version without modes", func(t *testing.T) {
+		p := evaluateRotation(scWithRotation(3, rot("", nil)))
+		if !p.PhasesActive || !p.WriterActive {
+			t.Fatalf("unset mode must drive BOTH halves: phases=%v writer=%v", p.PhasesActive, p.WriterActive)
+		}
+		if p.Reason != reasonRotationActive {
+			t.Fatalf("reason = %q, want %q", p.Reason, reasonRotationActive)
+		}
+	})
+
+	t.Run("PurgeOnly staggers the phases and leaves the endpoint alone", func(t *testing.T) {
+		p := evaluateRotation(scWithRotation(3, rot(ldapv1alpha1.RotationModePurgeOnly, nil)))
+		if !p.PhasesActive || p.WriterActive {
+			t.Fatalf("PurgeOnly: phases=%v writer=%v, want true/false", p.PhasesActive, p.WriterActive)
+		}
+		if p.Interval != 18*time.Hour {
+			t.Fatalf("PurgeOnly still derives the interval: got %s, want 18h", p.Interval)
+		}
+	})
+
+	t.Run("WriteOnly moves the endpoint and declares no purge schedule", func(t *testing.T) {
+		p := evaluateRotation(scWithRotation(3, rot(ldapv1alpha1.RotationModeWriteOnly, nil)))
+		if p.PhasesActive || !p.WriterActive {
+			t.Fatalf("WriteOnly: phases=%v writer=%v, want false/true", p.PhasesActive, p.WriterActive)
+		}
+		if p.Interval != defaultPurgeInterval {
+			t.Fatalf("WriteOnly declares no schedule, so the interval is the default: got %s, want %s",
+				p.Interval, defaultPurgeInterval)
+		}
+	})
+
+	t.Run("WriteOnly ACCEPTS a form-A interval — it declares none of its own", func(t *testing.T) {
+		sc := scWithRotation(3, rot(ldapv1alpha1.RotationModeWriteOnly, nil))
+		sc.Spec.AccesslogPurge = &ldapv1alpha1.SlapdAccesslogPurgeConfig{Interval: dur(12 * time.Hour)}
+		p := evaluateRotation(sc)
+		if p.Reason == reasonScheduleDeclaredTwice {
+			t.Fatal("WriteOnly declares no schedule; form A is its companion, not a conflict")
+		}
+		if p.Interval != 12*time.Hour {
+			t.Fatalf("the declared form-A interval must be honoured: got %s, want 12h", p.Interval)
+		}
+		if !p.WriterActive {
+			t.Fatal("the endpoint must still rotate")
+		}
+	})
+
+	for _, mode := range []string{"", ldapv1alpha1.RotationModePurgeOnly} {
+		t.Run("a schedule-declaring mode still refuses form A: "+mode, func(t *testing.T) {
+			sc := scWithRotation(3, rot(mode, nil))
+			sc.Spec.AccesslogPurge = &ldapv1alpha1.SlapdAccesslogPurgeConfig{Interval: dur(12 * time.Hour)}
+			if got := evaluateRotation(sc); got.Reason != reasonScheduleDeclaredTwice {
+				t.Fatalf("reason = %q, want %q", got.Reason, reasonScheduleDeclaredTwice)
+			}
+		})
+	}
+
+	// ADR-024 R4: reported, never ignored. The message must name the field and
+	// the mode, because those are the two things the reader has to reconcile.
+	noReferent := []struct {
+		name, mode, field string
+		tweak             func(*ldapv1alpha1.SlapdRotationConfig)
+	}{
+		{"leadTime under PurgeOnly", ldapv1alpha1.RotationModePurgeOnly, "spec.rotation.leadTime",
+			func(r *ldapv1alpha1.SlapdRotationConfig) { r.LeadTime = dur(5 * time.Minute) }},
+		{"leadTime under WriteOnly", ldapv1alpha1.RotationModeWriteOnly, "spec.rotation.leadTime",
+			func(r *ldapv1alpha1.SlapdRotationConfig) { r.LeadTime = dur(5 * time.Minute) }},
+		{"slotsFromWriteToPurge under PurgeOnly", ldapv1alpha1.RotationModePurgeOnly, fieldSlotsFromWTP,
+			func(r *ldapv1alpha1.SlapdRotationConfig) { v := int32(1); r.SlotsFromWriteToPurge = &v }},
+		{"slotsFromWriteToPurge under WriteOnly", ldapv1alpha1.RotationModeWriteOnly, fieldSlotsFromWTP,
+			func(r *ldapv1alpha1.SlapdRotationConfig) { v := int32(1); r.SlotsFromWriteToPurge = &v }},
+	}
+	for _, tc := range noReferent {
+		t.Run("reported, not ignored: "+tc.name, func(t *testing.T) {
+			p := evaluateRotation(scWithRotation(3, rot(tc.mode, tc.tweak)))
+			if p.Reason != reasonFieldHasNoReferentInMode {
+				t.Fatalf("reason = %q, want %q", p.Reason, reasonFieldHasNoReferentInMode)
+			}
+			if !strings.Contains(p.Message, tc.field) || !strings.Contains(p.Message, tc.mode) {
+				t.Fatalf("message must name the field and the mode; got %q", p.Message)
+			}
+			if p.Interval <= 0 {
+				t.Fatal("every exit keeps a usable interval")
+			}
+		})
 	}
 }

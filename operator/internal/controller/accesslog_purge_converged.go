@@ -199,7 +199,7 @@ func planPodPurge(plan rotationPlan, sd *ldapv1alpha1.SlapdDatabase, ordinal int
 		// turned off.
 		return purgePodPlan{}
 	}
-	if !plan.Active {
+	if !plan.PhasesActive {
 		return purgePodPlan{Value: composePurge(retention, plan.Interval, nil)}
 	}
 
@@ -312,7 +312,7 @@ func aggregateAccesslogPurgeConverged(
 				len(assessed), formatLogAge(plan.Interval),
 				rotationConfiguredCondition, plan.Reason, unreadNote)
 
-	case !plan.Active:
+	case !plan.PhasesActive:
 		return metav1.ConditionTrue, reasonConverged,
 			fmt.Sprintf("every one of the %d pod(s) read purges this journal every %s, all of "+
 				"them together — the cluster's spec.rotation is off, so nothing is staggered and "+

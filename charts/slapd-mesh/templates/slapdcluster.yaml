@@ -161,10 +161,18 @@ spec:
   {{- $rot := .Values.cluster.rotation | default dict -}}
   {{- $hasRotEnabled := and (hasKey $rot "enabled") (not (kindIs "invalid" $rot.enabled)) -}}
   {{- $hasSlots := and (hasKey $rot "slotsFromWriteToPurge") (not (kindIs "invalid" $rot.slotsFromWriteToPurge)) -}}
-  {{- if or $hasRotEnabled $rot.slotLength $hasSlots $rot.leadTime }}
+  {{- if or $hasRotEnabled $rot.slotLength $hasSlots $rot.leadTime $rot.mode }}
   rotation:
     {{- if $hasRotEnabled }}
     enabled: {{ $rot.enabled }}
+    {{- end }}
+    {{- /* mode is rendered even though the charts recommend only the coupled
+           default, because the alternative is worse: kubectl explain tells
+           people the field exists, and a value set here that the template did
+           not know about would be silently dropped. Unset renders nothing and
+           the operator reads it as PurgeAndWrite. */ -}}
+    {{- with $rot.mode }}
+    mode: {{ . | quote }}
     {{- end }}
     {{- with $rot.slotLength }}
     slotLength: {{ . | quote }}

@@ -1092,6 +1092,26 @@ type SlapdMonitoringConfig struct {
 // more than it checks.
 // +kubebuilder:validation:XValidation:rule="!has(self.slotLength) || self.slotLength.matches('^([0-9]+([.][0-9]+)?(ns|us|µs|ms|s|m|h))+$')",message="rotation.slotLength must be a Go duration such as 6h, 90m or 12h30m"
 // +kubebuilder:validation:XValidation:rule="!has(self.leadTime) || self.leadTime.matches('^([0-9]+([.][0-9]+)?(ns|us|µs|ms|s|m|h))+$')",message="rotation.leadTime must be a Go duration such as 30s, 1m or 90s"
+// Rotation modes (ADR-037 seventeenth amendment). The two halves of the
+// rotation — staggering each pod's accesslog purge, and moving the write
+// endpoint off the pod that is purging — are one feature today and two
+// decisions in principle. These name them separately.
+//
+// All three are ADR-039 tier 2. The evidence differs per mode and is stated on
+// the Mode field, because under ADR-039 the evidence travels with the knob.
+const (
+	// RotationModePurgeAndWrite staggers the purges AND moves the endpoint.
+	// The default, and the only combination measured end to end.
+	RotationModePurgeAndWrite = "PurgeAndWrite"
+	// RotationModePurgeOnly staggers the purges and leaves the write endpoint
+	// alone. slotsFromWriteToPurge and leadTime have no referent here.
+	RotationModePurgeOnly = "PurgeOnly"
+	// RotationModeWriteOnly moves the endpoint and declares no purge schedule,
+	// so spec.accesslogPurge.interval is its companion rather than a conflict.
+	// slotsFromWriteToPurge and leadTime have no referent here either.
+	RotationModeWriteOnly = "WriteOnly"
+)
+
 type SlapdRotationConfig struct {
 	// enabled turns the rotation on: per-pod purge phases plus a write endpoint
 	// that moves with them.
@@ -1107,6 +1127,40 @@ type SlapdRotationConfig struct {
 	// user said nothing" — which matters the day the default moves.
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
+	// mode selects WHICH of the rotation's two halves run. Unset is
+	// PurgeAndWrite, which is what this field's absence has always meant: a
+	// cluster upgraded onto a version that has this field, and not touching it,
+	// is byte-identical to one running the version that did not (ADR-013).
+	//
+	// EXPERIMENTAL in every mode — ADR-039 tier 2 — and the evidence differs,
+	// which is why it is stated here rather than in a document:
+	//
+	//   PurgeAndWrite  The only combination measured end to end. n=2, t=600s,
+	//                  100k ops/s: 93,686/s and 16.0M dropped at leadTime 0,
+	//                  against 99,245/s and 57,167 dropped at leadTime 180s.
+	//                  This is the shape the Helm charts offer.
+	//   PurgeOnly      MEASURED INERT for writer throughput (ADR-037 third
+	//                  amendment, n=2 at 100k ops/s): a pinned writer purges
+	//                  once per interval either way, for the same duration, so
+	//                  staggering changes only WHICH pod is degraded at a given
+	//                  instant. That quantity — fleet READ capacity, with reads
+	//                  running ~75 % on a purging provider — is UNMEASURED, and
+	//                  is the only reason to choose this mode.
+	//   WriteOnly      NEVER MEASURED as its own arm; every arm of the
+	//                  2026-10-20 run had purge staggering on. Its rationale is
+	//                  ADR-036 / ITS#9580 dormancy: rotating the writer keeps
+	//                  every provider's own serverID advancing, which is
+	//                  independent of purging. Reasoned, not run.
+	//
+	// In PurgeOnly and WriteOnly, slotsFromWriteToPurge and leadTime have no
+	// referent — there is no purge slot to displace from, and no
+	// boundary-purge to arrive ahead of. Setting either is REPORTED on
+	// RotationConfigured rather than ignored (ADR-024 R4); the operator will
+	// not quietly drop a field you set.
+	//
+	// +kubebuilder:validation:Enum=PurgeAndWrite;PurgeOnly;WriteOnly
+	// +optional
+	Mode string `json:"mode,omitempty"`
 	// slotLength is t, the time each pod spends as the write target, and the
 	// spacing between neighbouring pods' purge phases. The resulting purge
 	// interval written to every pod is T = spec.replicas × t.

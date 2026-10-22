@@ -272,9 +272,9 @@ func TestEvaluateRotationRefusesALeadAtOrBeyondTheBound(t *testing.T) {
 			}
 			// Withheld, not refused: the rotation stops, the cluster keeps a
 			// usable purge interval, and nothing about the apply failed.
-			if plan.Active {
-				t.Fatalf("n=%d lead=%s: the rotation is still Active after being refused",
-					tc.n, tc.lead)
+			if plan.PhasesActive || plan.WriterActive {
+				t.Fatalf("n=%d lead=%s: the rotation is still active after being refused "+
+					"(phases=%v writer=%v)", tc.n, tc.lead, plan.PhasesActive, plan.WriterActive)
 			}
 			if plan.Interval <= 0 {
 				t.Fatalf("n=%d lead=%s: the withheld plan left interval %s — a cluster whose "+

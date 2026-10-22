@@ -1799,12 +1799,25 @@ continue to offer only the coupled form that was measured end to end:
   describes. Genuinely independent of purging, and **never measured as its own
   arm**: every arm of the 2026-10-20 run had purge staggering on.
 
-Two consequences for the API if this is built. Without purge phases,
-`slotsFromWriteToPurge` has no referent — there is no purge slot to displace
-from — and `leadTime`'s entire rationale evaporates, since the boundary-coupled
-purge is what created the stall it corrects. Two of the four fields go
-meaningless, which argues for a mode enum rather than two booleans, and against
-the decomposition being a trivial refactor of the existing switch.
+Two consequences for the API, both borne out when it was built (2026-10-22).
+Without purge phases, `slotsFromWriteToPurge` has no referent — there is no
+purge slot to displace from — and `leadTime`'s entire rationale evaporates,
+since the boundary-coupled purge is what created the stall it corrects. Two of
+the four fields go meaningless, which is why this is a **mode enum**
+(`spec.rotation.mode`: `PurgeAndWrite` | `PurgeOnly` | `WriteOnly`, unset =
+`PurgeAndWrite` and byte-identical to the version without it) rather than two
+booleans, and why it was not a trivial refactor of the existing switch.
+
+Building it forced a third consequence this amendment had not seen: **the
+ninth amendment's form-A exclusion has to NARROW.** `spec.accesslogPurge.interval`
+is refused alongside the rotation because the rotation declares the purge
+schedule — but `WriteOnly` declares none, so a fleet-wide interval is its
+natural companion rather than a second declaration of the same thing. Refusing
+it there would have made the mode unusable with any explicit interval.
+
+A field set in a mode that has no use for it is **reported, never ignored**
+(ADR-024 R4): `RotationConfigured=False/FieldHasNoReferentInMode`, naming the
+field and the mode. The operator does not quietly drop what you asked for.
 
 The coupled form remains the only tier-1 shape, because it is the only one with
 an end-to-end measurement behind it.

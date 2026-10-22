@@ -214,6 +214,17 @@ rotation: {}
 #  # unset, so setting it now survives the default moving later. Mutually
 #  # exclusive with accesslogPurge.interval below — the operator refuses both.
 #  enabled: true
+#  # -- Which of the rotation's two halves run. Unset is PurgeAndWrite, the
+#  # coupled form and the ONLY one measured end to end — leave it unset unless
+#  # you are deliberately running an arm nobody has. PurgeOnly staggers the
+#  # purges and leaves the endpoint alone (measured INERT for writer
+#  # throughput; the fleet read capacity it might buy is unmeasured).
+#  # WriteOnly moves the endpoint and declares no purge schedule, so
+#  # accesslogPurge.interval is its companion rather than a conflict (never
+#  # measured as its own arm; the rationale is ADR-036/ITS#9580 dormancy).
+#  # In both split modes, slotsFromWriteToPurge and leadTime have no referent
+#  # and setting them is REPORTED, not ignored.
+#  mode: PurgeAndWrite
 #  # -- t: how long each pod holds the write endpoint, and the spacing between
 #  # neighbouring pods' purge phases. REQUIRED when enabled, and there is NO
 #  # default — a schedule is not something the operator may invent for you.

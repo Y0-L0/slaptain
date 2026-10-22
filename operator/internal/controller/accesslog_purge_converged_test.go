@@ -42,10 +42,11 @@ const (
 
 func activePlan(slot time.Duration, replicas int32) rotationPlan {
 	return rotationPlan{
-		Active:     true,
-		SlotLength: slot,
-		Interval:   time.Duration(replicas) * slot,
-		Replicas:   replicas,
+		PhasesActive: true,
+		WriterActive: true,
+		SlotLength:   slot,
+		Interval:     time.Duration(replicas) * slot,
+		Replicas:     replicas,
 	}
 }
 

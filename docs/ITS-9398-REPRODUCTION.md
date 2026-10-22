@@ -9,6 +9,18 @@ explicitly marked as inferred-but-unobserved.
 built from a vendored Debian packaging fork of the 2.7.1 release (ADR-021).
 Source line numbers are from that tree.
 
+**Correction, 2026-10-23.** An earlier revision concluded that the `logpurge`
+sweep is what drives `minCSN` past the durable `contextCSN`, and pivoted the
+mitigation question from "checkpoint the log DB" to "shorten the purge
+interval" on that basis. That is wrong. A sweep is **one** route and not the
+one that fires in practice: `accesslog_response` persists `minCSN` by itself on
+the first logged write from a serverID the log DB has not seen. The purge is
+neither necessary nor the usual trigger, and the mitigation question goes back
+to the log DB's own checkpoint. Corrected in place below. The superseded
+reasoning is kept where it was recorded — it remains an accurate account of
+what a sweep does, just not of what the failure requires. §"Controls" had it
+right all along and was not reconciled with the front of the document.
+
 ## How to read this document
 
 The next section states **the mechanism as we currently understand it**, start
@@ -108,10 +120,20 @@ deleted.** `logpurge` removes exactly the entries that scan would rebuild from.
 After a sweep there is nothing left carrying a larger `entryCSN`, the scan
 finds nothing newer, and the stale value stands.
 
-So purging does two things, and the second is the one that matters: it ratchets
-`minCSN` forward **and** it destroys the evidence that would otherwise repair
-`contextCSN` at startup. Measured both ways — a kill with journal entries
-present reconstructs cleanly (3×); a kill after a sweep does not.
+So purging does two things: it ratchets `minCSN` forward **and** it destroys
+the evidence that would otherwise repair `contextCSN` at startup. Only the
+second is unique to purging — an ordinary write from a new serverID ratchets
+`minCSN` just as durably (§"Two consequences").
+
+**And the first is weaker than it reads (2026-10-23).** "A kill with journal
+entries present reconstructs cleanly (3×)" does not generalise: the `100 5`
+control killed a node with every journal entry intact, nothing ever deleted,
+and produced a 1473/s storm. A startup scan does not rescue a serverID that is
+*missing* from `contextCSN`, only one that is *behind* — which is the same
+lagging-versus-missing distinction §"A lagging serverID is survivable" draws
+from the other direction. The three clean runs are therefore better read as
+"the serverID was lagging, not missing" than as "the entries saved it". Which
+of the two the scan actually does has not been read in source.
 
 The accesslog is the backstop for the data DB. Nothing is the backstop for the
 accesslog, and it is the only one that gets pruned.
@@ -200,10 +222,27 @@ outside the site's own operator. Measured: one such write took `err=53` from
 
 ### Two consequences
 
-The exposure is **not continuous**. It is tied to purge sweeps, which at the
-slaptain default happen once a day. That moves the "how do we avoid this"
-question away from "checkpoint the log DB" — which no deployment anywhere does
-— and toward the purge interval, which every deployment already configures.
+The exposure is **continuous**, and it opens at the first write carrying a
+serverID the log DB has not seen. `accesslog_response` adds that serverID to
+`minCSN` with an ordinary `be_modify` into the log DB (`accesslog.c:2113-2159`;
+2.6.10 `:1983`) — durable immediately, because it goes into the LMDB
+transaction — while the log DB's `contextCSN` lives in syncprov's memory until
+a checkpoint or a clean shutdown. From that write until one of those two
+happens, an unclean stop is fatal.
+
+A purge sweep reaches the same state (§"The slapcat test"), but it is a second
+route and the rarer one: it needs entries older than the retention, which a
+young cluster does not have. Three mesh reproductions had deleted nothing at
+all, and the controls in `docs/its9398/` reproduce the open window under a
+7-day retention over a one-minute run — no sweep could have fired in any of
+them.
+
+That keeps the "how do we avoid this" question where it started: **checkpoint
+the log DB** — which no deployment anywhere does, and which upstream's own
+source names as the intended cleanup for this state (`accesslog.c:2076-2082`,
+the ITS#9580 `FIXME`: *"Right now we depend on syncprov's checkpoint to clean
+up after."*). The purge interval is not the lever. What that checkpoint costs
+on a write-heavy log DB is unmeasured — see §"Controls" and the open questions.
 
 And the whole condition is invisible to every monitoring tool in existence,
 including upstream's own, because all of them read the in-memory view of the
@@ -631,7 +670,7 @@ If true, two things follow, and both are testable:
   unprecedented configuration — unlike option A, every deployment already sets
   `logpurge`.
 
-### The slapcat test: purge is the TRIGGER, not the cure
+### The slapcat test: a purge is *a* trigger, not the cure
 
 Run 2026-10-04. The prediction above was **wrong, and informatively so**.
 
@@ -653,8 +692,12 @@ ON DISK   contextCSN: 20261003225946…#001      ← UNCHANGED
 ```
 
 **The purge persists `minCSN` and does not persist `contextCSN`.** It is
-therefore not a checkpoint in disguise — it is the mechanism that drives
-`minCSN` *past* the on-disk `contextCSN`. Purging is the **trigger**.
+therefore not a checkpoint in disguise — it is *a* mechanism that drives
+`minCSN` past the on-disk `contextCSN`.
+
+*(Corrected 2026-10-23: **a** trigger, not **the** trigger. The ordinary write
+path reaches the same state with no sweep at all, and that is the one that
+fires on a young cluster. See §"Two consequences".)*
 
 Note the inversion this creates: in memory `contextCSN` is ahead of `minCSN`,
 on disk `minCSN` is ahead of `contextCSN`. The served view is not merely
@@ -687,8 +730,10 @@ So the full recipe, and the reason a plain restart never showed it:
 
 1. a serverID must be **new to this log DB** since the last `contextCSN`
    persist (first write from a site, a pod rejoining, a fresh database);
-2. a purge sweep must then persist `minCSN` including that serverID, while
-   `contextCSN` stays behind on disk;
+2. `minCSN` must then be persisted including that serverID while `contextCSN`
+   stays behind on disk — which **the first logged write from that serverID
+   does by itself** (`accesslog.c:2113-2159`); a purge sweep is a second and
+   rarer route to the same state, and the one this run happened to use;
 3. an unclean stop must prevent `contextCSN` being written;
 4. on restart, `minCSN` names a serverID `contextCSN` has never heard of.
 
@@ -1038,16 +1083,50 @@ a *rate*, from the provider side, and nothing in the ecosystem measures that.
 | Scenario | disk `contextCSN` at stop | after restart |
 |---|---|---|
 | converge, `SIGKILL`, start | *(absent)* | **1526/s storm** |
-| converge, `SIGTERM`, start | written by `db_close` | **clean** |
+| converge, `SIGTERM`, start | written by `db_close` | **clean** † |
 | `syncprov-checkpoint 1 1` on log DB, `SIGKILL` | `001 002` | **clean** |
 | `syncprov-checkpoint 100 5` on log DB, `SIGKILL` | `001` only | **1473/s storm** |
+
+Logs: `docs/its9398/sample-run.log` (row 1), `control-sigterm.log`,
+`control-checkpoint-1-1.log`, `control-checkpoint-100-5.log`. Every arm ran
+`logpurge 07+00:00 01+00:00` over a run of under a minute, so **no sweep fired
+in any of them** and nothing was ever old enough to match one. The build is
+`2.7.1-0+slaptain1`, which the changelog shows is packaging work only — no
+slaptain behaviour patches. This is upstream 2.7.1 with the purge out of the
+picture.
+
+† **That row's storm measurement did not run.** `stale_on()` produced a shell
+arithmetic error instead of a rate (`syntax error in expression`), so the arm
+has no storm count. The verdict still holds, but on different evidence than
+the table implies — the on-disk CSN state after the clean stop (both serverIDs
+present) and a successful A→B write afterwards. A missing number and a zero
+read identically here. Filed in `docs/BACKLOG.md`.
 
 The last row is the important one: **a batched checkpoint is a lottery, not a
 guard.** The exposure is the interval between a new serverID entering `minCSN`
 (immediately) and the next checkpoint writing `contextCSN`. Since new serverIDs
 appear rarely and in bursts — at topology changes — a time- or operation-batched
-checkpoint will lose that race sooner or later. Only `1 1` closes it, at the
-cost of a `contextCSN` write per operation on a write-heavy database.
+checkpoint will lose that race sooner or later.
+
+**Why `1 1` wins is an ordering argument, not a narrower race (2026-10-23).**
+In `accesslog_response` the log entry is `be_add`ed *before* `minCSN` is
+modified. That entry carries a CSN, so syncprov's response hook on the log DB
+increments `si_numops` (`syncprov.c:2607`) and `si_chkops = 1` fires the
+checkpoint on that very operation (`:2615`) — persisting `contextCSN`
+*including the new serverID* before `minCSN` ever gains it. With `100 5` the
+checkpoint waits for 100 operations or 5 minutes, which is exactly the disk
+state each log shows. Two caveats, both load-bearing:
+
+- **Neither control tests it.** Both kill the node seconds after convergence,
+  long after the checkpoint fired. They show the window closed at the sampled
+  instant; neither attempts a kill *inside* one. The ordering claim is read
+  from source, not measured.
+- **`1 1` is a `contextCSN` write per logged operation**, on a database whose
+  single LMDB writer already contends with every client write (ADR-037). At
+  the rates that work measured, its cost is unknown and no arm has tried it
+  under load.
+
+Also: n=1 per arm, two nodes, one serverID pair, no repetition.
 
 ## Proven versus inferred
 
@@ -1105,7 +1184,7 @@ delta-syncrepl provider, from its first write, in a default configuration.
    not include a checkpoint on the log DB, so every deployment following it is
    one `kill -9` away from a provider that never serves a consumer again.
 
-## Open questions, as of 2026-10-04
+## Open questions, as of 2026-10-04 (4 answered 2026-10-23; 5 and 6 added)
 
 Recorded so they are not rediscovered from scratch. None is answered.
 
@@ -1145,8 +1224,35 @@ so treat as indicative: the e2e's stale-cookie assertion fired in roughly **4 of
 the mechanism (full suites churn pods far more, so they hit more unclean stops)
 and is itself the best circumstantial evidence for question 1.
 
-**4. Does `logpurge` reopen the window on a steady-state server?** The purge
-path advances `minCSN` on disk with a real `be_modify` on its own timer
-(`accesslog.c:656-684`, `:760-787`), with no corresponding `contextCSN` write.
-If so, the exposure is not confined to the bootstrap window but returns on every
-purge cycle. Read from source; not measured.
+**4. ~~Does `logpurge` reopen the window on a steady-state server?~~
+ANSWERED 2026-10-23 — and the question was the wrong way round.** A sweep that
+matches nothing cannot touch `minCSN`: `log_old_lookup` sets
+`pd->mincsn_updated` and increments `pd->used` from the same matching entry
+(`accesslog.c:679-691`), and both the `minCSN` modify and the deletes sit
+inside `if ( pd.used )` (`:752`). So `pd.used == 0` means the sweep does
+nothing at all — no `minCSN` write, no delete. The purge does not *reopen* the
+window because it was never what opened it: `accesslog_response` advances
+`minCSN` on the first logged write from a serverID new to the log DB
+(`:2113-2159`), and the window stays open until the next checkpoint or a clean
+stop.
+
+One asymmetry worth keeping: `minCSN` is written *before* the deletes
+(`:760-785`, deletes at `:787`), so a sweep that matched entries and then
+failed every delete — or was cut short by `slapd_shutdown` (`:793`) — still
+persisted `minCSN`. "Wrote `minCSN`, deleted nothing" is reachable; "deleted
+nothing, wrote nothing" is what an unmatched sweep does.
+
+**5. What does `syncprov-checkpoint 1 1` on a log DB cost under load?** It is
+the only configuration measured to survive a `SIGKILL`, and it writes
+`contextCSN` on every logged operation into the environment whose single LMDB
+writer client writes already contend for (ADR-037). Unmeasured. Until it is,
+"checkpoint the log DB" is a mitigation with a known effect and an unknown
+price.
+
+**6. Does a startup scan repair a *missing* serverID, or only a lagging one?**
+The `100 5` control stormed with every journal entry present and nothing ever
+deleted, which says the scan did not rescue a serverID absent from
+`contextCSN`. If the scan maxes per-serverID over serverIDs it already knows,
+that is expected and explains the lagging-versus-missing split directly — but
+it has not been read in source, and §"Why purging is also what disarms the
+safety net" currently claims more than the evidence supports.

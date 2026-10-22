@@ -1821,3 +1821,42 @@ field and the mode. The operator does not quietly drop what you asked for.
 
 The coupled form remains the only tier-1 shape, because it is the only one with
 an end-to-end measurement behind it.
+
+## Amendment, 2026-10-23 (eighteenth): the purge schedule was never a lever on ITS#9398
+
+A source read of `accesslog.c` settled a question that had been open since the
+first live rotation run, and it bounds what this ADR may be used to argue.
+
+**The finding.** `accesslog_purge()` cannot write `minCSN` without deleting:
+`log_old_lookup` sets `pd->mincsn_updated` and increments `pd->used` from the
+same matching entry (`:679-691`), and both the `minCSN` modify and the deletes
+sit inside `if ( pd.used )` (`:752`). A sweep that matches nothing does nothing
+at all. What drives `minCSN` past the durable `contextCSN` in practice is
+`accesslog_response` (`:2113-2159`), which adds a serverID to `minCSN` on the
+first logged write carrying it — no sweep required, and present in both 2.6.10
+and 2.7.1. Full account and the corrected record in
+`docs/ITS-9398-REPRODUCTION.md`; the controls in `docs/its9398/` confirm it
+independently, every arm having run a 7-day retention over a one-minute run.
+
+**What it means here.** The purge half of this feature — phases, slot length,
+`slotsFromWriteToPurge` — is a **write-stall** mechanism and nothing else. It
+does not shorten, lengthen or move the ITS#9398 exposure window, which opens at
+a new serverID's first write and closes only at a log-DB checkpoint or a clean
+stop. Nobody argued otherwise in these pages, and this amendment exists so that
+nobody starts: the backlog entry that posed the question named "if the purge
+reopens the exposure window on every cycle, the rotation's slot length is also a
+storm-exposure knob and the ADR does not say so." It is not, and now the ADR
+says that instead.
+
+The seventeenth amendment's second tier-2 surface is untouched and, if
+anything, strengthened: **endpoint rotation** keeps every provider's own sid
+advancing (ADR-036), which bears on the ITS#9580 dormancy class. That argument
+never ran through the purge schedule, and it remains unmeasured as its own arm.
+
+One correction to carry outward: `CLAUDE.md`'s line that the 2026-10-19 run
+"established what the purge has to do with it: **nothing**" is right by
+accident and wrong in reasoning. What that run established is that the storm
+does not require the purge to have *deleted* anything. That the purge is not
+involved at all is a source fact, established here, and it is the stronger
+claim — so it should be stated as what it is rather than inferred from a run
+that could not have shown it.

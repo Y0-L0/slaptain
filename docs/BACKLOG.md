@@ -3013,7 +3013,7 @@ written twice (ADR-040 decision 3's own rule). The condition message's version
 test becomes true again. The OCI label is the belt; this is the braces, and it
 is the one an operator reads first because the condition tells them to.
 
-## Is the purge a NECESSARY step into the ITS#9398 fatal state, or only a sufficient one?
+## ~~Is the purge a NECESSARY step into the ITS#9398 fatal state, or only a sufficient one?~~ — ANSWERED (2026-10-23): only sufficient, and not even the usual route
 
 Two measurements, taken by two lines of work three weeks apart, disagree. Both
 are sound for what they tested; neither tested the other's claim.
@@ -3085,6 +3085,97 @@ says the 2026-10-19 run "established what the purge has to do with it:
 **nothing**". That is stronger than the evidence — what was established is that
 the storm does not require the purge to have *deleted* anything, and that it is
 indifferent to rotation. Say that instead.
+
+---
+
+### Answered 2026-10-23, from source, and the two measurements never disagreed
+
+**A sweep that deletes nothing writes nothing.** `log_old_lookup` is the
+per-entry search callback; it may set `pd->mincsn_updated`, and it
+*unconditionally* appends the DN and increments `pd->used` from the same
+matching entry (`accesslog.c:679-691`). Both the `minCSN` `be_modify` and the
+deletes sit inside `if ( pd.used )` (`:752`). So `mincsn_updated` can only be
+set by a callback invocation that also incremented `pd.used`, and
+`pd.used == 0` means the sweep does nothing at all. The hypothesis this entry
+was built on is **false**.
+
+**The second route exists and is in the same file.** `accesslog_response` has
+its own `minCSN` writer, entirely outside the purge (`accesslog.c:2113-2159`;
+2.6.10 `:1983`): any logged write whose CSN carries a serverID not already in
+the `minCSN` set triggers an `LDAP_MOD_ADD` of `minCSN` against the log DB's
+suffix entry. That is step 1 of the four-step recipe — "a serverID new to this
+log DB" — persisting `minCSN` by itself, with no sweep. The path is present in
+**both 2.6.10 and 2.7.1**, which matches the storm reproducing on both lines
+and on a build carrying none of our patches.
+
+So the two measurements were never in conflict. The podman repro used a sweep
+because it had one; the mesh runs reached the same state by the ordinary write
+path. The asymmetry worth keeping: `minCSN` is written *before* the deletes
+(`:760-785`, deletes `:787`), so a sweep that matched entries and then failed
+every delete still persisted `minCSN` — but it must have matched.
+
+**Confirmed independently by the controls, which nobody had read this way.**
+All three `docs/its9398/control-*.log` arms run `logpurge 07+00:00 01+00:00`
+over a run of under a minute, so no sweep could fire. `control-sigterm.log`
+shows the window wide open at step 1, before anything is stopped: on-disk
+`contextCSN` **empty**, on-disk `minCSN` already carrying both serverIDs.
+`control-checkpoint-100-5.log` shows disk `minCSN` `001 002` against disk
+`contextCSN` `001`, then 1473/s after a `SIGKILL`, with the server naming the
+culprit — `mincsn=…#002#…`, exactly the serverID present in one and absent
+from the other.
+
+**Consequences, all written up in `docs/ITS-9398-REPRODUCTION.md`:**
+
+- the four-step recipe's step 2 no longer requires a sweep;
+- §"Two consequences" is reversed — the exposure is continuous from the first
+  write of a new serverID, not tied to sweeps — and the pivot it performed away
+  from "checkpoint the log DB" has no basis. §"Controls" in the same document
+  already said this and was never reconciled with the front of it;
+- the mitigation question returns to the log DB's `syncprov-checkpoint`, which
+  is where upstream's own `ITS#9580 FIXME` puts it (`accesslog.c:2076-2082`:
+  *"Right now we depend on syncprov's checkpoint to clean up after."*);
+- **ADR-037's purge-staggering half was never a lever on ITS#9398**, and the
+  `CLAUDE.md` line above should be narrowed to say so rather than to claim the
+  purge has nothing to do with it;
+- `syncprov-checkpoint 1 1` wins by **ordering**, not by a narrower race: the
+  log entry is added before `minCSN` is modified, so with `si_chkops = 1` the
+  checkpoint fires on that operation (`syncprov.c:2607`, `:2615`) and persists
+  `contextCSN` first. Read from source — neither control attempts a kill inside
+  the window — and its cost on a write-heavy log DB is unmeasured. That is now
+  open question 5 in the reproduction document, and the next thing worth
+  measuring.
+
+## `stale_on()` in the ITS#9398 controls can fail to produce a number
+
+Found 2026-10-23 while reading the control logs properly.
+
+`docs/its9398/controls.sh` ends each run by reporting a storm rate:
+
+```
+stale_on() { grep -ac 'err=4096' "$SRV/$1.slapd.log" 2>/dev/null; true; }
+...
+n0=$(stale_on A); sleep 10; n1=$(stale_on A)
+echo "err=4096: $n0 -> $n1 => $(( (n1-n0)/10 ))/s"
+```
+
+In `control-sigterm.log` this produced a shell arithmetic error instead of a
+rate — bash echoed a two-line expression back, so one of `n0`/`n1` held
+something other than a single integer. The cause is **undetermined**; the same
+code produced clean numbers in the other three arms, and guessing at it from
+the log alone would be inventing a mechanism.
+
+**Why it matters more than a shell bug.** That arm is the row in the
+reproduction document's §"Controls" table asserting a clean `SIGTERM`. Its
+verdict happens to be right on other evidence — the on-disk CSN state after the
+clean stop, and a successful write replicating afterwards — but the number the
+table implies does not exist. A missing reading and a zero reading print
+identically here, which is the `CLAUDE.md` "reading that cannot be
+distinguished from absence" class in the instrument we would cite upstream.
+
+**Fix:** make `stale_on` emit exactly one integer unconditionally and guard the
+arithmetic, so a broken reading fails loudly instead of silently becoming a
+verdict. Re-run all four arms afterwards, because none of their storm numbers
+has been produced by a checked instrument.
 
 ## ITS#9398 stale-cookie storm on OpenLDAP 2.7.1 (filed upstream in 2020, still open)
 

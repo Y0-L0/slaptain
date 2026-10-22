@@ -341,7 +341,7 @@ No recommendation; this is the menu for the decision.
 
 | | Option | Evidence for | Evidence against / cost |
 |---|---|---|---|
-| **A** | `olcSpCheckpoint` on every `cn=accesslog-<db>` | ITS#9398 names the missing checkpoint as the cause; our measurement (`1 1` clean, `100 5` storm). **Reframed 2026-10-04:** this is not belt-and-braces — a checkpoint *restores the safety net `logpurge` removes*. slapd rebuilds a lost `contextCSN` by scanning for the greatest `entryCSN`; purging deletes exactly those entries | Against upstream's guide, its fixtures, Symas, every distro; Chu's "only an optimization"; ITS#8607 shows checkpoints and accesslog have interacted badly before. Write amplification on a write-heavy DB |
+| **A** | `olcSpCheckpoint` on every `cn=accesslog-<db>` | ITS#9398 names the missing checkpoint as the cause; our measurement (`1 1` clean, `100 5` storm). **Reframed 2026-10-04:** this is not belt-and-braces — a checkpoint *restores the safety net `logpurge` removes*. slapd rebuilds a lost `contextCSN` by scanning for the greatest `entryCSN`; purging deletes exactly those entries. **Strengthened 2026-10-23:** the purge is not what opens the window — `accesslog_response` persists `minCSN` on the first write from a new serverID with no sweep at all (`accesslog.c:2113-2159`), and the `100 5` control stormed with every journal entry intact. So A is not a repair for something purging broke; it is the only option that closes the window at its source, and upstream's own ITS#9580 `FIXME` (`accesslog.c:2076-2082`) names this checkpoint as the intended cleanup. It also widens A's scope: the exposure is continuous from a new serverID's first write, not confined to post-sweep windows | Against upstream's guide, its fixtures, Symas, every distro; Chu's "only an optimization"; ITS#8607 shows checkpoints and accesslog have interacted badly before. Write amplification on a write-heavy DB |
 | **B** | Raise `terminationGracePeriodSeconds` to ~90 s | Every slapd packaging rides systemd's 90 s; Zeilenga 2001 | 30 s never *shown* insufficient; no upstream figure for shutdown duration; slows worst-case rollouts; useless against OOM/node crash |
 | **C** | `preStop` hook | k8s-native | No slapd precedent anywhere, not even Symas's own chart; slapd has no "flush now" command, so a hook can only sleep or poll |
 | **D** | Extend operator CSN monitoring to the accesslog suffix | Kuzník verbatim; ahead of the entire ecosystem. **Implemented and validated** as `its9398.sh diagnose` (serverIDs in `minCSN` minus those in `contextCSN`), red→green against a deliberately armed fault | Sees the consequence, not the latent state — over LDAP it reads the in-memory view, which stays clean until the restart; needs the replication identity bind (ADR-020, verified sufficient) |
@@ -362,6 +362,16 @@ can only be healed from another site; mode B (own-serverID regression,
 `err=53`, cheap) can only be healed locally. D detects mode A, I detects mode
 B. A is the only option that prevents either, because it is the only one that
 makes `contextCSN` durable. See `ITS-9398-REPRODUCTION.md` for the measurements.
+
+**Third constraint, 2026-10-23: A's cost is still unmeasured, and that is now
+the gating unknown.** `1 1` is the only setting shown to survive a `SIGKILL`,
+and it means a `contextCSN` write per logged operation into the environment
+whose single LMDB writer already contends with every client write (ADR-037).
+Why it works is an *ordering* argument read from source — the log entry is
+added before `minCSN` is modified, so with `si_chkops = 1` the checkpoint fires
+first (`syncprov.c:2607`, `:2615`) — and neither control attempts a kill inside
+the window. Before A can be recommended, it needs a kill-inside-the-window
+control and a cost measurement under load.
 
 ---
 

@@ -2932,8 +2932,6 @@ a transient `Error` on the way there is invisible to a wait.
 - Once fixed, the explanatory paragraph in `docs/demo/README.md` step 3 can
   shrink to a line or go.
 
-## ITS#9580 stale-cookie storm observed on OpenLDAP 2.7.1
-
 ## Is the purge a NECESSARY step into the ITS#9398 fatal state, or only a sufficient one?
 
 Two measurements, taken by two lines of work three weeks apart, disagree. Both

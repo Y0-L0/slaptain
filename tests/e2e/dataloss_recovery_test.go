@@ -225,12 +225,17 @@ var _ = Describe("data loss recovery via replication",
 	//   failure from the one this spec counts. ITS#9398 is fixed in no
 	//   release, master included: there is nothing to upgrade to.
 	//
-	//   NOT the accesslog purge. Checked directly on the affected pod
-	//   (2026-10-18): the OLDEST surviving journal entry was written at the
-	//   pod's own birth, so the purge had deleted nothing at all, and the
-	//   storm reproduced identically with the ADR-037 purge rotation on and
-	//   with a single fleet-wide interval. Do not read a red here as a purge
-	//   regression.
+	//   NOT a purge-rotation regression — though the purge is not exonerated
+	//   either. Checked directly on the affected pod (2026-10-18): the OLDEST
+	//   surviving journal entry was written at the pod's own birth, so the
+	//   purge had DELETED nothing at all, and the storm reproduced identically
+	//   with the ADR-037 purge rotation on and with a single fleet-wide
+	//   interval. That bounds the purge's role rather than excluding it — the
+	//   podman repro has a sweep advancing on-disk minCSN past on-disk
+	//   contextCSN as step 2 of a recipe it then summoned on demand, so the
+	//   two measurements reconcile only if a sweep that deletes nothing still
+	//   writes minCSN, or if a second route exists. Open in docs/BACKLOG.md.
+	//   Either way, do not read a red here as a purge regression.
 	//
 	// Historical measurements, kept because they bound the threshold. On
 	// 2.6.10 the ITS#9580 dormancy loop produced ~14k connections in 27 s and
@@ -282,9 +287,10 @@ var _ = Describe("data loss recovery via replication",
 					"NOT 2.6-only and NOT fixed by upgrading: measured on 2.7.1 at 4563 lines "+
 					"(2026-10-11) and reproduced twice on a three-site mesh on 2026-10-18 at "+
 					"2473 and 9237 lines, on the same site both times. "+
-					"NOT caused by the accesslog purge: on the affected pod the oldest journal "+
+					"NOT a purge-rotation regression: on the affected pod the oldest journal "+
 					"entry was the pod's own birth, so the purge had deleted nothing, and the "+
-					"storm reproduced identically with the purge rotation on and off. "+
+					"storm reproduced identically with the purge rotation on and off — whether "+
+					"the purge is implicated at all is open, see docs/BACKLOG.md. "+
 					"Rebuilding the pod (ADR-012 case 2) clears it; there is no release to "+
 					"upgrade to. See ADR-021 and ADR-038.",
 				total, needle, pods, maxOccurrences)

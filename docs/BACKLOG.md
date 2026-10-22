@@ -2932,6 +2932,44 @@ a transient `Error` on the way there is invisible to a wait.
 - Once fixed, the explanatory paragraph in `docs/demo/README.md` step 3 can
   shrink to a line or go.
 
+## Adding or removing a mesh site rolls every pod at every other site
+
+Found during the v0.4.0 validation, 2026-10-22, as the cause of two unrelated
+e2e failures rather than as a question anyone asked.
+
+`external_replication_test.go` removes a site from the `SlapdMesh`, asserts the
+peer's syncrepl stanza disappears, and restores it. Both edits rolled the whole
+fleet: the StatefulSet revision moved from `85c68597c9` to `58c8fdf8d9` and back,
+and all three RW pods were replaced twice in 35 seconds.
+
+**Why**: a peer's CA is mounted into the pod template
+(`slapdcluster_controller.go:1196`, volume `peer-tls-<peer>`), and under
+`meshRef` the peer list is **derived** from the mesh (`mesh_derive.go:425`). So
+the set of volumes is a function of mesh membership, and changing membership is
+a pod-template change. Nothing is wrong with any individual step; the roll is
+the composition.
+
+**Why it matters.** ADR-013's 2026-09-28 amendment put the sanctioned
+pod-template roll-trigger count at **zero**, and names the triggers it retired.
+This one is not in that list and was not decided — it was inherited when ADR-028
+made the peer set derived. On a production mesh, adding a site restarts every
+pod at every existing site, one ordinal at a time, for a change that alters no
+data and no local configuration.
+
+**Collateral, measured.** Two specs failed purely because they ran while the
+rolls were in flight: `database_hotadd` snapshotted pod UIDs mid-roll (its
+revision check passed — the template had already settled, the pods had not), and
+`monitor_sidecar` scraped a pod that had not finished reopening its databases.
+Neither is a defect in what it tests.
+
+**Shape of a fix (not written).** The CA bundle could be a Secret the operator
+maintains — one volume whose *contents* change with membership rather than one
+volume per peer — which is the ADR-013 amendment's own pattern: the
+database-dirs ConfigMap moved off the pod template for exactly this reason, and
+`slapd` already re-reads `olcTLSCACertificateFile` on a converged modify. That
+would make a membership change a cn=config convergence rather than a roll. Cost
+unknown; the per-peer mount is also what makes `tls_cacert` legible per peer.
+
 ## Is the purge a NECESSARY step into the ITS#9398 fatal state, or only a sufficient one?
 
 Two measurements, taken by two lines of work three weeks apart, disagree. Both

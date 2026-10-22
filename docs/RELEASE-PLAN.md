@@ -20,8 +20,8 @@ a measurement behind it, and the ones that are still open say so.
   pre-rewrite tip), and putting the documents side by side exposed a
   disagreement about the purge's role in the storm, recorded in `BACKLOG.md`
   rather than resolved.
-- `feat/rid-allocation-ledger` — 28 commits, unmerged, 152 behind. Carries
-  `feat(api)!: remove spec.replication.ridBase`, a second breaking change.
+- `feat/rid-allocation-ledger` — 28 commits, unmerged, 152 behind.
+  **Rejected 2026-10-22, will not be merged** (see 0.5.0). Kept as a record.
 - `backup/adr-034-prerebase`, `feat/adr-034-startup-only-config`,
   `fix/own-sid-watermark-gap` — all merged into `origin/main` by patch-id;
   safe to delete.
@@ -172,11 +172,11 @@ worth much churn. The higher-leverage move is item 4.
    the alias. Breaking for anyone pinning `spec.images.*.tag` — own
    `UPGRADING.md` entry.
 
-Open question for this release: whether `feat/rid-allocation-ledger`'s
-`ridBase` removal rides along. Pre-1.0 it is arguably better to pay one
-migration window than two, and `ridSegment` already shipped in 0.3.0 so the
-removal finishes a migration rather than starting one. Needs a rebase and a
-mesh run first.
+**Not in this release, or any: `feat/rid-allocation-ledger` is rejected**
+(2026-10-22). The approach will not be merged. Its 28 commits stay on the
+branch as a record of what was tried; `spec.replication.ridBase` therefore
+stays, and ADR-031 Phase 6 does not happen as written. If the RID ledger is
+ever revisited it starts from the ADR, not from that branch.
 
 ## 0.6.0 — born-with pinning and the preflight
 

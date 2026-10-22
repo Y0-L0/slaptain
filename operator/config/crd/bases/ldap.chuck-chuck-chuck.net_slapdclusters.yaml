@@ -1147,6 +1147,18 @@ spec:
                                        every provider's own serverID advancing, which is
                                        independent of purging. Reasoned, not run.
 
+                      THE MODES HAVE DIFFERENT IMAGE REQUIREMENTS, measured on a three-site
+                      mesh 2026-10-22. A phase is a third value of olcAccessLogPurge that only
+                      a slapd carrying our accesslog-purge-phase patch accepts, so:
+
+                        PurgeAndWrite, PurgeOnly   need the patched image; on a pure build the
+                                                   operator writes the two-field fallback and
+                                                   reports PurgePhaseUnsupported, and nothing
+                                                   is staggered.
+                        WriteOnly                  needs NO patch. The endpoint is a Service
+                                                   the operator repoints, so this mode works on
+                                                   a stock upstream slapd.
+
                       In PurgeOnly and WriteOnly, slotsFromWriteToPurge and leadTime have no
                       referent — there is no purge slot to displace from, and no
                       boundary-purge to arrive ahead of. Setting either is REPORTED on

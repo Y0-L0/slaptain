@@ -312,6 +312,124 @@ a *range* of data-plane versions rather than a matched set — upstream-dominant
 becomes right and decision 1 should flip. Recorded here so that the condition
 is noticed rather than rediscovered.
 
+## Amendment, 2026-10-22: the image is SELECTED, and decision 8 is reversed
+
+Decisions 2, 4 and 8 were accepted this morning and are superseded the same
+day. The reasoning is recorded rather than the text quietly edited, because two
+of the three were reversed on arguments that are worth more than the
+conclusions.
+
+### What replaces them: a selector, with a default
+
+```yaml
+spec:
+  images:
+    slapd:
+      select:                    # optional; unset takes the defaults below
+        storageFormat: lmdb1.0   # the COMPATIBILITY axis — what can open your volumes
+        flavour: pure            # the TRUST axis — do you run our patches
+```
+
+Two axes, each named for what it actually governs, neither a version number
+pretending to be a guarantee. An explicit `tag` still pins an artifact for
+anyone who wants one.
+
+**A selector keyed on the storage format cannot silently break a cluster**,
+which a version-keyed one can. "The current lmdb0.9 image" moving 2.6.10 →
+2.6.11 is safe by construction; moving across formats is impossible, because
+the selector names the format. So slaptain keeps shipping newer slapd builds —
+security fixes included — and the only thing that could strand a volume is the
+one thing the user pinned.
+
+It also drives **both** images. "Pin both or neither" (ADR-021) stops being a
+documented rule a user can violate and becomes unviolatable: one selector, one
+matched pair.
+
+### Decision 4 is deleted, not implemented
+
+Recording the version a cluster was born with was designed to stop a default
+move from handing an existing cluster an unopenable volume. It does not survive
+contact:
+
+- **The probe is not free.** Reading the LMDB meta page means mounting the PVC,
+  and ADR-018 says any pod object naming a PVC — finished pods included — is a
+  deletion lease that blocks pod re-roll. The mechanism re-creates the hazard
+  we wrote an ADR about.
+- **The cache goes stale in exactly the case it exists for.** A deliberate
+  2.6 → 2.7 migration leaves a recorded line that now names the old format, and
+  the operator would use it to pick the old image — *fighting the migration*.
+  That is decision 5's own objection to inferring an image from a volume, which
+  this ADR failed to apply to itself.
+- **It bought one outage at one rare event**, remediable by a one-line CR edit,
+  in exchange for a probe, a cache, an invalidation story and a backfill.
+
+With a selector there is nothing to record: the user's declaration *is* the
+record, it lives in their GitOps source of truth, and the operator never writes
+to their spec. Decision 5 shrinks to its valuable core — recognise a startup
+failure and report it legibly, the `isPurgeArityRejection` shape decision 6
+already prefers.
+
+### Decision 8 is reversed: the default stays OpenLDAP 2.7, and becomes `pure`
+
+The morning's case for 2.6 rested chiefly on ITS#10597, a 2.7-only
+use-after-free under read-heavy load fixed only in master. The error was not
+the fact but the weighing: **the two costs have different shapes.**
+
+- The UAF is **temporary and self-resolving**. 2.7.2 carries its milestone, and
+  default users receive it automatically — *within the same format line*, so no
+  migration.
+- A migration is **permanent**. Default 2.6 now and every such cluster
+  eventually pays a dump/reload to reach 2.7.
+
+Trading a time-limited bug for a permanent migration is the wrong trade.
+
+What follows is the shape worth having: **whoever takes the default never
+migrates**, and whoever overrides to lmdb0.9 does so deliberately, knowing they
+may. ADR-023 is the path we owe the second group — its stated headline use case
+is this exact break without the ADR-014 outage, and it should work, because
+syncrepl is a protocol and not a format: a rebuilt pod on a 2.7 image
+full-refreshes from its 2.6 peers, one ordinal at a time. Designed, plausible,
+and unvalidated (ADR-027 records mixed-version mesh behaviour as reasoned
+rather than measured).
+
+**And there is a default, deliberately.** An earlier draft of this amendment
+required the user to choose, with the chart failing at template time. That was
+refused on the grounds that matter most for adoption: software that does not
+start out of the box is software people stop evaluating. A default that nobody
+ever has to migrate off is not a guess imposed on a user — it is the one
+default that costs them nothing.
+
+### Two prerequisites for the `pure` default
+
+1. **Pure must be validated**, or we default to the artifact with the least
+   history — the thing ADR-039 tier 1 forbids. Cycle B did this on 2026-10-22:
+   109 passed, 2 failed on a three-site mesh, both failures explained below.
+2. **The version-string collision becomes a blocker.** `SLAPTAIN_PATCHES=0`
+   currently produces a build reporting `2.7.1-0+slaptain3`, identical to the
+   patched one, while `PurgePhaseUnsupported` tells operators to verify the
+   patch with `slapd -VV`. Latent while pure is the exception; with pure as the
+   DEFAULT it misleads the majority, every time they trip it. See
+   `docs/BACKLOG.md`.
+
+### What cycle B taught about the two axes
+
+They are not independent in the way the API suggests. Measured on the pure
+pair:
+
+- **`WriteOnly` passed.** Rotating the write endpoint needs no patch — it is a
+  Service the operator repoints.
+- **`PurgeOnly` failed**, correctly: the pure build refuses the three-value
+  `olcAccessLogPurge`, so there is no phase to stagger.
+
+So `flavour: pure` is compatible with `mode: WriteOnly` and incompatible with
+any mode that stages phases. Neither the field documentation nor ADR-037 says
+so, and both should: a user choosing the default flavour and then enabling the
+rotation gets two thirds of a feature and one condition explaining why.
+
+The storm also reproduced here — 6582 stale-cookie lines on a slapd carrying
+**none** of our patches, which is the strongest evidence yet that ITS#9398 is
+upstream's and not ours.
+
 ## Consequences
 
 - **`image.tag | default .Chart.AppVersion` survives as an identity** for the

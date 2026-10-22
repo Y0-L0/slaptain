@@ -144,6 +144,70 @@ messages**. The first rewrite on v0.4.0 fixed file contents only, and `pre-push`
 — which scans every outgoing commit's message too — caught the rest on the
 final check.
 
+### Publishing: by hand, because the workflow has never worked
+
+`.github/workflows/publish.yml` triggers on `push: tags: v*` and looks complete.
+It is not. It was added on 2026-10-11 (`Ci/GitHub actions (#3)`) and **v0.4.0 was
+its first execution ever** — the repository has eight version tags and, before
+v0.4.0, zero GitHub Releases. Every release so far was hand-pushed.
+
+It failed at the first `podman push`:
+
+```
+denied: permission_denied: write_package
+  → ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-init
+```
+
+All nine images had **built** by then, so this is not a build problem. The ghcr
+packages were created by a personal token, and a package created that way does
+not grant the repository's Actions token write access: each package needs the
+repo added under *Package settings → Manage Actions access* with the **Write**
+role (or the equivalent "inherit access from repository"). `permissions:
+packages: write` in the workflow is necessary and not sufficient — it scopes the
+token, it does not entitle it to a package it does not own.
+
+Until that is fixed, publish from a workstation. The four traps, in the order
+they bite:
+
+1. **`REGISTRY` may already be set in your environment**, in which case the
+   Makefile's `REGISTRY ?= ghcr.io/chuck-chuck-chuck-net` never applies — `?=`
+   yields to it. A plain `make push` then publishes the *release* somewhere
+   else, reports success at every step, and leaves ghcr empty. **Pass
+   `REGISTRY=` explicitly on the command line**, where it beats both.
+2. **Build from a detached checkout at the tag.** The version is derived from
+   `git describe`; even one commit past the tag, `make show-tag` yields image
+   `sha-<hash>` and chart `0.0.0-<hash>`, and those are what gets published.
+3. **Clear `.stamps` when switching registry.** The stamps are not keyed by
+   `REGISTRY`, so a lab build makes `make push` skip the rebuild and then fail
+   with "image not known" — or, worse, push something stale.
+4. **The exporter has its own version line** (ADR-033). Off an `exporter/vX.Y.Z`
+   tag it publishes as `sha-<hash>`, which is correct and will look wrong next
+   to nine `0.4.0` images.
+
+The sequence that produced v0.4.0:
+
+```bash
+git checkout v0.4.0                       # detached; 1 and 2 above
+rm -rf .stamps                            # 3
+make show-tag REGISTRY=ghcr.io/chuck-chuck-chuck-net   # expect v0.4.0 / 0.4.0 / 0.4.0
+env -u REGISTRY make push          REGISTRY=ghcr.io/chuck-chuck-chuck-net
+env -u REGISTRY make charts-package charts-push REGISTRY=ghcr.io/chuck-chuck-chuck-net
+
+# the release the workflow would have made: notes are the CHANGELOG section,
+# extracted exactly as publish.yml extracts them
+awk -v t="## v0.4.0" '$0==t{f=1;next} f&&/^## /{exit} f{print}' CHANGELOG.md > notes.md
+#   ... then append the images / charts / CRD-first / slctl boilerplate
+cat charts/operator/crds/*.yaml > dist/slaptain-crds.yaml
+cd operator && for os in linux darwin; do for arch in amd64 arm64; do
+  CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags='-s -w'     -o ../dist/slctl-$os-$arch ./cmd/slctl; done; done
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags='-s -w'   -o ../dist/slctl-windows-amd64.exe ./cmd/slctl
+gh release create v0.4.0 --title v0.4.0 --notes-file notes.md --verify-tag dist/*
+```
+
+Fixing the workflow is a packages-permission change plus one real run; it does
+not need the build touched. Worth doing before 0.5.0, since every release until
+then pays this by hand.
+
 ### Git history
 
 Keep it. In this repository commit messages are the reasoning record and

@@ -2815,6 +2815,52 @@ a transient `Error` on the way there is invisible to a wait.
 
 ## ITS#9580 stale-cookie storm observed on OpenLDAP 2.7.1
 
+## Is the purge a NECESSARY step into the ITS#9398 fatal state, or only a sufficient one?
+
+Two measurements, taken by two lines of work three weeks apart, disagree. Both
+are sound for what they tested; neither tested the other's claim.
+
+**The podman repro says the purge is the trigger** (2026-10-04,
+`docs/ITS-9398-REPRODUCTION.md`, "The slapcat test"). Read off disk, a purge
+sweep advanced `minCSN` to a new write while on-disk `contextCSN` stayed where
+it was — so the purge is not a checkpoint in disguise, it is what drives
+`minCSN` *past* the durable `contextCSN`. It is step 2 of a four-step recipe
+(a serverID new to the log DB since the last `contextCSN` persist; a purge
+sweep persisting `minCSN` with it; an unclean stop; restart) that was then
+executed deliberately and produced the fatal shape on demand, with a repair
+that cleared it.
+
+**The mesh run says the purge was not involved** (2026-10-19, recorded on the
+purge-rotation branch). The storm reproduced twice on a three-site mesh — 2473
+and 9237 stale-cookie lines — where the oldest journal entry on the affected
+pod was the pod's own birth. With a 2 d/7 d retention on a one-hour-old
+cluster **the purge had never deleted a single entry**, and the storm appeared
+identically with the purge rotation on and with a plain fleet-wide interval.
+
+**These are compatible only if a purge sweep that deletes nothing still writes
+`minCSN`** — or if there is a second route into the fatal state that needs no
+purge at all. Nobody has checked which.
+
+That is exactly the branch's own Open question 4, still unanswered: *"Does
+`logpurge` reopen the window on a steady-state server? The purge path advances
+`minCSN` on disk with a real `be_modify` on its own timer
+(`accesslog.c:656-684`, `:760-787`), with no corresponding `contextCSN` write…
+Read from source; not measured."* The first half is answerable from source
+alone and cheaply — does the sweep reach the `be_modify` when its delete set is
+empty?
+
+**Why it matters now.** ADR-037 ships a feature whose entire subject is when
+the purge runs. If the purge reopens the exposure window on every cycle, the
+rotation's slot length is also a storm-exposure knob and the ADR does not say
+so. If it does not, the four-step recipe needs a different step 2 and the
+reproduction document overstates the purge's role.
+
+**Also needs narrowing when the purge branch merges**: its `CLAUDE.md` line
+says the 2026-10-19 run "established what the purge has to do with it:
+**nothing**". That is stronger than the evidence — what was established is that
+the storm does not require the purge to have *deleted* anything, and that it is
+indifferent to rotation. Say that instead.
+
 ## ITS#9398 stale-cookie storm on OpenLDAP 2.7.1 (filed upstream in 2020, still open)
 
 ADR-021 adopted 2.7.1 specifically because ITS#9580 is fixed in no 2.6.x

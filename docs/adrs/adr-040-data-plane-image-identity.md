@@ -119,7 +119,14 @@ therefore too late.
 `-debug` and `-asan` remain suffixes: they are build variants of a given
 OpenLDAP build, orthogonal to both axes.
 
-### 2. The unsuffixed build is pure; patched requires the token
+### 2. The unsuffixed build is pure; patched requires the token — *refined*
+
+> **Refined by the amendment, not reversed.** Everything below stands: the
+> naming, the inversion, the sequencing, and the reason step 3 cannot be
+> skipped. What the amendment adds is a layer above it — `select.flavour` is
+> how a cluster asks for pure or patched, so this decision governs what the
+> artifact is **called** and the selector governs which one is **chosen**. A
+> tag remains available to anyone who wants to pin an exact artifact.
 
 `slaptain` over `patched`: it names the provenance, echoes the package revision
 `2.7.1-0+slaptain3` that `slapd -VV` prints, and does not invite "patched with
@@ -127,10 +134,18 @@ what?" at every reading.
 
 This inverts today's meaning and is the point. Running a slapd carrying
 non-upstream behaviour patches becomes a deliberate act, and ADR-037's rotation
-acquires a real two-act opt-in: turn the feature on, *and* pin an image that
-can express it. A user who does only the first gets the two-field fallback and
-`AccesslogPurgeConverged=False/PurgePhaseUnsupported`, whose message already
-names the required version.
+acquires a real two-act opt-in: turn the feature on, *and* ask for an image
+that can express it. A user who does only the first gets the two-field fallback
+and `AccesslogPurgeConverged=False/PurgePhaseUnsupported`, whose message
+already names the required version.
+
+*(Amended: the second act is normally `select.flavour: slaptain` rather than a
+pinned tag. That is the refinement — the deliberateness this decision exists to
+create is preserved, and it moves to a field that says what it means instead of
+to a token a reader has to decode. Pinning a tag still works and still counts
+as the second act. The condition message's instruction to check `slapd -VV` is
+only sound once a pure build stops reporting `+slaptain3` — see the amendment's
+prerequisites.)*
 
 The patched line is expected to accumulate further patches over time, each for
 a stated reason; `accesslog-purge-phase.patch` is the first.
@@ -344,12 +359,21 @@ is noticed rather than rediscovered.
 
 ## Amendment, 2026-10-22: the image is SELECTED, and decision 8 is reversed
 
-Decisions 2, 4 and 8 were accepted this morning and are superseded the same
-day. The reasoning is recorded rather than the text quietly edited, because two
-of the three were reversed on arguments that are worth more than the
-conclusions.
+Decisions 2, 4 and 8 were accepted this morning and are revised the same day —
+but not in the same way, and the difference matters to anyone executing them:
 
-### What replaces them: a selector, with a default
+- **Decision 2 is REFINED, not reversed.** The unsuffixed build is still the
+  pure one and patched still takes the token. What changes is that the tag
+  stops being how a *user* asks for a flavour — the selector is — so decision 2
+  now governs what an artifact is **called**, not how one is **chosen**. Its
+  sequencing stands verbatim, and its alias inversion is still to do.
+- **Decision 4 is DELETED**, never implemented.
+- **Decision 8 is REVERSED**: the default stays OpenLDAP 2.7.
+
+The reasoning is recorded rather than the text quietly edited, because the two
+that did not survive were undone by arguments worth more than the conclusions.
+
+### What replaces decision 4, and layers over decision 2: a selector, with a default
 
 ```yaml
 spec:

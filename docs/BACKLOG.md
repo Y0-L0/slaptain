@@ -2970,6 +2970,49 @@ database-dirs ConfigMap moved off the pod template for exactly this reason, and
 would make a membership change a cn=config convergence rather than a roll. Cost
 unknown; the per-peer mount is also what makes `tls_cacert` legible per peer.
 
+## A pure slapd build reports the same version as a patched one
+
+Found 2026-10-22 by the ADR-040 cycle-B validation, before the alias inversion
+that would have made it dangerous.
+
+`SLAPTAIN_PATCHES=0` changes which patches are applied and nothing else, so the
+package version comes from `debian/changelog` either way. Measured on the
+running pure pod:
+
+```
+pure:     @(#) $OpenLDAP: slapd 2.7.1-0+slaptain3 ...
+patched:  openldap (2.7.1-0+slaptain3) unstable; urgency=medium
+```
+
+Identical. Two things depend on them not being.
+
+**ADR-040 decision 3** names `slapd -VV` as the *second independent route* to an
+image's provenance, the one that corroborates the OCI labels. On the axis that
+actually matters today — patched versus pure — there is no second route,
+because both answers are the same string.
+
+**And the shipped condition message is actively misleading.** When a stock
+slapd refuses the three-value `olcAccessLogPurge`, the operator reports
+`AccesslogPurgeConverged=False/PurgePhaseUnsupported` and tells the reader to
+pin an image carrying the patch, *"2.7.1-0+slaptain2 or later — `slapd -VV`"*
+(`accesslog_purge_converged.go:290`). A pure build satisfies that test while
+lacking the patch entirely. An operator following the instruction verifies the
+version, concludes the image is correct, and is left with no next step —
+the condition and the check disagree, and the check is the one that looks
+authoritative.
+
+Today this is latent: the default build is patched, so nobody meets a pure
+slapd unless they ask for one. ADR-040 decision 2 inverts that, and on the day
+it does, the default image carries a version string asserting it is patched.
+
+**Shape of a fix.** The `+slaptainN` revision should mean "carries slaptain
+patches", which is what a reader already assumes it means. A pure build is then
+plain `2.7.1-0`, or carries a revision that says so, and the build sets it from
+the same `SLAPTAIN_PATCHES` argument that decides the patches — derived, not
+written twice (ADR-040 decision 3's own rule). The condition message's version
+test becomes true again. The OCI label is the belt; this is the braces, and it
+is the one an operator reads first because the condition tells them to.
+
 ## Is the purge a NECESSARY step into the ITS#9398 fatal state, or only a sufficient one?
 
 Two measurements, taken by two lines of work three weeks apart, disagree. Both

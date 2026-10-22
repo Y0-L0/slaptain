@@ -62,6 +62,16 @@ pod-routed, images at `sha-0582604`.
 - *write-rotation BeforeAll* (cycle 2) — **the one genuine defect, and it was in
   the test.** Fixed in `129b774`; see cycle 3.
 
+**One delta between the validated tree and the tag.** Three dependabot patch
+bumps landed on `origin/main` while the validation ran — aws-sdk-go-v2
+1.47.2→1.47.3 (s3 1.114.2→1.114.3) and ginkgo 2.33.0→2.33.1 in both modules —
+and were merged in before tagging. They were re-checked by build, vet, the unit
+suites (`internal/backup` included, which is the SDK's only consumer),
+`helm-lint` and the generated-files gate. They were **not** put through another
+mesh cycle; patch releases of an S3 client and a test framework did not seem
+worth three more cycles, and that judgement is recorded here rather than left
+implicit.
+
 **Two things the validation taught that are not about this release.** The suite
 had never been run against a cluster *deployed* with the rotation on, which is
 how the fixture gap survived. And a mesh membership change rolls every pod at

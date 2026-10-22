@@ -154,6 +154,25 @@ var _ = Describe("ADR-037: the write endpoint rotates",
 		}
 
 		// setRotation patches spec.rotation on the fixture cluster.
+		//
+		// It clears leadTime, and that is not tidiness. The lead's upper bound
+		// is (replicas−1) × slotLength, so a lead sized for the DEPLOYED slot
+		// is almost always out of range for the short one this container
+		// substitutes: charts/slapd-mesh/examples/rotation.yaml ships 6h and
+		// 5m, and against a 20s slot at three pods the bound is 40s. The
+		// operator then refuses the whole rotation as LeadTimeOutOfRange and
+		// the write Service becomes an alias of the client Service — correct
+		// behaviour, and it fails every spec in this container at BeforeAll
+		// with a message about the grid that names neither the lead nor the
+		// bound. Measured on a three-site mesh with E2E_ROTATION=1 on
+		// 2026-10-22: all six write-rotation specs lost, which is also how we
+		// learned the suite had never been run with the rotation deployed ON.
+		//
+		// The container already takes BOTH halves of the schedule for its
+		// duration and restores them (see BeforeAll). leadTime is the third
+		// piece of that same schedule and is owned the same way; the one spec
+		// that wants a lead sets it explicitly through setLead and clears it
+		// again.
 		setRotation := func(ctx context.Context, on bool, t time.Duration) {
 			sc := &ldapv1alpha1.SlapdCluster{}
 			Expect(crdClient.Get(ctx, nsName(namespace, "slapd"), sc)).To(Succeed())
@@ -162,6 +181,7 @@ var _ = Describe("ADR-037: the write endpoint rotates",
 			if on {
 				d := metav1.Duration{Duration: t}
 				sc.Spec.Rotation.SlotLength = &d
+				sc.Spec.Rotation.LeadTime = nil
 			}
 			Expect(crdClient.Update(ctx, sc)).To(Succeed())
 		}

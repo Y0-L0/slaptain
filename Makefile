@@ -91,6 +91,21 @@ EXPORTER_IMAGE   = $(REGISTRY)/$(PROJECT)/slapd-exporter:$(EXPORTER_IMAGE_TAG)
 # e2e cycle.
 OPENLDAP_OL26_VERSION ?= 2.6.10+dfsg-1
 
+# The 2.7 OpenLDAP version, DERIVED from the packaging fork's changelog rather
+# than written here (ADR-040 decision 1), so the two cannot disagree.
+OPENLDAP_27_VERSION := $(shell head -1 images/openldap-deb/debian/changelog | tr -d '()' | awk '{print $$2}' | cut -d- -f1)
+
+# SLAPTAIN_PATCHES: whether a 2.7 build carries our own behaviour patches.
+# 1 today, and the pure pair below is what has to go through a multi-site cycle
+# before ADR-040 decision 2 can invert that default.
+SLAPTAIN_PATCHES ?= 1
+
+# The PURE 2.7 pair: same source, same packaging fork, none of our patches.
+# Named in ADR-040's target scheme, with the OpenLDAP component derived.
+OPENLDAP_DEB_IMAGE_PURE = localhost/$(PROJECT)/openldap-deb:$(IMAGE_TAG)-ol$(OPENLDAP_27_VERSION)
+INIT_IMAGE_PURE  = $(REGISTRY)/$(PROJECT)/slapd-init:$(IMAGE_TAG)-ol$(OPENLDAP_27_VERSION)
+SLAPD_IMAGE_PURE = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)-ol$(OPENLDAP_27_VERSION)
+
 INIT_IMAGE_OL26  = $(REGISTRY)/$(PROJECT)/slapd-init:$(IMAGE_TAG)-ol26
 SLAPD_IMAGE_OL26 = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)-ol26
 
@@ -211,7 +226,7 @@ define import-if-needed
 	fi
 endef
 
-.PHONY: all build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-openldap-deb-ol26src build-init-ol26src build-slapd-ol26src build-ol26src import-init-ol26src import-slapd-ol26src import-ol26src build-openldap-deb-debug build-slapd-debug build-openldap-deb-asan build-slapd-asan import-slapd-debug import-slapd-asan push-slapd-debug push-slapd-asan build-toolkit build-operator build-exporter build-slctl install-slctl push gencert helm-deploy cluster-helm-install cluster-helm-uninstall mesh-helm-install mesh-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-exporter import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag helm-lint verify-generated tidy test-init
+.PHONY: all build-pure push-pure build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-openldap-deb-ol26src build-init-ol26src build-slapd-ol26src build-ol26src import-init-ol26src import-slapd-ol26src import-ol26src build-openldap-deb-debug build-slapd-debug build-openldap-deb-asan build-slapd-asan import-slapd-debug import-slapd-asan push-slapd-debug push-slapd-asan build-toolkit build-operator build-exporter build-slctl install-slctl push gencert helm-deploy cluster-helm-install cluster-helm-uninstall mesh-helm-install mesh-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-exporter import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag helm-lint verify-generated tidy test-init
 
 ## all: the seven pushable images plus slctl. build-ol26 is included so a
 ## release build carries the legacy OpenLDAP 2.6 pair too (ADR-021).
@@ -255,6 +270,38 @@ $(STAMPS)/openldap-deb: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
 		--build-arg RUN_UPSTREAM_TESTS=$(RUN_UPSTREAM_TESTS) \
 		-t $(OPENLDAP_DEB_IMAGE) images/openldap-deb/
 	@touch $@
+
+## The PURE 2.7 pair (ADR-040 decision 2): the same upstream source and the same
+## packaging fork, with none of slaptain's behaviour patches. It exists to be
+## VALIDATED — the alias cannot be inverted until it has been through a
+## multi-site cycle, because every image this project has built so far was
+## patched. Not in `all` or `push` yet, for the same reason.
+$(STAMPS)/openldap-deb-pure: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
+	$(CONTAINER_ENGINE) build \
+		--build-arg RUN_UPSTREAM_TESTS=$(RUN_UPSTREAM_TESTS) \
+		--build-arg SLAPTAIN_PATCHES=0 \
+		-t $(OPENLDAP_DEB_IMAGE_PURE) images/openldap-deb/
+	@touch $@
+
+$(STAMPS)/init-pure: $(INIT_SRCS) $(STAMPS)/openldap-deb-pure $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
+	$(CONTAINER_ENGINE) build \
+		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_PURE) \
+		-t $(INIT_IMAGE_PURE) images/slapd-init/
+	@touch $@
+
+$(STAMPS)/slapd-pure: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-pure $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
+	$(CONTAINER_ENGINE) build \
+		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_PURE) \
+		-t $(SLAPD_IMAGE_PURE) images/slapd/
+	@touch $@
+
+## build-pure: the pure 2.7 slapd/slapd-init pair, tagged -ol<version>.
+build-pure: $(STAMPS)/init-pure $(STAMPS)/slapd-pure
+
+## push-pure: deliver it so an e2e run can pin it.
+push-pure: build-pure
+	$(CONTAINER_ENGINE) push $(INIT_IMAGE_PURE)
+	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE_PURE)
 
 $(STAMPS)/init: $(INIT_SRCS) $(STAMPS)/openldap-deb $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
 	$(CONTAINER_ENGINE) build \

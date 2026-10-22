@@ -49,6 +49,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         devscripts \
         equivs \
         fakeroot \
+        quilt \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -66,6 +67,31 @@ RUN set -eux; \
 COPY debian /build/openldap-${OPENLDAP_VERSION}/debian
 
 WORKDIR /build/openldap-${OPENLDAP_VERSION}
+
+# Whether this build carries slaptain's own behaviour patches (ADR-040
+# decision 2). They are NOT in debian/patches/series: that series is the
+# packaging fork, and ours are a separate axis, so a build either appends them
+# or does not and the two are otherwise the same source.
+#
+# 1 is the default TODAY and not forever. ADR-040 inverts it — the unsuffixed
+# build becomes the pure one and patched takes a token — but only after the
+# pure pair has been through a multi-site cycle, because every image this
+# project has ever built and every e2e it has ever run used the patched build.
+# Until that cycle, defaulting to 0 would ship an untested default.
+ARG SLAPTAIN_PATCHES=1
+
+# Appended last, after Debian's own series, exactly as the 2.6 source build
+# does it. Pushing and popping the whole series here fails the build on a
+# patch that does not apply, rather than halfway through dpkg-buildpackage.
+RUN set -eux; \
+    if [ "${SLAPTAIN_PATCHES}" = "1" ]; then \
+        echo accesslog-purge-phase.patch >> debian/patches/series; \
+        QUILT_PATCHES=debian/patches quilt --quiltrc /dev/null push -a; \
+        QUILT_PATCHES=debian/patches quilt --quiltrc /dev/null pop -a; \
+        echo "slaptain patches: applied"; \
+    else \
+        echo "slaptain patches: NONE (pure upstream packaging)"; \
+    fi
 
 # apt-get update again: the stage above dropped the package lists, and
 # mk-build-deps needs them to resolve the build dependencies.
@@ -122,6 +148,12 @@ RUN set -eux; \
 # No second (stock) slapd is fetched for an A/B. The teeth come from the two
 # rejections instead: a FOUR-value logpurge must still be refused, and a phase
 # that is not less than the interval must be refused by the patch's own check.
+#
+# The gate is SYMMETRIC, because SLAPTAIN_PATCHES=0 is a real build and not an
+# absence to be skipped over: a pure build must REFUSE the three-value form.
+# Asserting that is what makes "pure" a verified property rather than a claim —
+# and it is the same assertion in reverse, so one of the two always runs and
+# neither can pass by not executing.
 # A parser that accepted everything would fail both. That keeps the gate free of
 # a network fetch and of any dependency on what a distro currently ships.
 #
@@ -151,6 +183,23 @@ RUN set -eux; \
             "$root/alog" "$root/db" "$1" > "$root/slapd.conf"; \
     }; \
     # 1. the three-value form the operator emits must be accepted.
+    if [ "${SLAPTAIN_PATCHES}" != "1" ]; then \
+        conf '0+00:15 0+00:05 0+00:02'; \
+        if "$slaptest" -f "$root/slapd.conf" -u > "$root/out" 2>&1; then \
+            echo "logpurge phase gate: a PURE build ACCEPTED a three-value logpurge — \
+it is not pure" >&2; \
+            cat "$root/out" >&2; exit 1; \
+        fi; \
+        grep -q 'extra cruft' "$root/out"; \
+        conf '0+00:15 0+00:05'; \
+        "$slaptest" -f "$root/slapd.conf" -u > "$root/out" 2>&1 || { \
+            echo "logpurge phase gate: a pure build rejected the TWO-value form" >&2; \
+            cat "$root/out" >&2; exit 1; \
+        }; \
+        grep -q 'config file testing succeeded' "$root/out"; \
+        echo "logpurge phase gate: OK (pure — three values refused, two accepted)"; \
+        exit 0; \
+    fi; \
     conf '0+00:15 0+00:05 0+00:02'; \
     "$slaptest" -f "$root/slapd.conf" -u > "$root/out" 2>&1 || { \
         echo "logpurge phase gate: a three-value logpurge was REJECTED" >&2; \

@@ -248,87 +248,93 @@ preceding commit's own text — `08d696d` (1 insertion, 1 deletion) and
 second is the more valuable record. Realistic saving is 69 → ~65, which is not
 worth much churn. The higher-leverage move is item 4.
 
-## 0.5.0 — the keystone ADRs
+## 0.5.0 — the data-plane release
 
-1. ~~**Merge `docs/its9398-research`.**~~ Done 2026-10-22, before 0.4.0 — see
-   "Where the tree stands". The 0.4.0 branch absorbs it on its way to `main`,
-   and the one conflict to expect there is `dataloss_recovery_test.go`.
-2. **ADR-039 (two tiers of support)** — drafted, `Proposed`. Blocking three
-   separate decisions, which is why it comes first.
-3. ~~**ADR-040 (data-plane image identity)**~~ — **Accepted 2026-10-22**, with
-   decisions 1 and 2 corrected by testing them against the tree, and two
-   decisions added: exactly one version line is tier 1 in both flavours
-   (bounding the bill at two mesh cycles per release), and the default version
-   becomes **OpenLDAP 2.6**, superseding ADR-021. The implementation is items 5
-   and 6 below plus 0.6.0 and 0.7.0.
-4. **The ADR-037 rotation decomposition** (seventeenth amendment) as tier-2
-   surfaces, with the evidence attached to each.
-5. ~~**Pin the Debian version**~~ — **done 2026-10-22.** All three 2.6 paths are
-   pinned to `OPENLDAP_OL26_VERSION` (one Makefile variable, passed as a build
-   arg): both binary Containerfiles and the `apt-get source` in the ol26src
-   build, which was floating too. Verified by building both binary images and
-   by a mutation — a bogus version is rejected, so the pin is load-bearing
-   rather than decorative (ADR-040 decision 1). Independent of everything else, and
-   worth doing on its own: it makes the image reproducible and turns a Debian
-   point release into a reviewable commit instead of a silent difference
-   between two builds of the same source.
-6. Image work, **in this order** (ADR-040 decision 2): move
-   `accesslog-purge-phase.patch` out of `debian/patches/series` into the
-   `local-patches/` mechanism → build the pure 2.7.1 pair → **put it through a
-   multi-site e2e cycle** → only then invert the alias so unsuffixed means
-   pure. The cycle is not optional: the patch is not inert with the rotation
-   off (`slaptain3` takes `rq_mutex` on the reschedule path), so a green suite
-   on the patched line says nothing about the pure one. Derive and sanitise the
-   OpenLDAP tag component in the same pass. Breaking for anyone pinning
-   `spec.images.*.tag` — own `UPGRADING.md` entry.
+**One release, not four.** An earlier draft of this plan split what follows
+across 0.5.0, 0.6.0 and 0.7.0, on the theory that each default flip deserved
+its own release. That was wrong on two counts and is recorded here so nobody
+re-derives it.
 
-**Not in this release, or any: `feat/rid-allocation-ledger` is rejected**
-(2026-10-22). The approach will not be merged. Its 28 commits stay on the
-branch as a record of what was tried; `spec.replication.ridBase` therefore
-stays, and ADR-031 Phase 6 does not happen as written. If the RID ledger is
-ever revisited it starts from the ADR, not from that branch.
+It cited **ADR-024 R5, "one customer per change"** — which is a rule about not
+moving several tunables into a new *placement class* at once, so that a
+misbehaviour has one suspect. It is a debugging-isolation rule for `cn=config`
+changes and says nothing about release cadence. Stretching it produced a
+sequence of releases that would supersede one another within days, which reads
+as churn to anyone watching the repository and helps only a user who upgrades
+at every single step.
 
-## 0.6.0 — born-with pinning and the preflight
+And it confused **ordering** with **packaging**. The constraints below are
+real, but every one of them is satisfied *inside* a release: a release is a
+snapshot, not a sequence. What has to happen in order is the code landing, not
+the tags being cut.
 
-ADR-040 decisions 4 and 5, implemented. This is the prerequisite for **any**
-future data-plane default move, in either direction, including 2.7 → 2.8
-whenever LMDB next breaks format. Without it, moving the default hands every
-cluster that said nothing an image that cannot open its own volume, loudly and
-fleet-wide, on operator upgrade.
+There is also a cost the split ignored. `publish.yml` has never worked (see
+above), so **every release is a manual hand-push** — nine images, four charts,
+assembled notes, cross-built `slctl` binaries. Four releases is four of those,
+for a migration the user experiences once either way.
 
-## 0.7.0 and after — default flips, one per release
+### What it contains
 
-ADR-024 R5: one customer per change. Each gets its own `UPGRADING.md` entry,
-because the point of spreading them out is that each migration is separately
-legible.
+| | state |
+|---|---|
+| ADR-039 (two tiers of support) | done |
+| ADR-040 (data-plane image identity) | done |
+| ADR-037 rotation decomposition — the `mode` enum | done |
+| Debian version pin, all three 2.6 paths | done |
+| slaptain patches as a build axis + the pure 2.7 pair | built; cycle B validates |
+| the alias inversion — unsuffixed means pure | after cycle B |
+| born-with data-plane pinning + the volume preflight | to build |
+| **default OpenLDAP version → 2.6** | to build |
+| accesslog `syncprov-checkpoint` on by default | to build |
+| `syncprovSessionlogSource: Accesslog` by default | to build |
 
-- **OpenLDAP 2.6 as the default — decided 2026-10-22, ADR-040 decision 8.** Not
-  an open question any more; what remains is executing it after born-with
-  pinning, and letting the runs accumulate. **2.7.2 is what would invalidate
-  it.** The case, assembled this session: ADR-021's
-  headline justification is retracted (on the unmerged branch); 2.7.1 carries
-  ITS#10597, a shared `entryUUID` freed from an unlocked path on every search
-  completing inside a write, fixed only in master, where 2.6 has no counterpart;
-  Debian ships 2.6, which is the mainstream, distro-supported code; the purge
-  patch exists for 2.6 too; and ADR-021's own escape clause — no operator
-  feature is 2.7-only — still holds. **Against**: adopting 2.7 now buys
-  in-place upgradeability until LMDB next breaks format, which is an unknown
-  and uncontrolled clock. With born-with pinning the dilemma mostly dissolves —
-  the choice moves to cluster birth and is recorded — so this becomes a
-  question of which default serves a first-time user better, not which version
-  the project bets on. Requires an ADR-021 supersession and, per ADR-039, a
-  decision about whether 2.6 is promoted from interop lane to deployment
-  target, whose real cost is the e2e matrix.
-- **Accesslog checkpoint** as a default (ADR-024 R4/R5, converged-per-pod,
-  cheapest of the three).
-- **`syncprovSessionlogSource: Accesslog`** as a default. Mechanically sound —
-  ADR-034's handover is one offline `slapmodify` decided from live state, never
-  a dropped session log, and the "wasteful operation" warning measured absent
-  across a flip-and-return. Two things to respect: it lands at each pod's
-  **next restart** rather than on operator upgrade, so the fleet changes
-  gradually; and ADR-034's amendment records that a dangling value is *latent*,
-  because `syncprov_db_open` reaches its backend check only on a non-empty
-  database — so the first cluster to discover a mistake is a populated one.
+One `UPGRADING.md` entry, one migration for anyone moving 0.4 → 0.5.
+
+### The two constraints that are real
+
+**1. The born-with backfill must record the OLD default.** This is the one
+place squashing creates a hazard rather than removing one. Existing clusters
+were created before the field existed, so the operator backfills on upgrade —
+and it must record **2.7**, the version they have actually been running, not
+whatever the compiled-in default has become. Record the new default instead and
+every silent cluster is handed a 2.6 image against a 2.7 LMDB, on the very
+upgrade that exists to prevent exactly that.
+
+It is one line in the reconcile, it looks correct in review either way, and it
+wants its own red-first test. Build the pinning and its backfill *before* the
+default moves, in that order, within the release.
+
+**2. Sort the rest by REVERSIBILITY, which is what actually differs:**
+
+- **2.6 as the default** — expensive to undo (the LMDB format break), which is
+  precisely why born-with pinning comes first and why it applies to new
+  clusters only.
+- **accesslog checkpoint** — a converged tunable; reverting is changing a value.
+- **`syncprovSessionlogSource: Accesslog`** — startup-only, converges at each
+  pod's next restart, reverted the same way. Note it lands *gradually* across a
+  fleet rather than at upgrade, which is harder to reason about than a roll.
+
+### The checkpoint default rests on one control run
+
+Worth stating plainly, because the rest of this release is better evidenced.
+The case for defaulting a `syncprov-checkpoint` on the accesslog database is
+`docs/its9398/control-checkpoint-1-1.log`, where `1 1` held the on-disk
+`contextCSN` current while `100 5` let it lag — the ITS#9398 precondition
+forming in one arm and not the other. That is one run, read as fragments, and
+the two arms want reading properly before the default ships.
+
+It is defensible to ship anyway under this project's alpha stance — choose now,
+let the runs accumulate, and this one is trivially reversible. What is not
+defensible is implying it was measured properly. It was not.
+
+### Remaining build order
+
+1. Cycle B: the pure pair through a multi-site cycle (ADR-040 decision 2).
+2. Invert the alias — unsuffixed becomes pure, patched takes the token.
+   Breaking for anyone pinning `spec.images.*.tag`.
+3. Born-with pinning + the volume preflight, backfill recording 2.7.
+4. The three default flips.
+5. Two mesh cycles, one per tier-1 cell (ADR-040 decision 7), then the release.
 
 ## Standing hazards this plan does not resolve
 

@@ -170,6 +170,20 @@ persisted is declared, not re-derived each pass. Without it every default move
 is a forced migration; with it, moving the default costs existing clusters
 nothing and the migration becomes opt-in on the operator's own schedule.
 
+**The backfill records the OLD default, and this is the sharp edge.** Every
+cluster in existence predates this field, so the operator writes the value on
+first reconcile after the upgrade — and the value it must write is the version
+those clusters have actually been running, **not** whatever the compiled-in
+default has since become. Backfill the new default instead and the mechanism
+inverts: the upgrade that exists to protect silent clusters is the one that
+hands each of them an image that cannot open its own volume.
+
+So the backfill is pinned to a constant naming the previous default rather than
+to the current one, which means it cannot be written as "record the default".
+It looks correct either way in review, it is one line, and it is the single
+place where getting decision 4 wrong is worse than not having decision 4 at
+all. It gets a red-first test of its own.
+
 ### 5. Detect to refuse, not to choose
 
 A preflight reads the on-disk LMDB format version and **withholds** a pod whose
@@ -284,6 +298,12 @@ every cluster that said nothing an image that cannot open its own volume.
    rotation while 2.7 leaves it.
 
 Steps 1 and 2 are independent of the version choice and can land first.
+
+**This is an order of LANDING, not of releases.** All four can ship in one
+release and are intended to — a release is a snapshot, and what must happen in
+sequence is the code arriving, not the tags being cut. Splitting them across
+releases buys a user nothing (the migration is experienced once either way) and
+costs a manual publish each, since `publish.yml` has never worked.
 
 ### Revisit condition
 

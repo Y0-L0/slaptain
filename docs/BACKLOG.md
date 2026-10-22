@@ -2970,7 +2970,7 @@ database-dirs ConfigMap moved off the pod template for exactly this reason, and
 would make a membership change a cn=config convergence rather than a roll. Cost
 unknown; the per-peer mount is also what makes `tls_cacert` legible per peer.
 
-## A pure slapd build reports the same version as a patched one
+## ~~A pure slapd build reports the same version as a patched one~~ — DONE (2026-10-23)
 
 Found 2026-10-22 by the ADR-040 cycle-B validation, before the alias inversion
 that would have made it dangerous.
@@ -3012,6 +3012,70 @@ the same `SLAPTAIN_PATCHES` argument that decides the patches — derived, not
 written twice (ADR-040 decision 3's own rule). The condition message's version
 test becomes true again. The OCI label is the belt; this is the braces, and it
 is the one an operator reads first because the condition tells them to.
+
+---
+
+### Fixed 2026-10-23
+
+**`N` is not derived, and the shape above overstated what could be.** `N` is a
+hand-maintained packaging revision with a hand-written changelog entry saying
+what moved, and it covers packaging work as well as patches — `+slaptain1`
+carried no behaviour patches at all. Nothing can compute it, and a build that
+tried would be inventing provenance. What is derived is which **token** it
+wears, from the same `SLAPTAIN_PATCHES` argument that decides the patches:
+
+| build | version |
+|---|---|
+| `SLAPTAIN_PATCHES=1` (default) | `2.7.1-0+slaptain3` |
+| `SLAPTAIN_PATCHES=0` | `2.7.1-0+pure3` |
+
+Both flavours share `N`, because both are that revision of this packaging fork.
+The rewrite happens before `dpkg-buildpackage`, so the `.deb` filenames and the
+compiled-in string move together, and it **refuses rather than guesses**: a
+changelog version not ending in `+slaptainN` fails the pure build instead of
+silently no-opping.
+
+`pure`/`slaptain` are ADR-040's two `select.flavour` values, chosen so the
+version string names the axis in the same words the API does. Plain `2.7.1-0`
+was rejected: it reads as stock Debian packaging, which this is not (vendored
+fork, `DFSG_NONFREE`, our symbols file, the `override_dh_strip` hardlinks).
+
+**A symmetric agreement gate** runs after `dpkg-buildpackage` on the artifacts
+just produced — each flavour asserting its own token and the absence of the
+other's, so one of the two always runs. Two routes that fail differently: the
+`.deb` control metadata, and the binary's compiled-in string.
+
+**Measured, both arms:**
+
+```
+pure:     dpkg-query 2.7.1-0+pure3
+          @(#) $OpenLDAP: slapd 2.7.1-0+pure3 (Oct 20 2026 10:00:00) $
+patched:  version gate: OK (slaptain, package and binary agree on 2.7.1-0+slaptain3)
+          logpurge phase gate: OK
+```
+
+The gate's logic was taken red and green against synthetic versions before
+being believed: it passes the two legitimate combinations and fails all five
+illegitimate ones, including `patches=0` with `+slaptain3` — the defect it
+exists to catch, and what this entry describes.
+
+**One trap, worth keeping.** The first version of the binary route grepped the
+whole `slapd -VV` output for the other flavour's name. That would have failed
+**every legitimate pure build**: `-VV` also prints the Maintainer line, and
+that says `slaptain` on both flavours because the packaging is ours either way
+(confirmed on the built pure image). The binary route now asserts *equality*
+with the metadata version instead, and the Containerfile says why so nobody
+retries it.
+
+**No user-visible change.** The default build's version is byte-identical; only
+the pure pair moves, and it is not in `all` or `push` yet. The consumer —
+`AccesslogPurgeConverged=False/PurgePhaseUnsupported` — now names the token
+rule rather than a version floor that the ADR-040 tag scheme is about to make
+meaningless. Same wording in both chart `values.yaml`, the rotation example,
+`docs/PURGE-ROTATION.md` and `docs/TUNING.md`.
+
+**This unblocks ADR-040's `pure` default** (amendment prerequisite 2), which
+was the only remaining blocker of the two.
 
 ## ~~Is the purge a NECESSARY step into the ITS#9398 fatal state, or only a sufficient one?~~ — ANSWERED (2026-10-23): only sufficient, and not even the usual route
 

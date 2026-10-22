@@ -80,9 +80,12 @@ every other site — a pod-template roll trigger ADR-013 does not list.
 Pre-tag checklist:
 
 1. **Finalise `images/openldap-deb/debian/changelog`** — the top entry is
-   `2.7.1-0+slaptain3 UNRELEASED`. Rebuild and confirm `slapd -VV`, because
-   that exact string is what `AccesslogPurgeConverged=False/PurgePhaseUnsupported`
-   tells operators to check.
+   `2.7.1-0+slaptain3 UNRELEASED`. Rebuild and confirm `slapd -VV`, because the
+   revision is what `AccesslogPurgeConverged=False/PurgePhaseUnsupported` tells
+   operators to check. Since 2026-10-23 the token names the flavour: the
+   patched build reports `+slaptain3` and the pure one `+pure3`, derived from
+   `SLAPTAIN_PATCHES` and asserted by the build's version/flavour gate. `N` is
+   still yours to bump by hand, and both flavours share it.
 2. `docs/UPGRADING.md`: `## Unreleased` → `## v0.4.0`.
 3. **Experimental framing** into the `SlapdRotationConfig` field documentation
    and the head of `docs/PURGE-ROTATION.md`, per ADR-039 tier 2. Regenerate
@@ -284,7 +287,7 @@ for a migration the user experiences once either way.
 | slaptain patches as a build axis + the pure 2.7 pair | done; cycle B validated it (109/2, both explained) |
 | the alias inversion — unsuffixed means pure | to build |
 | the image **selector** (`select.{storageFormat,flavour}`) + the volume preflight | to build |
-| the version-string collision (a pure build reports `+slaptain3`) | to build — **blocks the `pure` default** |
+| ~~the version-string collision~~ | done — the revision token is derived from `SLAPTAIN_PATCHES` (`+slaptain<N>` / `+pure<N>`), asserted by a symmetric build gate; both arms built and measured. The `pure` default is no longer blocked |
 | ~~**default OpenLDAP version → 2.6**~~ | **withdrawn** — ADR-040 decision 8 reversed the same day; 2.7 stays. What flips is the default **flavour** to `pure` |
 | accesslog `syncprov-checkpoint` on by default | to build |
 | `syncprovSessionlogSource: Accesslog` by default | to build |

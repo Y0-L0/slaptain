@@ -23,7 +23,8 @@
 # Send WRITES to slapd-write; reads stay on slapd as before.
 #
 # Before you copy this, check the three prerequisites — a slapd image carrying
-# the purge-phase patch (2.7.1-0+slaptain2 or later); clients whose connections
+# the purge-phase patch (`slapd -VV` ending in +slaptain<N>, not +pure<N>);
+# clients whose connections
 # are short-lived relative to slotLength; and a leadTime sized above those
 # clients' maximum connection lifetime. The third is not optional: with the
 # endpoint moving AT the slot boundary, a two-provider cluster under load

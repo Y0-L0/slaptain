@@ -287,8 +287,9 @@ func aggregateAccesslogPurgeConverged(
 				"rejected as cruft; the operator left the two-field <retention> <interval> value "+
 				"in place, which keeps the journal bounded but makes those pods purge in step "+
 				"with each other instead of on the rotation grid. Run a slapd image carrying the "+
-				"patch (2.7.1-0+slaptain2 or later — `slapd -VV`), or turn "+
-				"spec.rotation.enabled off on the cluster%s",
+				"patch — its package revision names the flavour, so `slapd -VV` must report a "+
+				"version ending in +slaptain<N> (a pure build ends in +pure<N> and carries no "+
+				"slaptain patches) — or turn spec.rotation.enabled off on the cluster%s",
 				strings.Join(unsupported, ", "), unreadNote)
 
 	case len(assessed) == 0:

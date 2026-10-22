@@ -192,8 +192,10 @@ monitoring: {}
 #
 # PREREQUISITES, both of them real:
 #
-#   1. A slapd image carrying the purge-phase patch (2.7.1-0+slaptain2 or later;
-#      `slapd -VV`). The phase is a third field of olcAccessLogPurge and is not
+#   1. A slapd image carrying the purge-phase patch. The package revision
+#      names the flavour, so `slapd -VV` must report a version ending in
+#      +slaptain<N>; a build ending in +pure<N> carries none of our patches.
+#      The phase is a third field of olcAccessLogPurge and is not
 #      upstream. A pod whose slapd refuses it keeps a bounded journal and simply
 #      does not take its phase, reported per database as PurgePhaseUnsupported.
 #   2. CLIENTS THAT OPEN SHORT-LIVED CONNECTIONS, or whose pool caps connection

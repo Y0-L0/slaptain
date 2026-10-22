@@ -83,6 +83,30 @@ ARG SLAPTAIN_PATCHES=1
 # Appended last, after Debian's own series, exactly as the 2.6 source build
 # does it. Pushing and popping the whole series here fails the build on a
 # patch that does not apply, rather than halfway through dpkg-buildpackage.
+#
+# The package VERSION moves with the patch set, from this same argument. The
+# revision token is `+slaptainN` when our patches are applied and `+pureN` when
+# they are not — same N, same changelog entry, one token substituted. Without
+# this a pure build reports `2.7.1-0+slaptain3`, byte-identical to the patched
+# one, which breaks two things that depend on telling them apart:
+#
+#   * ADR-040 decision 3 names `slapd -VV` as the second, independent route to
+#     an image's provenance. On the axis that matters today — patched versus
+#     pure — there is no second route if both answers are the same string. It
+#     is also the only route available from inside a running pod, where the OCI
+#     labels are not readable.
+#   * the operator's AccesslogPurgeConverged=False/PurgePhaseUnsupported tells
+#     the reader to pin an image carrying the patch and to verify it with
+#     `slapd -VV`. A pure build satisfies that test while carrying no patch, so
+#     the operator verifies the version, concludes the image is right, and has
+#     no next step.
+#
+# N is NOT derived and must not be: it is a hand-maintained packaging revision
+# with a hand-written changelog entry saying what moved, and it covers
+# packaging work as well as patches (+slaptain1 carried no behaviour patches at
+# all). What is derived is which token it wears. `pure` and `slaptain` are the
+# two values of ADR-040's `select.flavour`, deliberately: the version string
+# names the axis with the same words the API does.
 RUN set -eux; \
     if [ "${SLAPTAIN_PATCHES}" = "1" ]; then \
         echo accesslog-purge-phase.patch >> debian/patches/series; \
@@ -90,7 +114,22 @@ RUN set -eux; \
         QUILT_PATCHES=debian/patches quilt --quiltrc /dev/null pop -a; \
         echo "slaptain patches: applied"; \
     else \
-        echo "slaptain patches: NONE (pure upstream packaging)"; \
+        echo "slaptain patches: NONE (pure upstream sources)"; \
+        cur=$(dpkg-parsechangelog -S Version); \
+        pure=$(printf '%s' "$cur" | sed 's/+slaptain\([0-9][0-9]*\)$/+pure\1/'); \
+        # Refuse rather than ship the colliding string: if the changelog ever
+        # stops ending in +slaptainN the substitution silently does nothing,
+        # and a no-op here is exactly the defect this block exists to prevent.
+        if [ "$pure" = "$cur" ]; then \
+            echo "version gate: '$cur' does not end in +slaptainN, cannot derive \
+the pure revision — fix debian/changelog or this rule" >&2; exit 1; \
+        fi; \
+        sed -i "1s|(${cur})|(${pure})|" debian/changelog; \
+        got=$(dpkg-parsechangelog -S Version); \
+        [ "$got" = "$pure" ] || { \
+            echo "version gate: rewrote the changelog but it still reports '$got'" >&2; \
+            exit 1; }; \
+        echo "package version: $cur -> $got"; \
     fi
 
 # apt-get update again: the stage above dropped the package lists, and
@@ -135,6 +174,69 @@ RUN set -eux; \
     esac; \
     export DEB_BUILD_OPTIONS="${opts}"; \
     dpkg-buildpackage -us -uc -b
+
+# ── version/flavour agreement gate ──────────────────────────────────────────
+# The build has just decided two things from one argument: which patches went
+# in, and which revision token the package wears. This asserts they agree, on
+# the artifacts that were actually produced.
+#
+# It exists because the two can come apart silently and in the direction that
+# hurts: a future change that drops a patch but leaves the version alone ships
+# a pure slapd announcing itself as patched, and every downstream check — the
+# OCI label's corroborating route, the operator's condition message, a human
+# reading `slapd -VV` — then agrees on the wrong answer. A build that cannot
+# say which of the two it is should not produce an image.
+#
+# SYMMETRIC, like the logpurge gate below: each flavour asserts its own token
+# and the absence of the other's, so one of the two always runs and neither
+# passes by not executing. (The symmetry lives in the metadata route; the
+# binary route asserts equality with it, for the reason noted at that step.)
+#
+# TWO ROUTES, because they fail differently: the .deb's control metadata (what
+# apt and the OCI label derivation see) and the binary's compiled-in string
+# (what `slapd -VV` prints inside a running pod, which is the one the operator
+# condition tells people to check). The metadata route runs for every variant;
+# the binary route is skipped under asan, where a non-zero exit says nothing
+# about the string — same reasoning as the gate below.
+RUN set -eux; \
+    case "${SLAPTAIN_PATCHES}" in \
+      1) want=slaptain; other=pure ;; \
+      *) want=pure;     other=slaptain ;; \
+    esac; \
+    deb_ver=$(dpkg-deb -f /build/slapd_*.deb Version); \
+    echo "version gate: package reports '${deb_ver}' (want +${want}N)"; \
+    case "${deb_ver}" in \
+      *"+${want}"[0-9]*) ;; \
+      *) echo "version gate: '${deb_ver}' does not carry +${want}N" >&2; exit 1 ;; \
+    esac; \
+    case "${deb_ver}" in \
+      *"${other}"*) echo "version gate: '${deb_ver}' still names '${other}'" >&2; exit 1 ;; \
+    esac; \
+    if [ "${BUILD_VARIANT}" = "asan" ]; then \
+        echo "version gate: binary route skipped for BUILD_VARIANT=asan"; exit 0; \
+    fi; \
+    root=/tmp/versiongate; rm -rf "$root"; install -d "$root"; \
+    for f in /build/slapd_*.deb /build/libldap2_*.deb /build/libldap-common_*.deb; do \
+        dpkg-deb -x "$f" "$root/pkg"; \
+    done; \
+    export LD_LIBRARY_PATH="$root/pkg/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)"; \
+    "$root/pkg/usr/sbin/slapd" -VV > "$root/out" 2>&1 || true; \
+    cat "$root/out"; \
+    # The assertion is EQUALITY against the version the metadata route already
+    # judged, not a second token search. Do not be tempted to grep this output
+    # for the other flavour's name: `slapd -VV` prints the Maintainer line too,
+    # and that says "slaptain" on BOTH flavours by design (it is our packaging
+    # either way). A check for the absence of "slaptain" here would fail every
+    # legitimate pure build, and one for its presence would pass every pure
+    # build no matter what the version said.
+    #
+    # Anchoring on the exact string also guards the reading: an empty or failed
+    # -VV cannot satisfy it, where a bare "does not contain X" would.
+    grep -q "OpenLDAP: slapd ${deb_ver} " "$root/out" || { \
+        echo "version gate: slapd -VV does not report the package version \
+'${deb_ver}' — the binary and the package disagree" >&2; exit 1; }; \
+    rm -rf "$root"; \
+    echo "version gate: OK (${want}, package and binary agree on ${deb_ver})"
 
 # ── logpurge phase gate ─────────────────────────────────────────────────────
 # accesslog-purge-phase.patch gives `logpurge` an optional third value, the

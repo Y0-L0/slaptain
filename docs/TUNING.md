@@ -301,7 +301,9 @@ It is opt-in and off by default, and the placement facts are all that belong her
 the four fields are converged per pod (`leadTime` excepted — it is never written to
 slapd at all, and only shifts *when* the write Service is repointed), and the third
 value of `olcAccessLogPurge` is a slaptain patch rather than upstream's, so it needs
-a slaptain image (`2.7.1-0+slaptain2` or later, `slapd -VV`).
+a patched image — `slapd -VV` reporting a version ending in `+slaptain<N>`. A
+build ending in `+pure<N>` is the same OpenLDAP release carrying none of our
+patches and will refuse the phase.
 
 Everything operational — **the client-side precondition that decides whether the
 feature helps you at all**, how to turn it on, the sizing arithmetic, the lead-time

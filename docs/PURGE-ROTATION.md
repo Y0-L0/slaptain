@@ -121,7 +121,7 @@ this feature does.
 
 | | Why |
 |---|---|
-| A slapd image carrying the purge-phase patch — `2.7.1-0+slaptain2` or later (`slapd -VV`) | The per-pod phase is a **third field** of `olcAccessLogPurge` and is ours, not upstream's. A stock slapd rejects the three-field value outright |
+| A slapd image carrying the purge-phase patch — `slapd -VV` must report a version ending in `+slaptain<N>` | The per-pod phase is a **third field** of `olcAccessLogPurge` and is ours, not upstream's. A stock slapd rejects the three-field value outright. **The revision names the flavour**: a build ending in `+pure<N>` is the same OpenLDAP release with none of our patches, and will refuse the phase |
 | `spec.replication.enabled` with `deltaSync`, and `spec.replicas ≥ 2` | A pod with no change journal has nothing to purge, and with one pod there is no pod to rotate to |
 | Clients that re-dial — see [above](#read-this-first-the-feature-only-pays-for-clients-that-re-dial) | A Service does not move an established connection |
 

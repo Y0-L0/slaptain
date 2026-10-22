@@ -303,8 +303,9 @@ cluster:
   #
   # Off by default; nothing about an installed mesh changes until you set it,
   # and <cluster.name>-write is not created at all. Two prerequisites, both
-  # real: a slapd image carrying the purge-phase patch (2.7.1-0+slaptain2 or
-  # later), and clients that open SHORT-LIVED connections — a Service steers
+  # real: a slapd image carrying the purge-phase patch (`slapd -VV` must end
+  # in +slaptain<N>; +pure<N> carries none of our patches), and clients that
+  # open SHORT-LIVED connections — a Service steers
   # new connections and never re-wires an established one, so a pooling client
   # needs a maximum connection lifetime short relative to slotLength to benefit
   # at all. See docs/TUNING.md for sizing and docs/MULTI-SITE.md for the mesh

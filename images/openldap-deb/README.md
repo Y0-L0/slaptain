@@ -19,7 +19,7 @@ for the user-facing version/tag contract.
 | Forked on | 2026-09-11 |
 | Upstream source | `openldap-2.7.1.tgz` from <https://www.openldap.org/software/download/OpenLDAP/openldap-release/> |
 | Upstream sha256 | `253db80f301258ea69cda1184766d57395b836aaabf41157eb0316eb0fac1341` (pinned in `Containerfile`, verified at build time) |
-| Package version | `2.7.1-0+slaptain3` |
+| Package version | `2.7.1-0+slaptain3` patched, `2.7.1-0+pure3` pure (see below) |
 
 Upstream packaging: <https://salsa.debian.org/openldap-team/openldap>
 
@@ -97,6 +97,64 @@ Bump `N` whenever the built packages change in a way nothing else records. The
 default 2.7 images carry no label saying which patches went in — unlike the
 `-ol26src` pair, which is labelled — so the package version `slapd -VV` prints
 is the only discriminator between two builds of the same upstream release.
+
+### The revision token names the FLAVOUR; `N` is yours
+
+`SLAPTAIN_PATCHES` decides two things from one argument: which patches go in,
+and which token the revision wears.
+
+| build | version | |
+|---|---|---|
+| `SLAPTAIN_PATCHES=1` (default) | `2.7.1-0+slaptain3` | carries our behaviour patches |
+| `SLAPTAIN_PATCHES=0` | `2.7.1-0+pure3` | same source, same packaging fork, none of our patches |
+
+`N` is **not derived and must not be**. It is a hand-maintained packaging
+revision with a hand-written changelog entry saying what moved, and it covers
+packaging work as well as patches — `+slaptain1` carried no behaviour patches
+at all. Both flavours share it, because both are that revision of this
+packaging fork. What the build derives is only which token it wears, by
+rewriting the top changelog entry before `dpkg-buildpackage`.
+
+`pure` and `slaptain` are the two values of ADR-040's `select.flavour`,
+deliberately: the version string names the axis with the same words the API
+does.
+
+**Why this exists.** Until 2026-10-23 a pure build reported
+`2.7.1-0+slaptain3`, byte-identical to the patched one. That broke two things.
+ADR-040 decision 3 names `slapd -VV` as the second, independent route to an
+image's provenance — and it is the only route available from inside a running
+pod, where the OCI labels cannot be read — but on the axis that matters today
+there was no second route, because both answers were the same string. And the
+operator's `AccesslogPurgeConverged=False/PurgePhaseUnsupported` tells the
+reader to pin a patched image and verify it with `slapd -VV`; a pure build
+passed that test while carrying no patch, so an operator following the
+instruction would verify the version, conclude the image was right, and have no
+next step. Latent while patched was the default; ADR-040 decision 2 inverts
+that, and this had to land first.
+
+The derivation **refuses rather than guesses**: if the changelog version does
+not end in `+slaptainN`, the pure build fails with a message saying so. A
+silent no-op there is exactly the defect the rule exists to prevent.
+
+### The version/flavour agreement gate
+
+Immediately after `dpkg-buildpackage`, the build asserts that the version and
+the patch set agree, on the artifacts just produced — symmetric, so each
+flavour checks its own token *and* the absence of the other's, and one of the
+two always runs.
+
+It exists because the two can come apart silently and in the damaging
+direction: a change that drops a patch but leaves the version alone ships a
+pure slapd announcing itself as patched, and every downstream check then agrees
+on the wrong answer.
+
+Two routes, because they fail differently — the `.deb` control metadata (what
+apt and the label derivation see) and the binary's compiled-in string (what
+`slapd -VV` prints in a pod). The binary route asserts **equality** with the
+metadata version rather than searching for a token, and that is deliberate:
+`slapd -VV` also prints the Maintainer line, which says `slaptain` on *both*
+flavours because the packaging is ours either way. A check for the absence of
+`slaptain` in that output would fail every legitimate pure build.
 
 ## Building
 

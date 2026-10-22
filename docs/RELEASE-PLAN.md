@@ -9,15 +9,17 @@ a measurement behind it, and the ones that are still open say so.
 
 - `feat/accesslog-purge-phase` — 69 commits ahead of `origin/main`, clean,
   implementation complete and measured. This is 0.4.0.
-- `docs/its9398-research` — **25 commits, unmerged, 152 behind.** Holds the
-  ADR-021 amendment that retracts this project's stated reason for defaulting
-  to OpenLDAP 2.7 (the storm is ITS#9398, not ITS#9580, and 2.7 fixed nothing).
-  Also `docs/ITS-9398-HANDLING.md` and `-REPRODUCTION.md`, and one commit —
-  *"logpurge defeats the documented startup recovery"* — that should be read
-  before shipping a feature whose subject is logpurge scheduling.
-  **Conflicts with the 0.4.0 branch on `tests/e2e.sh` and
-  `tests/e2e/dataloss_recovery_test.go`**; both branches have opinions about
-  that spec's gating claim.
+- `docs/its9398-research` — **MERGED into local `main` 2026-10-22** (`c696fcc`),
+  ahead of 0.4.0 rather than in the 0.5.0 slot this plan first gave it: the
+  conflict surface against `main` turned out to be two append-at-EOF doc hunks,
+  not the three-file tangle expected against the 0.4.0 branch. ADR-021's
+  retraction is therefore on `main` now, so `main` no longer states a reason
+  for its own default that we know to be wrong. Two notes from the merge: the
+  branch's history was **rewritten** first (it carried lab cluster context
+  names predating the blacklist entry — `backup/its9398-prerewrite` holds the
+  pre-rewrite tip), and putting the documents side by side exposed a
+  disagreement about the purge's role in the storm, recorded in `BACKLOG.md`
+  rather than resolved.
 - `feat/rid-allocation-ledger` — 28 commits, unmerged, 152 behind. Carries
   `feat(api)!: remove spec.replication.ridBase`, a second breaking change.
 - `backup/adr-034-prerebase`, `feat/adr-034-startup-only-config`,
@@ -54,9 +56,17 @@ Pre-tag checklist:
 5. **ADR-037 stays `Proposed`** — deliberately, and worth a line saying so, since
    four other ADRs are stale in the other direction (004, 005, 006, 007 are all
    implemented and still say Proposed).
-6. `make helm-lint verify-generated`, then a **multi-site e2e cycle** — this is
+6. **Decide what to say about the purge and the storm.** The `CLAUDE.md`
+   claim has been narrowed from "the purge has nothing to do with it" to what
+   was actually measured, and the open question — does a purge sweep that
+   deletes nothing still write `minCSN`? — is in `BACKLOG.md`. Its first half
+   is answerable from `accesslog.c:656-684` for the price of one read, and it
+   decides whether ADR-037's slot length is also a storm-exposure knob. Cheap
+   enough to settle before the release; if it is not settled, the release notes
+   should not imply it is.
+7. `make helm-lint verify-generated`, then a **multi-site e2e cycle** — this is
    a replication-path change and CLAUDE.md requires it before merge.
-7. Chart `version`/`appVersion` → `0.4.0`, bump commit, then tag.
+8. Chart `version`/`appVersion` → `0.4.0`, bump commit, then tag.
 
 Deliberately **not** in 0.4.0: any default change, the image scheme, the
 rotation decomposition. The release already carries one forced migration.
@@ -72,11 +82,11 @@ preceding commit's own text — `08d696d` (1 insertion, 1 deletion) and
 second is the more valuable record. Realistic saving is 69 → ~65, which is not
 worth much churn. The higher-leverage move is item 4.
 
-## 0.5.0 — the keystone ADRs, and the branch that should have landed already
+## 0.5.0 — the keystone ADRs
 
-1. **Merge `docs/its9398-research`.** It holds the ADR-021 correction that
-   everything in 0.7.0 rests on. Resolve the two-file conflict with the 0.4.0
-   branch.
+1. ~~**Merge `docs/its9398-research`.**~~ Done 2026-10-22, before 0.4.0 — see
+   "Where the tree stands". The 0.4.0 branch absorbs it on its way to `main`,
+   and the one conflict to expect there is `dataloss_recovery_test.go`.
 2. **ADR-039 (two tiers of support)** — drafted, `Proposed`. Blocking three
    separate decisions, which is why it comes first.
 3. **ADR-040 (data-plane image identity)** — drafted, `Proposed`. Tag scheme,

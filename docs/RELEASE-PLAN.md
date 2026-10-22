@@ -113,6 +113,37 @@ Pre-tag checklist:
 Deliberately **not** in 0.4.0: any default change, the image scheme, the
 rotation decomposition. The release already carries one forced migration.
 
+### How a release lands on `main`
+
+**By rebase, never by merge.** The `protect-main-branch` ruleset rejects a push
+carrying a merge commit, and it is a *ruleset* — the classic
+`branches/main/protection` API reports `404 Branch not protected`, which is
+misleading. v0.4.0 was assembled with three local merges, all of which had to be
+linearized at push time.
+
+The order that works:
+
+```bash
+git fetch origin                      # the remote moves; dependabot lands often
+git rebase origin/main                # linearize; expect conflicts where a
+                                      #   long-lived branch meets a moved main
+git diff <the commit you validated> HEAD   # MUST be empty — see below
+```
+
+**The trap, which cost an afternoon.** Rebase drops merge commits, and with them
+any content that existed *only* in a merge resolution. Three edits were lost
+that way on v0.4.0 — a narrowed claim in the storm spec, an amendment ordering,
+a stray heading — and the rebased branch still built and still passed `go vet`.
+The only thing that caught it was diffing the rebased tree against the commit
+the mesh validation had actually run against. Make that diff a gate, not a
+courtesy, and if it is non-empty restore the difference as its own commit rather
+than hand-editing history again.
+
+Related: sanitising a branch for the blacklist means **trees and commit
+messages**. The first rewrite on v0.4.0 fixed file contents only, and `pre-push`
+— which scans every outgoing commit's message too — caught the rest on the
+final check.
+
 ### Git history
 
 Keep it. In this repository commit messages are the reasoning record and

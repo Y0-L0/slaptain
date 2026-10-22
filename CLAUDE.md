@@ -522,6 +522,34 @@ stream: git tags `exporter/vX.Y.Z` → image `slapd-exporter:X.Y.Z`; the main st
 `v*` only, so a commit carrying both resolves unambiguously. Full rules, traps and verification recipes:
 `docs/VERSIONING.md`.
 
+### `main` is linear, so conflicts are resolved in commits — never in merges
+
+A repository ruleset (`protect-main-branch`) rejects any push to `main`
+containing a merge commit. The 54 "Merge branch …" commits in the history
+predate it. **Branches land by rebase.**
+
+Note that this is a *ruleset*, not classic branch protection: the
+`repos/…/branches/main/protection` API answers `404 Branch not protected`,
+which reads as "anything goes" and is wrong. `repos/…/rulesets` is the one to
+ask.
+
+The consequence that is easy to miss, and cost a release push to discover:
+**content that exists only in a merge resolution does not survive
+linearization.** Rebase replays commits and drops merges, so an edit made while
+resolving — narrowing a sentence, ordering two amendments, deleting a heading
+the other side renamed — is silently gone from the rebased branch, and the
+result still builds and still passes vet. Three such edits were lost that way
+on v0.4.0.
+
+Two rules follow:
+
+1. **Resolve conflicts in commits.** If a resolution needs an edit of its own,
+   make it a commit on the branch, where rebase will carry it.
+2. **Verify a linearization against the tree you tested.** `git diff <validated
+   commit> HEAD` must be empty. On v0.4.0 it was not, twice, and that diff is
+   the only thing that caught it — a rebase that compiles is not a rebase that
+   is correct.
+
 ### Important Notes
 - **No kustomize.** All deployment is via Helm. The `operator/config/` tree is kubebuilder scaffolding only — used to generate code/CRDs, not applied directly to clusters.
 - **CRD sync:** `charts/operator/crds/` is populated from `operator/config/crd/bases/` by `make operator-manifests`. Always run `make operator-manifests` after changing types and commit both the generated CRD and the chart copy together.

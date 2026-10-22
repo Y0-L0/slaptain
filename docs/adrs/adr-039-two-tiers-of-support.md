@@ -1,6 +1,7 @@
 # ADR-039: Two tiers of support — validated, and configurable
 
-**Status:** Proposed
+**Status:** Accepted 2026-10-22 — after its first enforcement rule was tested
+against the codebase and replaced; see "Why the first draft's rule was wrong".
 **Date:** 2026-10-22
 
 ## Context
@@ -59,10 +60,13 @@ worked. `deltaSync: false`, the `-ol26` pair, `spec.backend.idlExponent` and
 `podAffinity: false` are all live surfaces that exist for a stated non-default
 purpose. Retiring them would cost real capability to buy a tidier claim.
 
-### Option 3: Two tiers, separated by reachability and attached evidence — chosen
+### Option 3: Two tiers, separated by what is default and what evidence is attached — chosen
 
 Keeps both capabilities and makes the distinction legible at the point where a
-user makes the choice, rather than in a document they have not read.
+user makes the choice, rather than in a document they have not read. An earlier
+form of this option separated the tiers by *reachability* — tier 2 absent from
+the charts — and was discarded after testing it against the codebase; see "Why
+the first draft's rule was wrong".
 
 ## Decision
 
@@ -89,15 +93,56 @@ is a good idea.
   works. Tier 2 is not permission to produce a broken cluster.
 - **Honestly reported**: the same conditions, the same status, the same refusal
   messages. A research vehicle whose state cannot be read is not one.
-- **Not in the charts.** Reachable only by editing the CR. This is the
-  enforcement mechanism and it is mechanically checkable — a field's tier can
-  be read off whether any chart templates it.
+- **Off by default, and labelled wherever it is offered.** A chart MAY expose
+  a tier-2 surface — see "Why the first draft's rule was wrong" below — but its
+  values key defaults to empty or false, and the comment block above it names
+  the tier. The property that matters is that **nobody reaches it by accident**,
+  which off-by-default delivers; absence would deliver "nobody reaches it at
+  all", which defeats the point of having the tier.
+- **Reachable without cloning the repository.** A research vehicle nobody can
+  find is not one. Tier 2 is discoverable and deliberately inconvenient — a
+  commented-out block behind a label — not hidden.
 - **Labelled where it is configured**: the CRD field documentation says the
   tier, because `kubectl explain` is the surface a user actually reads.
 - **The evidence travels with the knob.** Whatever is known — measured inert
   for X, unmeasured for Y, reasoned but never run — is stated in the field
   documentation. A tier-2 knob with no attached evidence is just an
   undocumented one, and this is the clause that distinguishes the two.
+
+### A tier attaches to a surface, not to a field
+
+Some fields are tier 1 while particular *values* of them are not. `image.tag`
+is the case that forced this: the field is ordinary and supported, and it is
+also how a user reaches the `-ol26` pair, which is an interop lane rather than
+a deployment target (ADR-021, ADR-040). The field does not change tier because
+one of its values is lower-tier.
+
+So the unit of classification is the **thing being offered** — a feature, an
+image, a mode — and the tier is stated wherever that thing is named: the image
+in its own documentation, the feature in its field. A field that merely carries
+a string is not where a tier lives.
+
+### Why the first draft's rule was wrong
+
+This ADR first said tier 2 meant **absent from the charts**, enforced by grep.
+That rule was tested against the codebase before the ADR was accepted and it
+failed twice, which is recorded here because the failure is the argument for
+the rule that replaced it.
+
+It failed against the feature it was written alongside. `spec.rotation` is
+tier 2 by ADR-037, and v0.4.0 shipped its CRD field documentation saying so —
+while both `charts/slapd` and `charts/slapd-mesh` template it, document its
+prerequisites at length, and ship `examples/rotation.yaml` to turn it on. The
+rule would have condemned the arrangement the feature actually needs: the
+e2e's own `E2E_ROTATION=1` path stacks that example, so "absent from the
+charts" would have removed the only mechanism by which the feature gets tested.
+
+And it could not express the `image.tag` case above at all, because it
+partitioned fields when the thing with a tier is not always a field.
+
+The replacement keeps what the first rule was reaching for — a tier-2 surface
+must not arrive by accident — and drops the part that confused *inaccessible*
+with *not-default*.
 
 ### What tier 2 is not
 
@@ -122,9 +167,12 @@ claimed, and show they are the same one.
 
 ## Consequences
 
-- **The chart templates become the tier boundary**, which makes the tier a fact
-  about the repository rather than a claim in a document. A field present in
-  `charts/slapd` or `charts/slapd-mesh` is tier 1 by construction.
+- **The tier is still mechanically checkable, but by a convention rather than
+  by absence**: every tier-2 values key defaults to empty or false, and its
+  comment block names the tier. That is weaker than a grep for absence and it
+  is worth saying so plainly — a mislabelled key is a documentation bug that no
+  test catches, where an absent one could not be set at all. The trade bought
+  discoverability, which the tier exists to provide.
 - **The mesh story is unchanged and slightly improved.** A mesh CR is
   byte-identical at every site (ADR-028); a tier-2 knob set by hand at one site
   shows up as divergence, which is the correct outcome.

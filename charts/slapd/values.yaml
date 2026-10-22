@@ -170,6 +170,14 @@ monitoring: {}
 #  enabled: true
 #  resources: {}    # the exporter sidecar's own; no default, unset declares nothing
 
+# -- EXPERIMENTAL (ADR-039 tier 2). Off by default, and the project does not yet
+# assert it is fit for production: what is missing is operating experience, not
+# code. It is implemented, measured and honestly reported — and it needs a slapd
+# carrying our accesslog-purge-phase patch, couples your write endpoint to each
+# provider's own purge schedule, and only pays for clients whose write
+# connections are short-lived. Feedback wanted, positive or negative.
+# Evidence and sizing: docs/PURGE-ROTATION.md, ADR-037.
+#
 # -- spec.rotation (ADR-037): the accesslog purge runs where the writes are not.
 #
 # slapd purges an accesslog in one unpaced loop holding that environment's only

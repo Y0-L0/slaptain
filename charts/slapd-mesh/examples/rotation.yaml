@@ -1,5 +1,9 @@
 # Turning the ADR-037 purge rotation on, for a mesh.
 #
+# EXPERIMENTAL — ADR-039 tier 2. Off unless you stack this file. The project
+# does not yet assert the rotation is fit for production; what is missing is
+# operating experience, not code. Feedback wanted, positive or negative.
+#
 # An OVERLAY, not a second mesh: stack it on top of a complete values file so
 # that the thing it demonstrates is the only thing it says.
 #

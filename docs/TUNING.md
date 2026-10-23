@@ -465,11 +465,16 @@ how long a consumer may stay away and still resume from a delta: one whose cooki
 predates the purge falls back to a full refresh. Lengthen it if your worst realistic
 outage is longer, and size `persistence.accesslog.size` to match.
 
-On the 2.7-default images the interaction between purging and a dormant consumer
-(upstream ITS#9580 — a purge can leave a returning consumer's cookie unanswerable) is
-mitigated by the cookie-flush fix. Clusters still on the `-ol26` image pair carry
-elevated exposure: there, treat a consumer outage approaching the purge window as
-something to verify resynced rather than assume.
+A consumer that stays away long enough can come back with a cookie the provider
+can no longer answer. This paragraph used to say the 2.7 images mitigate that
+and `-ol26` carries "elevated exposure" — **retracted**: the storm slaptain
+actually hits is ITS#9398, it is present in both version lines, and what
+addresses it is the accesslog `syncprov-checkpoint` that 0.5.0 turns on by
+default on both. Neither line is the safer one here.
+
+What still holds is the sizing advice above: treat a consumer outage
+approaching the purge window as something to verify resynced rather than
+assume, on whichever images you run.
 
 Size `persistence.accesslog.size` from the same arithmetic, with the same headroom
 logic as the data volume.

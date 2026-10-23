@@ -3418,6 +3418,12 @@ open question sharpens to: **is the 2.7.1 fix for ITS#9580 simply absent for the
 PVC-loss-on-a-mesh case?** The spec's own text says 2.7.1 "should be ~0
 everywhere", and on this evidence it is not.
 
+**ANSWERED, and the question was built on a wrong attribution.** There is no
+2.7.1 fix to be absent: this failure is ITS#9398, not ITS#9580, and it is fixed
+in no release of either line. 2.7 was never going to make it "~0 everywhere".
+What addresses it is the accesslog `syncprov-checkpoint` that 0.5.0 turns on by
+default, on both version lines.
+
 Ruled out as a cause, with evidence: the ADR-031 RID ledger. The consumers' RIDs
 for the recovered site never changed — sites 2 and 3 both held
 `external/site-1/0 = 1` from start to finish — and the renumbering happened only

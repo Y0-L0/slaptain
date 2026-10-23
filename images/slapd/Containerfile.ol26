@@ -5,9 +5,14 @@
 # Keep this variant for legacy interop and hot-migration clusters that must run
 # the same 2.6 code as their migration source — see ADR-021 and ADR-011.
 #
-# It is knowingly affected by OpenLDAP ITS#9580 (the "sync cookie is stale"
-# refresh storm after a pod loses its data volumes); do not use it for new
-# clusters.
+# Not for new clusters: it is the legacy storage format (LMDB 0.9), and a
+# cluster born here pays a dump-and-reload to reach the default line later.
+#
+# This comment used to say the variant is "knowingly affected by ITS#9580 (the
+# sync cookie is stale refresh storm after a pod loses its data volumes)".
+# Retracted: that storm is ITS#9398, it is present in 2.7 just as much, and
+# since 0.5.0 both lines get the accesslog syncprov checkpoint that addresses
+# it. There is no storm advantage to the default pair.
 
 # ── Build / gather stage ────────────────────────────────────────────────────
 # The Debian package version is PINNED, not floated (ADR-040 decision 1).

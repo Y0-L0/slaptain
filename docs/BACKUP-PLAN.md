@@ -205,7 +205,8 @@ restore sub-phase `Preflight` (does NOT hold the StatefulSet down). Failure →
 **7.2 — slapadd into every pod** (supersedes "slapadd pod-0 + peers
 initial-sync"). During the scale-to-0 window, run a wipe+`slapadd` Job for
 **each** RW and RO pod against that pod's own PVCs, so the cluster comes up
-already-converged with no syncrepl refresh (→ no ITS#9580 exposure).
+already-converged with no syncrepl refresh (→ no stale-cookie exposure,
+  ITS#9398).
 - `restore_job.go`: parameterize `buildRestoreJob` by pod identity — config/data
   PVC names, and the accesslog mount gated per pod (RW on a replicated cluster
   mounts `accesslog-<c>-<i>`; RO pods never, since their cn=config has no
@@ -216,7 +217,7 @@ already-converged with no syncrepl refresh (→ no ITS#9580 exposure).
   load. Refinement (later): pod-0 first, confirm, then peers (peers as safety
   net); for now all-parallel with all-must-succeed-before-scale-up.
 - Fallback: a pod whose direct load fails falls back to syncrepl refresh on
-  scale-up (single-pod ITS#9580 exposure), or the machine aborts and retries.
+  scale-up (single-pod ITS#9398 exposure), or the machine aborts and retries.
 
 **7.3 — `SlapdRestore` CRD** (imperative in-place restore on a live, populated
 DB). `spec.databaseRef` + `spec.source.{backupRef|s3}`; immutable once terminal;

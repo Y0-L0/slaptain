@@ -1,9 +1,19 @@
 # Investigation: replication divergence after PVC-loss + full restart
 
-**Status:** Closed (2026-05-16) — known upstream bug, OpenLDAP
-[ITS#9580](https://bugs.openldap.org/show_bug.cgi?id=9580). Mitigated in
+**Status:** Closed (2026-05-16) — known upstream bug. Mitigated in
 slaptain by tolerating the post-recovery noise in tests; documented for
 production operators.
+
+> **⚠ Correction, 2026-10-23: this document names the wrong ticket throughout.**
+> It identifies the failure as
+> [ITS#9580](https://bugs.openldap.org/show_bug.cgi?id=9580). The storm it
+> describes is [ITS#9398](https://bugs.openldap.org/show_bug.cgi?id=9398) — a
+> different bug, fixed in no release of either version line, where ITS#9580 is
+> the dormancy/cookie-flush issue that 2.7 does fix. The measurements and the
+> mechanism below stand; the attribution does not, and neither does anything
+> that follows from "2.7 fixes this". Read `docs/ITS-9398-REPRODUCTION.md` for
+> the corrected account and `docs/ITS-9398-HANDLING.md` for what actually
+> addresses it.
 **Discovered:** 2026-05-15, during the first e2e run after the ADR-013 revert.
 **Severity:** Test flakes; production CPU spike on peers for several minutes
 after a pod rejoins via syncrepl. Data correctness is unaffected — DITs

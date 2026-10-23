@@ -19,12 +19,17 @@ not:
 - `MIGRATION-PLAN.md` — where this runbook sits in the overall migration strategy.
 
 > **⚠ Known upstream caveat.** OpenLDAP upstream bug
-> [ITS#9580](https://bugs.openldap.org/show_bug.cgi?id=9580) reproduces in slaptain's
+> [ITS#9398](https://bugs.openldap.org/show_bug.cgi?id=9398) reproduces in slaptain's
 > `dataloss_recovery_test`: after a pod loses its PVCs and rejoins via syncrepl, slapd
 > can spin in a `sync cookie is stale` / `delta-sync lost` loop for minutes. DITs
-> converge, but the CPU spike and recovery latency make a production hot migration risky
-> until the trigger conditions are understood. This is an **upstream OpenLDAP issue, not
-> a slaptain defect** — any OpenLDAP-based system inherits it. See
+> converge, but the CPU spike and recovery latency make a production hot migration risky.
+> This is an **upstream OpenLDAP issue, not
+> a slaptain defect** — any OpenLDAP-based system inherits it, and it is fixed in
+> no release of either version line. (This note cited ITS#9580 until 2026-10-23;
+> wrong ticket, and the two are different bugs.) Since 0.5.0 slaptain turns on
+> an accesslog `syncprov-checkpoint` by default, which addresses the
+> precondition — two three-site cycles have run clean where six earlier ones
+> reproduced it, which is a series starting rather than a guarantee. See
 > `docs/INVESTIGATION-replication-divergence-after-dataloss-and-restart.md`. Exercise
 > failure-recovery (pod / PVC loss) in your drill before running this against production;
 > it is safe to drill in a lab.

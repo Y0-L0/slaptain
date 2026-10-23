@@ -2,9 +2,12 @@
 #
 # The packages come from the vendored packaging fork built by
 # images/openldap-deb/Containerfile — one package build feeds both this image
-# and slapd-init. 2.7 is the default because the ITS#9580 delta-syncrepl fix
-# ships in no 2.6.x release; the previous Debian-package-based 2.6 build stays
-# available as slapd:<tag>-ol26 (images/slapd/Containerfile.ol26). See ADR-021.
+# and slapd-init. 2.7 is the default because the LMDB format break means any
+# later move of the default is a forced migration for every cluster that said
+# nothing, so defaulting to the line the format is going to costs nobody that
+# (ADR-040; NOT the ITS#9580 reason this comment used to give, which ADR-021's
+# own amendment retracted). The Debian-package-based 2.6 build stays available
+# as slapd:<tag>-ol26 (images/slapd/Containerfile.ol26). See ADR-021.
 #
 # Paths, UID/GID and the ENTRYPOINT are identical to the ol26 variant: the
 # runtime contract (/usr/sbin/slapd, /usr/lib/ldap, /etc/ldap/schema, 1024:1024)

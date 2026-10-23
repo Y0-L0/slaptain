@@ -203,7 +203,7 @@ fi
 
 # SLAPD_TAG_SUFFIX: appended to the slapd/slapd-init image tags only (the
 # operator tag is untouched). Empty = OpenLDAP 2.7.1; "-ol26" runs the suite
-# against the legacy OpenLDAP 2.6 pair, which is expected to FAIL the ITS#9580
+# against the legacy OpenLDAP 2.6 pair, which is expected to FAIL the ITS#9398
 # assertion in dataloss_recovery_test.go — see ADR-021.
 SLAPD_TAG_SUFFIX="${SLAPD_TAG_SUFFIX:-}"
 SLAPD_TAG="${IMAGE_TAG}${SLAPD_TAG_SUFFIX}"

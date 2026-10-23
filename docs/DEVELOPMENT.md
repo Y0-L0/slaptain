@@ -144,7 +144,9 @@ addresses come from the k8s `InternalIP` unless you pass `NODE_IPS="..."`.
 
 Only for legacy interop: a hot migration whose source is an OpenLDAP 2.6
 deployment ([ADR-011](adrs/adr-011-hot-migration-topology.md)), or a run that
-deliberately exercises the ITS#9580 behaviour 2.7 fixes. Pin **both** tags or
+deliberately exercises the legacy storage format. (This line used to say
+"the ITS#9580 behaviour 2.7 fixes" — retracted: the storm is ITS#9398 and 2.7
+fixes nothing about it.) Pin **both** tags or
 neither — 2.6 and 2.7 do not share an on-disk format. Deployment-side, that is
 `SLAPD_TAG_SUFFIX=-ol26`, which touches only the slapd pair and leaves operator
 and toolkit on the plain tag. The full version and tag contract, including the
@@ -326,7 +328,7 @@ documented in `tests/README.md`.
 Two scenarios bring their own topology and have their own scripts:
 `tests/e2e-migration.sh` (consumer-only → peer promotion, wrapped by
 `make e2e-migration`) and `tests/e2e-storm-repro.sh`, which manufactures the
-ITS#9580 conditions on an `-ol26` mesh and exits `0` when it finally gets the
+ITS#9398 conditions on an `-ol26` mesh and exits `0` when it finally gets the
 no-storm assertion red, `3` on an honest negative.
 
 ---
@@ -390,8 +392,8 @@ Every test must have been observed to fail, for the right reason, at least once
 before it counts as coverage. A test written alongside the code it checks
 mirrors that code's assumptions, bugs included — it passes, and it was never
 shown to catch anything. Write the assertion from the ADR, watch it go red, then
-implement. Where a test genuinely cannot go red, say so in writing: ADR-021's
-ITS#9580 tripwire is on record as never having been observed red, with the
+implement. Where a test genuinely cannot go red, say so in writing: the
+stale-cookie tripwire is on record as never having been observed red, with the
 measurements that explain why, instead of being presented as proven coverage.
 Behaviour-preserving refactors under green tests need no new red.
 

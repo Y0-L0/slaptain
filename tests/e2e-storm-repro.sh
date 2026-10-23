@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ITS#9580 storm reproduction (ADR-021): observe the dataloss no-storm
+# ITS#9398 storm reproduction: observe the dataloss no-storm
 # assertion RED on OpenLDAP 2.6, deliberately.
 #
 # The storm needs three ingredients (ADR-008 amendment of 2026-09-11, ADR-021):

@@ -89,7 +89,8 @@ downtime (cold) or soak/lag behaviour (hot), and fix the runbook from what you l
 
 ## Known caveats
 
-- **OpenLDAP upstream ITS#9580.** After a pod loses its data volumes and rejoins via
+- **OpenLDAP upstream ITS#9398.** (This entry said ITS#9580 until 2026-10-23;
+  that was the wrong ticket for this symptom.) After a pod loses its data volumes and rejoins via
   syncrepl, slapd can spin in a `sync cookie is stale` / `delta-sync lost` loop for
   several minutes — burning CPU — before the DIT reconverges. This is an **upstream
   OpenLDAP issue, not a slaptain defect**; any OpenLDAP-based system inherits it. Because

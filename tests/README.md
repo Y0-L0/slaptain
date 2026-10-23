@@ -70,9 +70,9 @@ make testing-delete
 `TEST_RESOURCES` defaults to `example` in both `tests/e2e.sh` and the root Makefile's
 `testing-apply`. Set it to `lab` for the
 internal lab variant (see `tests/resources/lab/` for SOPS-encrypted secrets used there),
-or to `storm-repro` for the ITS#9580 reproduction fixture — a copy of `example` whose
+or to `storm-repro` for the ITS#9398 reproduction fixture — a copy of `example` whose
 `accesslogPurge` is 5 minutes instead of 2 days (used by `tests/e2e-storm-repro.sh`,
-see "ITS#9580 storm reproduction" below).
+see "ITS#9398 storm reproduction" below).
 
 ---
 
@@ -207,7 +207,7 @@ anywhere in the order; run it alone with `E2E_LABEL_FILTER=startup-config`.
 Observed red (2026-10-15) against an init image built before the converger
 landed: the attribute never appeared after the restart.
 
-**ITS#9580 no-storm assertion (ADR-021).** `dataloss_recovery_test.go` also
+**ITS#9398 no-storm assertion.** `dataloss_recovery_test.go` also
 asserts that fewer than 50 `sync cookie is stale` lines follow the PVC-loss
 recovery across all RW pods (needs the `stats` log bit, 256 — the fixture's
 16640 has it; the spec skips loudly otherwise). On OpenLDAP 2.7.1 (the plain
@@ -775,11 +775,14 @@ make e2e-multisite-teardown CONTEXTS="s1 s2"
 
 ---
 
-## ITS#9580 storm reproduction (`tests/e2e-storm-repro.sh`)
+## ITS#9398 storm reproduction (`tests/e2e-storm-repro.sh`)
 
 The no-storm assertion in `dataloss_recovery_test.go` guards against the
-ITS#9580 stale-cookie refresh storm (ADR-021), but a healthy e2e mesh never
-develops the conditions that trigger it. `tests/e2e-storm-repro.sh`
+ITS#9398 stale-cookie refresh storm — **not** ITS#9580, which this file called
+it until 2026-10-23 and which is a different bug. ITS#9398 is fixed in no
+release of either version line; since 0.5.0 the accesslog
+`syncprov-checkpoint` default addresses its precondition on both. A healthy
+e2e mesh never develops the conditions that trigger it on its own. `tests/e2e-storm-repro.sh`
 manufactures them deliberately, on a multi-site OpenLDAP 2.6 (`-ol26`) mesh:
 
 - **dormancy** — one write through an otherwise idle site (the last context),

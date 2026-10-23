@@ -50,10 +50,13 @@ type restorePodTarget struct {
 	dataPVC      string
 	configPVC    string // only needed when loadData (slapadd reads cn=config)
 	accesslogPVC string // "" when the pod has no accesslog DB
-	// loadData: RW pods download + wipe + slapadd directly (no syncrepl refresh,
-	// so no ITS#9580). RO pods are wipe-only — they re-refresh from the restored
-	// RW pods on scale-up, which is their normal mode and (having no accesslog)
-	// is not exposed to ITS#9580. See ADR-014 amendment.
+	// loadData: RW pods download + wipe + slapadd directly — no syncrepl
+	// refresh, so none of the stale-cookie exposure a refresh carries. RO pods
+	// are wipe-only: they re-refresh from the restored RW pods on scale-up,
+	// which is their normal mode, and having no accesslog of their own they
+	// cannot reach the fatal minCSN-vs-contextCSN state at all. See the ADR-014
+	// amendment. (These comments named ITS#9580 until 2026-10-23; the storm
+	// that follows a refresh is ITS#9398.)
 	loadData bool
 }
 

@@ -5,9 +5,14 @@ from Debian's `2.6.14+dfsg-2` onto pristine upstream **OpenLDAP 2.7.1**. The
 `Containerfile` builds it inside a `debian:trixie-slim` container and hands the
 resulting `.deb` files to both `images/slapd` and `images/slapd-init`.
 
-Why a fork at all: the ITS#9580 delta-syncrepl fix ships in no OpenLDAP 2.6.x
-release, and as of 2026-09-11 no Debian suite — trixie, sid or experimental —
-packages 2.7. See [ADR-021](../../docs/adrs/adr-021-openldap-2.7-dual-images.md)
+Why a fork at all: no Debian suite — trixie, sid or experimental — packages
+OpenLDAP 2.7, so shipping 2.7 at all means forward-porting the packaging
+ourselves. And 2.7 is the default because the LMDB format break makes any
+later default move a forced migration of every cluster that said nothing;
+defaulting to 2.7 now means whoever takes the default never migrates
+(ADR-040). An earlier version of this file said the fork existed because "the
+ITS#9580 delta-syncrepl fix ships in no 2.6.x release" — that reasoning is
+retracted, and ADR-021's own amendment says so. See [ADR-021](../../docs/adrs/adr-021-openldap-2.7-dual-images.md)
 for the decision and [`docs/OPENLDAP-VERSIONS.md`](../../docs/OPENLDAP-VERSIONS.md)
 for the user-facing version/tag contract.
 

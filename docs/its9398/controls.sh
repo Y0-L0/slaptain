@@ -1,5 +1,5 @@
 #!/bin/bash
-# Part A: reach the ITS#9580 bad state using ONLY supported operations.
+# Part A: reach the ITS#9398 bad state using ONLY supported operations.
 #   write entries | stop a node | delete a node's database directories | start a node
 # No LDIF editing, no slapadd of doctored data, nothing touching minCSN/contextCSN.
 set -u

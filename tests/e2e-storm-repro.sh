@@ -2,7 +2,13 @@
 # ITS#9398 storm reproduction: observe the dataloss no-storm
 # assertion RED on OpenLDAP 2.6, deliberately.
 #
-# The storm needs three ingredients (ADR-008 amendment of 2026-09-11, ADR-021):
+# This script manufactures the state by one ROUTE; it is not the only one, and
+# the purge is not required (settled from source 2026-10-23 — a sweep that
+# matches nothing writes nothing, and accesslog_response advances minCSN on the
+# first logged write carrying a new serverID with no sweep at all). What the
+# aggressive purge here buys is speed and determinism, not necessity.
+#
+# The route this script takes (ADR-008 amendment of 2026-09-11, ADR-021):
 #   dormancy — a serverID that wrote once and then never again, so its CSN
 #              rides in every cookie but ages;
 #   ammunition — accesslogs that can no longer vouch for that old CSN

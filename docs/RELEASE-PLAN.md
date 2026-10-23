@@ -100,14 +100,16 @@ Pre-tag checklist:
 5. **ADR-037 stays `Proposed`** — deliberately, and worth a line saying so, since
    four other ADRs are stale in the other direction (004, 005, 006, 007 are all
    implemented and still say Proposed).
-6. **Decide what to say about the purge and the storm.** The `CLAUDE.md`
-   claim has been narrowed from "the purge has nothing to do with it" to what
-   was actually measured, and the open question — does a purge sweep that
-   deletes nothing still write `minCSN`? — is in `BACKLOG.md`. Its first half
-   is answerable from `accesslog.c:656-684` for the price of one read, and it
-   decides whether ADR-037's slot length is also a storm-exposure knob. Cheap
-   enough to settle before the release; if it is not settled, the release notes
-   should not imply it is.
+6. ~~**Decide what to say about the purge and the storm.**~~ **SETTLED
+   2026-10-23**, from the source read this item asked for. A sweep that matches
+   nothing writes nothing (`accesslog.c:679-691`, `:752`), and
+   `accesslog_response` advances `minCSN` on the first logged write carrying a
+   new serverID with no sweep involved (`:2113-2159`). So the purge is
+   sufficient, never necessary, and **ADR-037's slot length is not a
+   storm-exposure knob** — its purge half is a write-stall mechanism only
+   (ADR-037 eighteenth amendment). The corrected account is in
+   `docs/ITS-9398-REPRODUCTION.md`; the release notes say what the checkpoint
+   default does and what two clean cycles do and do not establish.
 7. ~~`make helm-lint verify-generated`, then a **multi-site e2e cycle**~~ —
    done 2026-10-22, see the status block above. Run the rotation cycle with
    `E2E_ROTATION=1` or the feature's own specs never execute.

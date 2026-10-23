@@ -8,12 +8,37 @@ Headings are the git tag verbatim (`## v0.4.0`), with the `v`. Everything
 downstream of the tag — images, chart `version`, chart `appVersion` — carries
 the bare version; see `docs/VERSIONING.md`.
 
+## This file versus `docs/UPGRADING.md`
+
+They answer different questions and the line between them is worth keeping,
+because the same change naturally wants writing up in both and then the two
+copies drift.
+
+| | this file | `docs/UPGRADING.md` |
+|---|---|---|
+| answers | what changed, and why | what it does to a mesh you already run |
+| audience | everyone, including fresh installs | only someone crossing versions |
+| read it | to decide whether to upgrade | before you actually do |
+
+So a change is described **here** — what it is, why it was made, what it costs,
+what is and is not established — and the **procedure** lives there: when it
+lands, which conditions go False while it does, the exact opt-out, and the
+order to do things in.
+
+One deliberate exception: for a BREAKING change this file still carries the
+single line that keeps today's behaviour, because a release note that makes a
+reader go somewhere else to learn what to set is a release note that failed.
+
 ## v0.5.0
 
 Three defaults move in this release. Two of them change which binary your pods
 run, and one of them is the answer to v0.4.0's known issue.
-[`docs/UPGRADING.md`](docs/UPGRADING.md) has the per-change detail and the
-opt-outs; this is what each one is for.
+
+**This page is what changed and why.**
+[`docs/UPGRADING.md`](docs/UPGRADING.md) is what it does to a mesh you are
+already running — when each change lands, which conditions go False while it
+does, and the exact opt-out for each. Read it before upgrading an existing
+deployment; a fresh install does not need it.
 
 ### The accesslog database gets a syncprov checkpoint — ITS#9398
 
@@ -44,8 +69,7 @@ penalty — 270,277 ops/s at p99 16.9 ms. Replication stays current to
 255,903 ops/s, where the same setup without the checkpoint stays current to
 roughly 7 % higher before lag reaches one second. A ceiling moving at a quarter
 of a million operations per second, on bare metal with fast local storage.
-Slower or shared storage is not measured, and
-`accesslogSyncprovCheckpoint: none` is the way out.
+Slower or shared storage is not measured, which is what the opt-out is for.
 
 ### Breaking: the default slapd image is now the PURE build
 
@@ -106,17 +130,13 @@ survive a restart, so a consumer reconnecting after one falls outside the
 window and takes a full-DIT refresh it did not need; the journal is already on
 disk and already written.
 
-**This lands gradually, not at upgrade.** The attribute is startup-only —
-writing it to a running slapd is a double free in every released version — so
-it reaches `cn=config` only through the init container at pod start. Every
-database will report `StartupConfigConverged=False/RestartRequired` until its
-pods restart. **That is expected, not an error**, and nothing restarts the pods
-for you: restarting a provider fleet is a topology event at every peer. Until
-then the pod keeps its in-memory log, so there is no window with neither.
+The attribute is startup-only, so this **lands at each pod's next restart
+rather than at upgrade**, and every database reports
+`StartupConfigConverged=False/RestartRequired` until then. That is expected
+rather than an error, and `docs/UPGRADING.md` says what to do about it (mostly:
+nothing).
 
-`syncprovSessionlogSource: InMemory` keeps the old behaviour;
-`syncprovSessionlog: 0` still means "no session log at all" and is not
-overridden.
+`syncprovSessionlogSource: InMemory` keeps the old behaviour.
 
 ### New: `spec.rotation.mode`
 

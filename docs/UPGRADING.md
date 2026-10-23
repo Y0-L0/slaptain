@@ -4,6 +4,11 @@ What an operator upgrade does to a **running** mesh, per release. Read the entry
 for every version you cross, not only the one you land on. A fresh install never
 needs this file.
 
+For *what changed and why*, read `CHANGELOG.md` — it is the release note and
+the place a change is argued. This file is the procedure: when each change
+lands, what reports what while it does, and exactly what to set. Where the two
+would say the same thing, it belongs here and `CHANGELOG.md` points at it.
+
 ---
 
 ## v0.5.0 — the default slapd image becomes PURE, and `spec.images.select` replaces pinning by tag

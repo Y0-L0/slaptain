@@ -97,7 +97,38 @@ var _ = Describe("startup-only configuration", Label("startup-config"), Ordered,
 
 		rwPods = rwPodNames(ctx, "slapd")
 		Expect(rwPods).NotTo(BeEmpty())
-	}, NodeTimeout(10*time.Minute))
+
+		// ESTABLISH THE PRECONDITION rather than inherit it. Every spec below
+		// starts from "the pods carry no olcSpSessionlogSource" and then
+		// declares one to create a divergence. That used to be the state a
+		// fixture cluster happened to be in, because unset meant InMemory;
+		// since the ADR-034 amendment unset means Accesslog, so the pods
+		// already carry the attribute and declaring it is a no-op — the first
+		// spec read True/Converged where it demanded False/RestartRequired.
+		//
+		// Asking for InMemory by name and restarting puts the fleet where the
+		// specs assume it is, and leaves them independent of whatever the
+		// default happens to be next.
+		carries := false
+		for _, pod := range rwPods {
+			conn := dialPodConfigEventually(ctx, pod)
+			if dataDB, ok := findMdb(observedMdbDatabases(conn), dataSuffix); ok {
+				if _, src := syncprovAttr(conn, dataDB.dn, "olcSpSessionlogSource"); len(src) > 0 {
+					carries = true
+				}
+			}
+			conn.Close()
+			if carries {
+				break
+			}
+		}
+		if carries {
+			By("clearing the inherited session-log source so the specs start from no attribute")
+			setAllSessionlogSourcesInMemory(ctx, origOps)
+			restartRWFleet(ctx, rwPods, restartBudget)
+			waitClusterSettled(ctx)
+		}
+	}, NodeTimeout(20*time.Minute))
 
 	AfterAll(func(ctx SpecContext) {
 		// Belt for a failed run: a green one has already put the field back in
@@ -251,8 +282,8 @@ var _ = Describe("startup-only configuration", Label("startup-config"), Ordered,
 		// it asks for the very attribute this spec is about to assert is gone.
 		// InMemory is how that is said now, and it is what makes the
 		// NoStartupOnlyAttributes assertion below reachable at all.
-		By("asking for the in-memory log by name, which declares nothing startup-only")
-		setSessionlogSource(ctx, ldapv1alpha1.SyncprovSessionlogSourceInMemory, origOps)
+		By("asking EVERY database for the in-memory log, so the table can render empty")
+		setAllSessionlogSourcesInMemory(ctx, origOps)
 
 		By("asserting the ConfigMap key is still present and now EMPTY")
 		// An ABSENT key means "unmanaged" to the converger and would leave the
@@ -359,6 +390,39 @@ var _ = Describe("startup-only configuration", Label("startup-config"), Ordered,
 //
 // A Get/Update retry loop rather than a patch: the SlapdDatabase controller
 // writes status on the same object, so a stale resourceVersion is normal.
+// setAllSessionlogSourcesInMemory asks every SlapdDatabase of this cluster for
+// the in-memory log by name.
+//
+// The table is a CLUSTER-wide artifact: it carries one line per database that
+// declares a source, so "the key is present and EMPTY" — ADR-034's wire format
+// distinction, and the reason the specs below assert it rather than assume it —
+// is only reachable when NO database declares one. Since the amendment made
+// Accesslog the default, dropping the field on one database leaves the other
+// still contributing a line, and the empty table became unreachable.
+func setAllSessionlogSourcesInMemory(ctx context.Context, ops *int32) {
+	list := &ldapv1alpha1.SlapdDatabaseList{}
+	Expect(crdClient.List(ctx, list)).To(Succeed())
+	for i := range list.Items {
+		sd := &list.Items[i]
+		if sd.Namespace != namespace || sd.Spec.ClusterRef != "slapd" {
+			continue
+		}
+		name := sd.Name
+		Eventually(ctx, func() error {
+			cur := &ldapv1alpha1.SlapdDatabase{}
+			if err := crdClient.Get(ctx, nsName(namespace, name), cur); err != nil {
+				return err
+			}
+			cur.Spec.Replication.SyncprovSessionlogSource = ldapv1alpha1.SyncprovSessionlogSourceInMemory
+			if name == dbCRName {
+				cur.Spec.Replication.SyncprovSessionlog = ops
+			}
+			return crdClient.Update(ctx, cur)
+		}).WithTimeout(2*time.Minute).WithPolling(3*time.Second).Should(Succeed(),
+			"asking %s for the in-memory session log", name)
+	}
+}
+
 func setSessionlogSource(ctx context.Context, source string, ops *int32) {
 	Eventually(ctx, func() error {
 		sd := &ldapv1alpha1.SlapdDatabase{}

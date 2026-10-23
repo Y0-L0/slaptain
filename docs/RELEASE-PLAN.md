@@ -86,7 +86,7 @@ Pre-tag checklist:
    patched build reports `+slaptain3` and the pure one `+pure3`, derived from
    `SLAPTAIN_PATCHES` and asserted by the build's version/flavour gate. `N` is
    still yours to bump by hand, and both flavours share it.
-2. `docs/UPGRADING.md`: `## Unreleased` → `## v0.4.0`.
+2. `docs/UPGRADING.md`: `## Unreleased` → the release heading. (0.5.0's is already written as `## v0.5.0`.)
 3. **Experimental framing** into the `SlapdRotationConfig` field documentation
    and the head of `docs/PURGE-ROTATION.md`, per ADR-039 tier 2. Regenerate
    CRDs (`make operator-manifests`) so it reaches `kubectl explain`.
@@ -113,7 +113,20 @@ Pre-tag checklist:
 7. ~~`make helm-lint verify-generated`, then a **multi-site e2e cycle**~~ —
    done 2026-10-22, see the status block above. Run the rotation cycle with
    `E2E_ROTATION=1` or the feature's own specs never execute.
-8. Chart `version`/`appVersion` → `0.4.0`, bump commit, then tag.
+8. Chart `version`/`appVersion` → the release version in all four charts, bump
+   commit, then tag. **Done for 0.5.0.**
+
+   Worth knowing why this is not cosmetic, because the symptom is quiet. A
+   packaged chart gets its version from the Makefile (`--version`/`--app-version`
+   off the git tag), and `make operator-helm-install` pins `image.tag`
+   explicitly — so both of those paths are correct whatever `Chart.yaml` says.
+   What is NOT correct is a plain `helm install ./charts/operator` from a
+   checkout: `image.tag` falls back to `.Chart.AppVersion`, and so does
+   `OPERATOR_IMAGE_TAG`, which is the operator's `DefaultImageTag` for
+   *unpinned data-plane images*. A stale `Chart.yaml` therefore runs the
+   previous release's operator AND hands the previous release's slapd pair to
+   every cluster that did not pin — from a tree that looks like the new one.
+   Caught during 0.5.0 prep by a `helm upgrade --reuse-values` reporting 0.4.0.
 
 Deliberately **not** in 0.4.0: any default change, the image scheme, the
 rotation decomposition. The release already carries one forced migration.

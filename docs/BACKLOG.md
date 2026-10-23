@@ -1842,6 +1842,90 @@ shape before building; do not grow a webhook for this.
 
 ---
 
+### MEASURED 2026-10-23, and it is worse than this entry assumed
+
+The "new API surface" this entry asked for now exists:
+`spec.images.select.storageFormat` (ADR-040). So the operator knows what format
+the user *declared*, which is half the problem. The other half was measured on
+a live single-site cluster: three RW pods populated on OpenLDAP 2.7, then
+`storageFormat: lmdb0.9` applied and the roll watched.
+
+**1. The failure message is not merely terse, it is WRONG about the remedy.**
+
+```
+mdb_db_open: database "cn=slaptain-auth" cannot be opened:
+MDB_INVALID: File is not an LMDB file (-30793). Restore from backup!
+backend_startup_one (type=mdb, suffix="cn=slaptain-auth"): bi_db_open failed! (-30793)
+slapd stopped.
+```
+
+The volume is perfectly healthy. "Restore from backup!" is advice that, if
+followed, performs a risky and pointless operation on good data — and on a
+cluster where the operator is *also* mid-roll, a restore is the ADR-014
+scale-to-0 machine. This is the single strongest argument for the preflight:
+the native failure does not merely fail to explain, it points at a destructive
+action.
+
+**2. It is `MDB_INVALID`, not `MDB_VERSION_MISMATCH`** — which a source read
+predicted and the measurement refuted. LMDB 1.0 changed the meta page enough
+that 2.6's reader does not recognise it as a meta page at all, so it fails
+*before* the version check it would otherwise have reported. Anyone searching
+the error gets corruption advice, not version advice. (Direction tested:
+2.6 image against 2.7 volumes. The reverse — a 2.6 volume under a 2.7 image,
+which is the direction ADR-021's migration runbook travels — is UNMEASURED and
+may well report differently.)
+
+**3. It names `cn=slaptain-auth`**, the ADR-027 node-local auth database,
+because it is the first mdb opened. That is an internal database the user never
+declared and will not recognise.
+
+**4. The init container passes cleanly.** It only touches `/config` (LDIF), so
+nothing in the current startup path opens an LMDB data environment before
+slapd does. A preflight has to be added; there is no existing check to extend.
+
+**5. Containment is good.** `OrderedReady` halts the roll at the first bad pod:
+pods 0 and 1 stayed Running on 2.7 and the cluster served at 2/3, reporting
+`Degraded`, `Ready=False NotReady: 2/3`, and `PodsResponsive=False` naming
+`slapd-2` with "connection refused". Accurate, and says nothing about why.
+
+**6. Reverting the spec does NOT heal it — this is the trap.** Setting
+`storageFormat` back to `lmdb1.0` updated the StatefulSet template, and the pod
+**stayed on the wrong image indefinitely**. Under `OrderedReady` the controller
+will not replace an unhealthy pod, so the broken pod blocks its own
+replacement. Measured: template back on 2.7, pod still `-ol26`, five restarts,
+no progress. A `kubectl delete pod slapd-2` recovered it in under 15 s with
+both databases intact (`DataPresent=True` on each).
+
+So a user can reach a stuck state with one CR edit and **cannot leave it with
+another**. That converts the preflight from "nicer diagnostics" into "the
+difference between a refusal and a manual recovery", and it deserves its own
+treatment regardless of the preflight: the operator could notice a pod whose
+image does not match the template and whose container is crashlooping, and say
+so — or the unhealthy-pod-blocks-its-own-replacement interaction could be
+handled directly.
+
+**Shape of the preflight, now that the mechanism is known.** `slaptest` WITHOUT
+`-u` is the instrument: `slapcommon.c:936` runs `slap_startup(be)`, which opens
+every database through back-mdb — the same binary set, the same code path, no
+new packaging, perfect parity by construction (the project already relies on
+the `-u` distinction in the openldap-deb build gate, which passes `-u`
+precisely to avoid opening databases). Run it in the init container after the
+config is in place; on failure write a message naming the declared format, the
+image, and the two ways out (`storageFormat` or the
+`docs/OPENLDAP-VERSIONS.md` dump/reload) to `/dev/termination-log`, and have
+the operator surface `initContainerStatuses[].lastState.terminated.message`
+on the CR. The operator never touches the volume, so ADR-018 is not engaged.
+
+Rejected on the way: reading the LMDB meta page directly (reimplements a struct
+and hardcodes a format table — and would have missed a truncated file), and
+packaging `mdb_stat` (OpenLDAP never builds liblmdb as a library —
+`back-mdb/Makefile.in:52-56` compiles `mdb.c` straight into the module — so
+there is nothing to link against and the flags would have to be re-derived).
+`mdb_stat` remains independently worth packaging for `slctl debug` on-disk
+inspection, but it is not the preflight.
+
+---
+
 ## `kubectl rollout status` returns before readiness on slaptain StatefulSets
 
 Observed during the v0.1.0 demo rehearsal: `kubectl rollout status

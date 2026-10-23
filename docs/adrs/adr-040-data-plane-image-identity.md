@@ -643,3 +643,77 @@ state will look different.
   selected `flavour: slaptain`, both halves looking correct in review. A unit
   test reads the changelog and compares; it was taken red for that exact
   mutation.
+
+## Amendment, 2026-10-23: decision 5 measured — the native failure points at a destructive action
+
+Decision 5 ("detect to refuse, not to choose") was reasoned, and the open
+question underneath it was whether the native failure is already legible enough
+that a preflight buys little. It was measured on a live cluster: three RW pods
+populated on 2.7, then `storageFormat: lmdb0.9` applied.
+
+**It is legible as a failure and wrong as a diagnosis.**
+
+```
+mdb_db_open: database "cn=slaptain-auth" cannot be opened:
+MDB_INVALID: File is not an LMDB file (-30793). Restore from backup!
+```
+
+The volume is healthy. "Restore from backup!" is the remedy for the thing this
+is not, and following it on a slaptain cluster means the ADR-014 scale-to-0
+machine against good data. A preflight is not an improvement in diagnostics
+here; it is the difference between a refusal and a plausible route to data
+loss.
+
+Three details that each cost something:
+
+- **`MDB_INVALID`, not `MDB_VERSION_MISMATCH`.** A source read predicted the
+  latter; the measurement refuted it. LMDB 1.0 changed the meta page enough
+  that 2.6's reader never reaches the version check. So the error a user
+  searches for returns corruption advice rather than version advice. The
+  reverse direction — a 2.6 volume under a 2.7 image, which is the direction
+  ADR-021's runbook travels — is **unmeasured**.
+- **It names `cn=slaptain-auth`**, ADR-027's node-local database, because that
+  is the first mdb opened: an internal name the user never declared.
+- **The init container passes cleanly.** It only touches `/config` (LDIF), so
+  nothing opens an LMDB data environment before slapd does.
+
+**And the state is not reversible from the spec.** Setting `storageFormat` back
+updated the StatefulSet template and the pod **stayed on the wrong image**:
+under `OrderedReady` the controller will not replace an unhealthy pod, so the
+broken pod blocks its own replacement. Measured — template reverted, pod
+unchanged, five restarts, no progress — until a manual `kubectl delete pod`,
+after which it recovered in under 15 s with both databases intact.
+
+A user can therefore reach this state with one CR edit and cannot leave it with
+another. That is the strongest form of decision 5's argument and it was not
+anticipated: the cost of guessing wrong is not a bad error message, it is a
+cluster that needs a human with `kubectl` to get out.
+
+Containment is good and worth recording: the roll halted at the first bad pod,
+the other two kept serving on 2.7, and the cluster reported `Degraded`,
+`Ready=False NotReady: 2/3` and `PodsResponsive=False` naming the pod. All
+accurate; none of it mentions the image or the format.
+
+**The instrument for the preflight is `slaptest` without `-u`.** It runs
+`slap_startup(be)` (`slapcommon.c:936`), opening every database through
+back-mdb — the same binaries, the same code path, nothing new to package and no
+format table to maintain. Two alternatives were rejected: reading the LMDB meta
+page directly (reimplements a struct, hardcodes a version table, and would pass
+a truncated file), and packaging `mdb_stat` (OpenLDAP never builds liblmdb as a
+library — `back-mdb/Makefile.in:52-56` compiles `mdb.c` directly into the
+module — so there is nothing to link against). The project already depends on
+the `-u` distinction: the openldap-deb build gate passes `-u` precisely so that
+slaptest does *not* open databases.
+
+The operator learns the outcome from
+`initContainerStatuses[].lastState.terminated.message`, so it still never
+touches a volume and ADR-018 is not engaged — which is what made decision 4
+unbuildable and leaves decision 5 buildable.
+
+**Also validated in the same run, incidentally:** the selector drives both
+images from one declaration (clearing the pinned tags moved slapd *and*
+slapd-init to the `-ol26` pair together), an explicit tag does beat the
+selector (the e2e fixture pins tags, so the selector did nothing until they
+were cleared — which also means **the e2e suite does not exercise the selector
+at all**, a coverage gap worth its own entry), and the published default
+reports `2.7.1-0+pure3` where the `slaptain` cell reports `2.7.1-0+slaptain3`.

@@ -79,6 +79,56 @@ Measured on one pair: `-ol26` reads image 2026-10-06 and binary `May 29 2025`;
 `-ol26src` reads image 2026-10-17 and binary `Oct 17 2026`. Judge by the label
 and the version string, never by either date.
 
+## If you point an image at the wrong format — read this before acting
+
+Measured on a live cluster, 2026-10-23. A pod running the 2.6 image against
+volumes written by 2.7 crashloops with:
+
+```
+mdb_db_open: database "cn=slaptain-auth" cannot be opened:
+MDB_INVALID: File is not an LMDB file (-30793). Restore from backup!
+backend_startup_one (type=mdb, suffix="cn=slaptain-auth"): bi_db_open failed! (-30793)
+slapd stopped.
+```
+
+**Do not restore from backup.** Your data is fine. The message is LMDB's
+generic "I cannot make sense of this file", and a volume written by the other
+format reaches it before any version check — so it says `MDB_INVALID` rather
+than a version complaint, and the advice attached to it is the advice for
+corruption, which this is not. Restoring here would run the full scale-to-0
+restore machine over healthy data.
+
+Two more things that will confuse you if nobody has said them:
+
+- **The database it names is `cn=slaptain-auth`**, which you never declared. It
+  is the node-local authentication database (ADR-027) and simply happens to be
+  the first one opened. The suffix in the message tells you nothing about which
+  of *your* databases is affected — all of them are.
+- **The init container succeeds.** It only writes configuration, so a green
+  init container says nothing about whether slapd can open the volumes.
+
+### Getting out
+
+The roll stops at the first bad pod, so the rest of the fleet keeps serving —
+you will see `Degraded`, `Ready=False NotReady: 2/3` and `PodsResponsive=False`
+naming the stuck pod.
+
+**Putting the spec back is necessary but not sufficient.** Correcting
+`spec.images.select.storageFormat` (or the pinned tag) updates the StatefulSet
+template, but the stuck pod stays on the old image: with `OrderedReady`,
+Kubernetes will not replace a pod that is not Ready, so the broken pod blocks
+its own replacement. Measured: template corrected, pod unchanged through five
+restarts.
+
+Delete it by hand once the spec is right:
+
+```bash
+kubectl delete pod <cluster>-<ordinal> -n <namespace>
+```
+
+It came back Ready in under 15 s with every database intact. Repeat per stuck
+pod, lowest ordinal last.
+
 ## Pinning the 2.6 pair
 
 Set both image tags on the `SlapdCluster` — **both, or neither**. The init

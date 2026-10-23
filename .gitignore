@@ -3,7 +3,13 @@
 bin/
 *.tar
 tests/image-pull-secret.yaml
+# The lab description, and ANY variant of it. The bare name is not enough: a
+# renamed copy (lab.yaml.disabled, lab.yaml.bak, lab.yaml.scm) is the same
+# private content — contexts, node IPs, registry host, libvirt URIs — and
+# `git add -A` will stage it. Caught 2026-10-23 by the pre-commit guard, which
+# is a backstop and not the plan.
 /lab.yaml
+/lab.yaml.*
 /storm-repro-iter-*.log
 .claude/worktrees/
 /.claude/local/

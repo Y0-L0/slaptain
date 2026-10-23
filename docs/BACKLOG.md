@@ -95,6 +95,75 @@ tests, so the atomic `Replace` remains guarded by prose.
 
 ---
 
+## A SlapdCluster cannot influence where its pods are scheduled
+
+Observed 2026-10-23 on a four-node lab, a three-replica cluster plus one RO
+replica:
+
+```
+slapd-0            node-a
+slapd-1            node-b
+slapd-2            node-b
+slapd-readonly-0   node-a
+```
+
+Two of three read-write pods on one node, and the read-only replica sharing a
+node with a writer. Losing `node-b` takes two thirds of the write fleet; losing
+`node-a` takes a writer and the entire RO fleet. Nothing about that was chosen —
+the scheduler had no reason to prefer otherwise.
+
+**The operator exposes no placement control whatsoever.** `SlapdCluster` has no
+`affinity`, no `tolerations`, no `nodeSelector`, no
+`topologySpreadConstraints`, and the pod-template builder sets none. The only
+affinity anywhere in the API is `SlapdBackup.podAffinity`, which does the
+opposite job — it *pins* a backup Job to its target pod's node. The operator's
+own Helm chart has `nodeSelector`/`affinity` values, but those place the
+**operator**, not slapd.
+
+**Why this is sharper here than for a typical workload.** The PVCs are RWO and,
+in every environment this project runs in, backed by local storage
+(`openebs.io/local`, `local.csi.openebs.io`) with `WaitForFirstConsumer`. The
+volume binds wherever the pod first lands, and from then on the pod is pinned
+to that node for the life of the PVC. **A bad spread is therefore permanent,
+not something the next reschedule fixes** — correcting it means deleting a
+pod's PVCs and rebuilding it from replication, which is ADR-012 case 2 and
+carries everything that comes with it (ADR-036's authorship gate, and the
+stale-cookie exposure that shape has historically produced).
+
+So the usual reasoning — "scheduling is the cluster operator's business, not
+the workload's" — is weaker than normal: the first scheduling decision is the
+only one, and it is made before anyone notices.
+
+### Two shapes, and they are not exclusive
+
+1. **Pass-through fields.** `spec.affinity`, `spec.tolerations`,
+   `spec.nodeSelector`, `spec.topologySpreadConstraints`, handed to the pod
+   template verbatim. Cheap, unopinionated, and the precedent is already here —
+   `spec.resources`, `spec.securityContext` and `spec.imagePullSecrets` are
+   exactly this. It solves nothing for anyone who does not know to set it.
+2. **A default spread.** Most operators ship a *preferred* (soft) pod
+   anti-affinity on `kubernetes.io/hostname` so replicas land apart when they
+   can and still schedule when they cannot. Soft rather than required matters:
+   a required constraint on a cluster with fewer nodes than replicas leaves
+   pods Pending forever, and a three-node lab running `replicas: 3` plus RO
+   pods is a normal shape here.
+
+The RO fleet wants its own treatment either way — spreading RW pods apart does
+not stop every RO pod landing on a writer, which is what happened above.
+
+### What it costs to add a default
+
+A default changes the rendered pod template for every existing cluster, so it
+is one roll on operator upgrade. ADR-035 says that is allowed — an operator
+upgrade may change the template once — and ADR-013's rule is about side-effect
+rolls, not about a deliberate version change. But it is a roll of every slapd
+pod in every cluster, so it belongs in a release that is already rolling them
+and wants an `UPGRADING.md` entry saying so.
+
+Worth deciding together with the pass-through fields: if a default lands, the
+pass-through must be able to **replace** it rather than merge with it, or a
+user who sets their own `affinity` gets ours silently ANDed onto theirs.
+
 ## The accesslog purge stalls the pod that runs it, and we pin writes to one pod
 
 **What:** `accesslog_purge()` collects every expired entry with one uncapped

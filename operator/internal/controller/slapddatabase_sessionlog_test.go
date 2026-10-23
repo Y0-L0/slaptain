@@ -24,11 +24,16 @@ const wantDefaultSessionlog = "5000"
 // (desiredSessionlog) and the convergence step (planSessionlog) — so the
 // live-LDAP half stays a thin executor.
 
+// sdWithSessionlog builds a database whose session log is IN-MEMORY by
+// name. The source is pinned explicitly because unset now means Accesslog
+// (ADR-034 amendment) — leaving it off would make every case below test the
+// default rather than the in-memory sizing they exist to test.
 func sdWithSessionlog(v *int32) *ldapv1alpha1.SlapdDatabase {
 	return &ldapv1alpha1.SlapdDatabase{
 		Spec: ldapv1alpha1.SlapdDatabaseSpec{
 			Replication: ldapv1alpha1.DatabaseReplicationConfig{
-				SyncprovSessionlog: v,
+				SyncprovSessionlog:       v,
+				SyncprovSessionlogSource: ldapv1alpha1.SyncprovSessionlogSourceInMemory,
 			},
 		},
 	}
@@ -175,9 +180,23 @@ func TestDesiredSessionlog(t *testing.T) {
 		wantDN   string
 	}{
 		{
-			name:     "both unset: the in-memory log at the operator default",
+			// Was the in-memory log until the ADR-034 amendment made the
+			// journal the default: the in-memory log does not survive a
+			// restart, so a consumer that reconnects after one takes a full
+			// refresh it did not need.
+			name:     "both unset: the journal, since that is now the default",
 			dbName:   testDefaultDB,
 			source:   "",
+			field:    nil,
+			wantKind: sessionlogKindAccesslog,
+			wantDN:   testAccesslogRDN,
+		},
+		{
+			// The coverage the case above used to provide, under the spelling
+			// that now asks for it.
+			name:     "explicit InMemory: the in-memory log at the operator default",
+			dbName:   testDefaultDB,
+			source:   ldapv1alpha1.SyncprovSessionlogSourceInMemory,
 			field:    nil,
 			wantKind: sessionlogKindInMemory,
 			wantOps:  defaultSyncprovSessionlogOps,

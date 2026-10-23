@@ -56,7 +56,8 @@ func TestStartupConfigRender(t *testing.T) {
 			// indistinguishable from "this operator predates ADR-034" — and
 			// would make removing the last source impossible.
 			name: "no database wants a source: the empty file, not a missing key",
-			dbs:  dbList(sdStartup("db1", "slapd", "dc=example,dc=org", "")),
+			dbs: dbList(sdStartup("db1", "slapd", "dc=example,dc=org",
+				ldapv1alpha1.SyncprovSessionlogSourceInMemory)),
 			want: "",
 		},
 		{
@@ -90,10 +91,14 @@ func TestStartupConfigRender(t *testing.T) {
 		{
 			// The in-memory log is a live-writable attribute the SlapdDatabase
 			// controller owns; it has no business in a startup-only table.
-			name: "unset and InMemory sources contribute nothing",
+			// Unset no longer belongs here: since the ADR-034 amendment it
+			// means Accesslog, which IS a startup-only attribute. InMemory by
+			// name is what contributes nothing now.
+			name: "an InMemory source contributes nothing",
 			dbs: dbList(
-				sdStartup("unset", "slapd", "dc=unset,dc=org", ""),
-				sdStartup("inmem", "slapd", "dc=inmem,dc=org",
+				sdStartup("inmemA", "slapd", "dc=inmema,dc=org",
+					ldapv1alpha1.SyncprovSessionlogSourceInMemory),
+				sdStartup("inmemB", "slapd", "dc=inmemb,dc=org",
 					ldapv1alpha1.SyncprovSessionlogSourceInMemory),
 			),
 			want: "",
@@ -106,6 +111,14 @@ func TestStartupConfigRender(t *testing.T) {
 				sdStartup("sourced", "slapd", "dc=sourced,dc=org", acc),
 			),
 			want: "olcSpSessionlogSource\tdc=sourced,dc=org\tcn=accesslog-sourced\n",
+		},
+		{
+			// The default's own case, which is now the common one: a database
+			// that declares nothing is sourced from its journal and therefore
+			// reaches the table.
+			name: "a database that says nothing is sourced from its journal",
+			dbs:  dbList(sdStartup("quiet", "slapd", "dc=quiet,dc=org", "")),
+			want: "olcSpSessionlogSource\tdc=quiet,dc=org\tcn=accesslog-quiet\n",
 		},
 	}
 
@@ -129,7 +142,8 @@ func TestStartupConfigMapDataAlwaysCarriesTheKey(t *testing.T) {
 	}{
 		{"no databases at all", nil},
 		{"no database wants a source",
-			dbList(sdStartup("db1", "slapd", "dc=example,dc=org", ""))},
+			dbList(sdStartup("db1", "slapd", "dc=example,dc=org",
+				ldapv1alpha1.SyncprovSessionlogSourceInMemory))},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data := startupConfigFor(tc.dbs, "slapd").configMapData()

@@ -1508,20 +1508,40 @@ type sessionlogDecision struct {
 // DB's syncprov must never carry a session log of its own (ADR-022), which is a
 // different thing from being the SOURCE of the data DB's one.
 func desiredSessionlog(sd *ldapv1alpha1.SlapdDatabase) sessionlogDecision {
-	if sd.Spec.Replication.SyncprovSessionlogSource == ldapv1alpha1.SyncprovSessionlogSourceAccesslog {
-		return sessionlogDecision{
-			Kind:     sessionlogKindAccesslog,
-			SourceDN: ldapv1alpha1.AccesslogSuffix(sd.Name),
-		}
+	src := sd.Spec.Replication.SyncprovSessionlogSource
+	accesslog := sessionlogDecision{
+		Kind:     sessionlogKindAccesslog,
+		SourceDN: ldapv1alpha1.AccesslogSuffix(sd.Name),
 	}
+
+	// An EXPLICIT Accesslog outranks everything below, including
+	// syncprovSessionlog 0: the user named a source, which is a louder
+	// statement than a size of zero.
+	if src == ldapv1alpha1.SyncprovSessionlogSourceAccesslog {
+		return accesslog
+	}
+
 	ops := defaultSyncprovSessionlogOps
 	if sd.Spec.Replication.SyncprovSessionlog != nil {
 		ops = *sd.Spec.Replication.SyncprovSessionlog
 	}
 	if ops <= 0 {
+		// ADR-022's explicit "no session log at all". The default below must
+		// not reach past it and hand the user the thing they switched off —
+		// a default fills a silence, it does not overrule a statement.
 		return sessionlogDecision{Kind: sessionlogKindNone}
 	}
-	return sessionlogDecision{Kind: sessionlogKindInMemory, Ops: ops}
+
+	// UNSET now means Accesslog (ADR-034 amendment). The in-memory log does not
+	// survive a restart, so a consumer reconnecting after one falls outside the
+	// window and takes a full refresh it did not need; the journal is already
+	// on disk and already written. InMemory remains available by name, and is
+	// what to set if the journal is unusually small or the restart case does
+	// not matter.
+	if src == ldapv1alpha1.SyncprovSessionlogSourceInMemory {
+		return sessionlogDecision{Kind: sessionlogKindInMemory, Ops: ops}
+	}
+	return accesslog
 }
 
 // inMemoryOps is the in-memory half of a decision already in hand: the

@@ -293,7 +293,7 @@ for a migration the user experiences once either way.
 | ~~the version-string collision~~ | done — the revision token is derived from `SLAPTAIN_PATCHES` (`+slaptain<N>` / `+pure<N>`), asserted by a symmetric build gate; both arms built and measured. The `pure` default is no longer blocked |
 | ~~**default OpenLDAP version → 2.6**~~ | **withdrawn** — ADR-040 decision 8 reversed the same day; 2.7 stays. What flips is the default **flavour** to `pure` |
 | ~~accesslog `syncprov-checkpoint` on by default~~ | done — `olcSpCheckpoint: 1 1` converged onto every accesslog DB's syncprov overlay, `accesslogSyncprovCheckpoint: none` to opt out. Load-measured as its own arm: no throughput or latency cost, ~7% less replication headroom, on fast local storage. The e2e asserts it on every RW pod, so every run from here is a data point |
-| `syncprovSessionlogSource: Accesslog` by default | to build |
+| ~~`syncprovSessionlogSource: Accesslog` by default~~ | done — unset now resolves to Accesslog; `InMemory` by name for the old behaviour, and `syncprovSessionlog: 0` still wins. Lands at each pod's next restart (startup-only, ADR-034), so every upgraded cluster reports `StartupConfigConverged=False/RestartRequired` until then — expected, and said so in `UPGRADING.md` |
 
 One `UPGRADING.md` entry, one migration for anyone moving 0.4 → 0.5.
 

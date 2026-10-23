@@ -259,6 +259,17 @@ type DatabaseReplicationConfig struct {
 	// behind your back. A cluster's first generation of pods likewise does not
 	// carry the attribute; it runs the in-memory log until then, and one
 	// restart later the two are swapped.
+	//
+	// UNSET MEANS Accesslog since 0.5.0. The in-memory log does not survive a
+	// restart, so a consumer that reconnects after one is outside the window
+	// and takes a full-DIT refresh it did not need; the journal is already on
+	// disk and already written, so sourcing from it costs no additional write
+	// and survives. Set InMemory by name for the old behaviour.
+	//
+	// One interaction worth knowing: `syncprovSessionlog: 0` is ADR-022's "no
+	// session log at all" and this default does NOT reach past it — a default
+	// fills a silence, it does not overrule a statement. An EXPLICIT Accesslog
+	// does outrank a 0, because naming a source is the louder of the two.
 	// +kubebuilder:validation:Enum=InMemory;Accesslog
 	// +optional
 	SyncprovSessionlogSource string `json:"syncprovSessionlogSource,omitempty"`

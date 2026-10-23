@@ -267,10 +267,25 @@ func TestDeclaresStartupOnlyAttributes(t *testing.T) {
 	if !declaresStartupOnlyAttributes(accesslog) {
 		t.Error("a database sourcing its session log from its journal declares a startup-only attribute")
 	}
-	if declaresStartupOnlyAttributes(&ldapv1alpha1.SlapdDatabase{
+	// Since the ADR-034 amendment a database that says nothing is sourced from
+	// its journal, so it DOES declare a startup-only attribute — the condition
+	// is now the common case rather than the exception, and every pod carries
+	// the attribute once it has restarted. Asking for the in-memory log by
+	// name is what declares nothing.
+	if !declaresStartupOnlyAttributes(&ldapv1alpha1.SlapdDatabase{
 		ObjectMeta: metav1.ObjectMeta{Name: testDefaultDB},
 	}) {
-		t.Error("a default database declares no startup-only attribute")
+		t.Error("a default database now sources from its journal, which is startup-only")
+	}
+	if declaresStartupOnlyAttributes(&ldapv1alpha1.SlapdDatabase{
+		ObjectMeta: metav1.ObjectMeta{Name: testDefaultDB},
+		Spec: ldapv1alpha1.SlapdDatabaseSpec{
+			Replication: ldapv1alpha1.DatabaseReplicationConfig{
+				SyncprovSessionlogSource: ldapv1alpha1.SyncprovSessionlogSourceInMemory,
+			},
+		},
+	}) {
+		t.Error("an in-memory session log declares no startup-only attribute")
 	}
 
 	// Drift guard against the ConfigMap writer: the condition's "declared" and

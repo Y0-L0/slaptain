@@ -71,6 +71,44 @@ Running our patches is now a deliberate act, which is also what gives the
 rotation a real two-act opt-in: turn the feature on, *and* ask for a build that
 can express it.
 
+### The data database's session log is sourced from the journal by default
+
+`spec.replication.syncprovSessionlogSource` unset now means `Accesslog` where
+it meant `InMemory`. The in-memory session log does not survive a restart, so a
+consumer reconnecting after one falls outside the window and takes a full-DIT
+refresh it did not need. The journal is already on disk and already written.
+
+**This lands gradually, not at upgrade, and that is the part to plan for.** The
+attribute is startup-only (ADR-034): writing `olcSpSessionlogSource` to a
+running slapd is a double free in every released version, so the operator never
+writes it over LDAP. It reaches `cn=config` only through the init container's
+offline convergence at pod start.
+
+So after upgrading, every database will report
+
+```
+StartupConfigConverged=False/RestartRequired
+```
+
+naming the pods that have not restarted yet. **That is expected and is not an
+error** — the condition exists to say a restart is outstanding. Nothing
+restarts the pods for you, deliberately: restarting a provider fleet is a
+topology event at every peer. Each pod picks the change up at its next restart.
+
+Until then the pod keeps running its in-memory log, which is exactly what it
+did before, so there is no window in which it has neither.
+
+**To keep the old behaviour**, say so by name:
+
+```yaml
+spec:
+  replication:
+    syncprovSessionlogSource: InMemory
+```
+
+`syncprovSessionlog: 0` still means "no session log at all", and the new
+default does not override it.
+
 ### The accesslog database gets a syncprov checkpoint, and it is on by default
 
 Every accesslog DB's syncprov overlay now carries `olcSpCheckpoint: 1 1`. The

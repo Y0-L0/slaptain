@@ -327,3 +327,53 @@ looks at that entry offline.
 
 The field's documentation follows: asking for the source does not imply the
 in-memory log is absent, it **replaces** it, at the restart.
+
+## Amendment, 2026-10-23: the accesslog source becomes the default
+
+`SlapdDatabase.spec.replication.syncprovSessionlogSource` unset now resolves to
+`Accesslog` rather than `InMemory`. Nothing about the mechanism changes — it is
+still startup-only, still converged offline by the init container, still never
+written to a running slapd — only which value a database that says nothing
+gets.
+
+**Why.** The in-memory session log is lost at every restart. A consumer that
+reconnects afterwards is outside the window and falls back to a full-DIT
+refresh it did not need, which on a large directory is the expensive outcome
+this overlay exists to avoid. The journal is already on disk and already
+written for delta-syncrepl, so sourcing from it costs no additional write and
+survives the restart that loses the alternative.
+
+**Two things the default must not do**, both now pinned by tests:
+
+- **It must not override `syncprovSessionlog: 0`.** That is ADR-022's explicit
+  "no session log at all", and a default that reached past it would hand the
+  user the thing they switched off. A default fills a silence; it does not
+  overrule a statement. An *explicit* `Accesslog` does outrank a 0, because
+  naming a source is the louder of the two.
+- **It must not override an explicit `InMemory`**, which is now how the old
+  behaviour is requested.
+
+**The consequence R5 warned about, now arriving.** This ADR's "one customer per
+change" rule kept `olcDbMaxSize` and `olcDbEnvFlags` out of the startup-only
+table so that the mechanism would have exactly one user while it was new. The
+mechanism is no longer new, and this amendment takes it from "one database in a
+lab opted in" to **every database on every cluster**. What that exercises for
+the first time at scale is not the converger but the CONDITION: until now
+`StartupConfigConverged=False/RestartRequired` was the exception, and after
+this release it is what every upgraded cluster reports until its pods restart.
+
+That is the designed behaviour and it is still right — the operator must not
+restart a provider fleet behind the user's back (R3), because that is a
+topology event at every peer. But a condition that is False on every cluster
+for an unbounded period is a new thing for this project, and the honest reading
+is that it will be ignored if it stays False long enough. `UPGRADING.md` says
+plainly that it is expected; whether the condition wants a distinct reason for
+"outstanding because the default moved" rather than "outstanding because you
+edited something" is left open, because inventing a second reason before anyone
+has been confused by the first is speculation.
+
+**No window with neither log.** A pod that has not restarted keeps running its
+in-memory log, exactly as before; `planSessionlog` already holds the in-memory
+log in place until the replacement has actually arrived. The swap is one
+offline record at the restart, and the measured "wasteful operation" warning
+for carrying both stays absent.

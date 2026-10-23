@@ -295,7 +295,9 @@ for a migration the user experiences once either way.
 | ~~accesslog `syncprov-checkpoint` on by default~~ | done — `olcSpCheckpoint: 1 1` converged onto every accesslog DB's syncprov overlay, `accesslogSyncprovCheckpoint: none` to opt out. Load-measured as its own arm: no throughput or latency cost, ~7% less replication headroom, on fast local storage. The e2e asserts it on every RW pod, so every run from here is a data point |
 | ~~`syncprovSessionlogSource: Accesslog` by default~~ | done — unset now resolves to Accesslog; `InMemory` by name for the old behaviour, and `syncprovSessionlog: 0` still wins. Lands at each pod's next restart (startup-only, ADR-034), so every upgraded cluster reports `StartupConfigConverged=False/RestartRequired` until then — expected, and said so in `UPGRADING.md` |
 
-One `UPGRADING.md` entry, one migration for anyone moving 0.4 → 0.5.
+One `UPGRADING.md` entry, one migration for anyone moving 0.4 → 0.5. The
+`## v0.5.0` CHANGELOG section is written (verified against publish.yml's own
+awk extraction, so the release will not ship noteless).
 
 ### Mesh cycle, 2026-10-23 — the first run that did not end in a storm
 

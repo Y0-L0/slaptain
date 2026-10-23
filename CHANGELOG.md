@@ -8,6 +8,145 @@ Headings are the git tag verbatim (`## v0.4.0`), with the `v`. Everything
 downstream of the tag — images, chart `version`, chart `appVersion` — carries
 the bare version; see `docs/VERSIONING.md`.
 
+## v0.5.0
+
+Three defaults move in this release. Two of them change which binary your pods
+run, and one of them is the answer to v0.4.0's known issue.
+[`docs/UPGRADING.md`](docs/UPGRADING.md) has the per-change detail and the
+opt-outs; this is what each one is for.
+
+### The accesslog database gets a syncprov checkpoint — ITS#9398
+
+`olcSpCheckpoint: 1 1` is now written to every accesslog database's syncprov
+overlay, and **converged onto overlays that already exist** — which is all of
+them, because the attribute has never been written before.
+
+This addresses the precondition for the stale-cookie storm listed as a known
+issue in v0.4.0. A log database's `contextCSN` is written only by a checkpoint
+or a clean shutdown, while its `minCSN` is durable from the first write
+carrying a serverID the log has not seen; an unclean stop in between leaves
+`minCSN` naming a serverID `contextCSN` has never heard of, and that pod then
+refuses **every** consumer of that log, permanently.
+
+**What is established, and what is not.** The controls are unambiguous — with
+`100 5` a `SIGKILL` produced a 1473/s storm, with `1 1` it produced none. Two
+consecutive three-site mesh cycles have now run clean, against six prior
+reproductions. That is a series starting, not a proof; the failure is a race
+and a run that does not hit it proves nothing on its own.
+
+**`1 1` is not a dial.** The checkpoint has to fire on the log entry's own
+operation, so that `contextCSN` reaches disk before `minCSN` gains the new
+serverID. Any larger value reopens the window between two adjacent operations,
+which is exactly what `100 5` measured.
+
+**Cost**, measured on a load harness as its own arm: no throughput or latency
+penalty — 270,277 ops/s at p99 16.9 ms. Replication stays current to
+255,903 ops/s, where the same setup without the checkpoint stays current to
+roughly 7 % higher before lag reaches one second. A ceiling moving at a quarter
+of a million operations per second, on bare metal with fast local storage.
+Slower or shared storage is not measured, and
+`accesslogSyncprovCheckpoint: none` is the way out.
+
+### Breaking: the default slapd image is now the PURE build
+
+The unsuffixed `slapd`/`slapd-init` tags used to carry slaptain's behaviour
+patches. They now carry the pure build — the same upstream OpenLDAP 2.7.1, from
+the same packaging fork, with none of our patches. The patched pair moves to
+`<tag>-ol2.7.1-slaptain`.
+
+**The tag string does not change, so an unpinned cluster rolls onto a different
+binary on operator upgrade without its pod template looking any different.**
+
+Only clusters using `spec.rotation` with a phase-staggering mode are affected:
+the per-pod purge phase is a third field of `olcAccessLogPurge` that upstream
+slapd rejects. The journal stays bounded, the pods purge in step instead of on
+the grid, and the operator says so with
+`AccesslogPurgeConverged=False/PurgePhaseUnsupported`. To keep today's
+behaviour, ask for the flavour by name:
+
+```yaml
+spec:
+  images:
+    select:
+      flavour: slaptain
+```
+
+Nobody should have to run a patched slapd in production without having chosen
+to, and until now everybody did without being told.
+
+### New: `spec.images.select` — pick a build by what it governs
+
+```yaml
+spec:
+  images:
+    select:
+      storageFormat: lmdb1.0   # what can open your volumes — lmdb1.0 | lmdb0.9
+      flavour: pure            # whether you run our patches — pure | slaptain
+```
+
+Four slapd/slapd-init pairs, selected by two axes named for what they decide
+rather than by a tag you have to decode. It drives **both** images from one
+declaration, so ADR-021's "pin both or neither" stops being a rule you can
+violate. An explicit `spec.images.slapd.tag` still wins and is used verbatim.
+
+Keyed on the storage format rather than a version, deliberately: newer slapd
+builds keep shipping under the same selection, and the only thing that can
+strand a volume is the axis you pinned yourself.
+
+`slapd -VV` now discriminates the flavours — a patched build reports a version
+ending in `+slaptain<N>`, a pure one `+pure<N>`. Before this release both
+reported the same string, which made the `PurgePhaseUnsupported` message's own
+advice unfollowable.
+
+### The session log is sourced from the journal by default
+
+`SlapdDatabase.spec.replication.syncprovSessionlogSource` unset now means
+`Accesslog` where it meant `InMemory`. The in-memory session log does not
+survive a restart, so a consumer reconnecting after one falls outside the
+window and takes a full-DIT refresh it did not need; the journal is already on
+disk and already written.
+
+**This lands gradually, not at upgrade.** The attribute is startup-only —
+writing it to a running slapd is a double free in every released version — so
+it reaches `cn=config` only through the init container at pod start. Every
+database will report `StartupConfigConverged=False/RestartRequired` until its
+pods restart. **That is expected, not an error**, and nothing restarts the pods
+for you: restarting a provider fleet is a topology event at every peer. Until
+then the pod keeps its in-memory log, so there is no window with neither.
+
+`syncprovSessionlogSource: InMemory` keeps the old behaviour;
+`syncprovSessionlog: 0` still means "no session log at all" and is not
+overridden.
+
+### New: `spec.rotation.mode`
+
+The purge rotation's two halves — staggering each pod's purge, and moving the
+write endpoint off the pod that is purging — are separately settable:
+`PurgeAndWrite` (unset, and the only shape measured end to end), `PurgeOnly`,
+and `WriteOnly`, which needs no patched image because repointing a Service is
+not something slapd has to understand. The latter two are tier 2 and carry less
+evidence; [`docs/PURGE-ROTATION.md`](docs/PURGE-ROTATION.md) states which
+quantity was measured for each.
+
+### Also in this release
+
+- **ADR-039** (two tiers of support): "supported" was doing two jobs — *have we
+  validated this* and *will the operator produce a valid cluster if you set it*.
+  Conflating them withholds a knob rather than labelling it. Tier-2 surfaces are
+  now labelled where they are offered, and the evidence travels with the knob.
+- **ADR-040** (data-plane image identity) and **ADR-041** (a pod says what
+  format its volume is). ADR-041 is designed, not built: a wrong
+  `storageFormat` still crashloops with slapd's own `MDB_INVALID: File is not
+  an LMDB file … Restore from backup!`, which is wrong and destructive advice
+  on a healthy volume, and the stuck pod then blocks its own replacement.
+  `docs/OPENLDAP-VERSIONS.md` says so plainly and gives the manual recovery.
+- **ITS#9398, corrected**: the purge is not what opens the window. A sweep that
+  matches nothing writes nothing; `accesslog_response` advances `minCSN` on the
+  first logged write carrying a new serverID, with no sweep involved. The
+  upstream-facing reproduction document is corrected throughout.
+- The README explains the four images, the selector and the purge rotation, and
+  no longer justifies OpenLDAP 2.7 with a reason that had been retracted.
+
 ## v0.4.0
 
 ### Breaking: `accesslogPurge` becomes an object

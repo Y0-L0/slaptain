@@ -297,6 +297,33 @@ for a migration the user experiences once either way.
 
 One `UPGRADING.md` entry, one migration for anyone moving 0.4 → 0.5.
 
+### Mesh cycle, 2026-10-23 — the first run that did not end in a storm
+
+Three sites, `sha-02e48b2`: **99 passed, 1 failed, 19 skipped.**
+
+The number this release exists for: **zero stale-cookie lines.** The
+`dataloss_recovery` spec wipes a pod's PVCs and lets replication restore it —
+the scenario that reproduced ITS#9398 six times, at 2473, 9237, 9358, 4563,
+5991 and 6582 lines — and reported `total=0` across all three pods.
+`slctl inspect accesslog-mincsn` then read all three sites clean: 6 accesslog
+readings each, every `minCSN` sid tracked in `contextCSN`, at all 18
+pod×database pairs.
+
+**Data point one, not proof.** The value of shipping the default is that every
+run from here adds to the series without anyone doing anything.
+
+First mesh exposure for three other things in this release, all green: pure 2.7
+as the DEFAULT build (cycle B validated the pair, never as the default), the
+image selector, and the `+pure3` / `+slaptain3` version split on published
+images.
+
+The single failure was a TEST defect, not a product one, and the new default is
+what exposed it: `phaseRefused` read `AccesslogPurgeConverged` from the
+SlapdCluster, where that condition never appears. On a patched build the spec's
+other branch wins the race and hides it; this was the first run where refusal
+was the only possible outcome. Fixed and verified red/green against the live
+mesh. The operator's own reporting was correct throughout.
+
 ### The two constraints that are real
 
 **1. ~~The born-with backfill must record the OLD default.~~ GONE, and with it

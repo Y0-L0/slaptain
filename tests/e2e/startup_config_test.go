@@ -245,8 +245,14 @@ var _ = Describe("startup-only configuration", Label("startup-config"), Ordered,
 	}, NodeTimeout(25*time.Minute))
 
 	It("takes the attribute off the disk when the field is dropped", func(ctx SpecContext) {
-		By("restoring the fixture database's declaration")
-		setSessionlogSource(ctx, origSource, origOps)
+		// InMemory BY NAME, not the fixture's original value. Since the
+		// ADR-034 amendment an unset source means Accesslog, so "drop the
+		// field" no longer expresses "want no startup-only configuration" —
+		// it asks for the very attribute this spec is about to assert is gone.
+		// InMemory is how that is said now, and it is what makes the
+		// NoStartupOnlyAttributes assertion below reachable at all.
+		By("asking for the in-memory log by name, which declares nothing startup-only")
+		setSessionlogSource(ctx, ldapv1alpha1.SyncprovSessionlogSourceInMemory, origOps)
 
 		By("asserting the ConfigMap key is still present and now EMPTY")
 		// An ABSENT key means "unmanaged" to the converger and would leave the

@@ -92,6 +92,7 @@ var _ = Describe("syncprov sessionlog", Label("sessionlog"), Ordered, func() {
 			Expect(ok).To(BeTrue(), "pod %s has no data database %q", pod, dataSuffix)
 
 			dn, values := syncprovSessionlog(conn, dataDB.dn)
+			_, source := syncprovAttr(conn, dataDB.dn, "olcSpSessionlogSource")
 			conn.Close()
 
 			Expect(dn).NotTo(BeEmpty(),
@@ -102,8 +103,24 @@ var _ = Describe("syncprov sessionlog", Label("sessionlog"), Ordered, func() {
 					"pod %s: syncprovSessionlog is 0, so %s must carry no olcSpSessionlog", pod, dn)
 				continue
 			}
+
+			// EXACTLY ONE session log, which is ADR-034's actual invariant —
+			// not "the in-memory one", which is only where the database starts.
+			// Since the ADR-034 amendment an unset source means Accesslog, so a
+			// pod that has restarted since its database was created carries the
+			// journal source instead, and the in-memory log is legitimately
+			// gone. Asserting the in-memory log unconditionally would make this
+			// spec depend on whether some earlier spec happened to restart the
+			// fleet.
+			if len(source) > 0 {
+				Expect(values).To(BeEmpty(),
+					"pod %s: %s is sourced from %v, so the in-memory olcSpSessionlog must "+
+						"be gone — slapd must never be given both (ADR-034)", pod, dn, source)
+				continue
+			}
 			Expect(values).To(ConsistOf(wantOps),
-				"pod %s: %s must carry olcSpSessionlog %s (ADR-022)", pod, dn, wantOps)
+				"pod %s: %s has no session-log source, so it must carry the in-memory "+
+					"olcSpSessionlog %s (ADR-022)", pod, dn, wantOps)
 		}
 	}, NodeTimeout(5*time.Minute))
 

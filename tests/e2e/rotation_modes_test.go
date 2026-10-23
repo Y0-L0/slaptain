@@ -132,14 +132,28 @@ var _ = Describe("ADR-037: the rotation's halves split",
 		// from the image tag or the version string — a tag is a label somebody
 		// chose, and a pure build reports the same `slapd -VV` as a patched one
 		// (docs/BACKLOG.md), so neither distinguishes them. ADR-040 decision 6.
+		//
+		// AccesslogPurgeConverged is a SlapdDATABASE condition, not a
+		// SlapdCluster one. This used to read the cluster's conditions, where
+		// that type never appears, so the branch could not be taken: on a
+		// patched build the other branch passed and hid it, and the first run
+		// where the refusal was the ONLY possible outcome — the mesh cycle on
+		// 2026-10-23, after pure became the default — timed out reporting
+		// "neither outcome arrived". A check that cannot fire reads exactly
+		// like a condition that never happened.
 		phaseRefused := func(ctx SpecContext) bool {
-			sc := &ldapv1alpha1.SlapdCluster{}
-			if err := crdClient.Get(ctx, nsName(namespace, "slapd"), sc); err != nil {
+			list := &ldapv1alpha1.SlapdDatabaseList{}
+			if err := crdClient.List(ctx, list); err != nil {
 				return false
 			}
-			for _, c := range sc.Status.Conditions {
-				if c.Type == "AccesslogPurgeConverged" && c.Reason == "PurgePhaseUnsupported" {
-					return true
+			for _, sd := range list.Items {
+				if sd.Namespace != namespace || sd.Spec.ClusterRef != "slapd" {
+					continue
+				}
+				for _, c := range sd.Status.Conditions {
+					if c.Type == "AccesslogPurgeConverged" && c.Reason == "PurgePhaseUnsupported" {
+						return true
+					}
 				}
 			}
 			return false

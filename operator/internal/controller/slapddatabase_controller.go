@@ -2245,10 +2245,68 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 		addReq.Attribute(attrOlcOverlay, []string{overlaySyncprov})
 		addReq.Attribute("olcSpNoPresent", []string{olcTrue})
 		addReq.Attribute("olcSpReloadHint", []string{olcTrue})
+		if cp := desiredAccesslogSyncprovCheckpoint(sd); cp != "" {
+			addReq.Attribute(attrOlcSpCheckpoint, []string{cp})
+		}
 		if err := guardedAdd(conn, addReq); err != nil {
 			if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
 				return fmt.Errorf("add syncprov overlay to accesslog DB: %w", err)
 			}
+		}
+	}
+
+	// Converge the checkpoint onto overlays that ALREADY exist. Without this
+	// the default is worth nothing: the overlay above is only configured when
+	// it is created, so every accesslog DB in existence carries a bare
+	// syncprov overlay and would keep the ITS#9398 exposure forever. The data
+	// DB's checkpoint learned the same lesson (ADR-024 R4) — it used to be
+	// written only into the creation request, and edits were silently ignored.
+	return r.ensureAccesslogSyncprovCheckpoint(ctx, conn, host, dbDN, sd)
+}
+
+// ensureAccesslogSyncprovCheckpoint converges olcSpCheckpoint on an accesslog
+// DB's syncprov overlay. One search, at most one write; a no-op once the value
+// matches, which is the steady state (ADR-033's "zero writes at rest").
+func (r *SlapdDatabaseReconciler) ensureAccesslogSyncprovCheckpoint(
+	ctx context.Context, conn *ldap.Conn, host, dbDN string, sd *ldapv1alpha1.SlapdDatabase,
+) error {
+	log := logf.FromContext(ctx)
+	overlayDN := "olcOverlay=syncprov," + dbDN
+
+	res, err := conn.Search(ldap.NewSearchRequest(
+		overlayDN, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 0, false,
+		"(objectClass=*)", []string{attrOlcSpCheckpoint}, nil,
+	))
+	if err != nil {
+		// The overlay may legitimately not be there yet on this pod; the next
+		// pass creates it, with the checkpoint in the creation request.
+		if ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchObject) {
+			return nil
+		}
+		return fmt.Errorf("read %s on accesslog overlay %s: %w", attrOlcSpCheckpoint, overlayDN, err)
+	}
+	if len(res.Entries) == 0 {
+		return nil
+	}
+
+	action, value := planOverlayAttr(res.Entries[0].GetAttributeValues(attrOlcSpCheckpoint),
+		desiredAccesslogSyncprovCheckpoint(sd))
+	switch action {
+	case overlayAttrNoop:
+		return nil
+	case overlayAttrSet:
+		log.Info("converging accesslog syncprov checkpoint", "host", host, "dn", overlayDN, "value", value)
+		mod := ldap.NewModifyRequest(overlayDN, nil)
+		mod.Replace(attrOlcSpCheckpoint, []string{value})
+		if err := guardedModify(conn, mod); err != nil {
+			return fmt.Errorf("set %s on %s: %w", attrOlcSpCheckpoint, overlayDN, err)
+		}
+	case overlayAttrRemove:
+		log.Info("removing accesslog syncprov checkpoint", "host", host, "dn", overlayDN)
+		mod := ldap.NewModifyRequest(overlayDN, nil)
+		mod.Delete(attrOlcSpCheckpoint, nil)
+		if err := guardedModify(conn, mod); err != nil {
+			return fmt.Errorf("remove %s on %s: %w", attrOlcSpCheckpoint, overlayDN, err)
 		}
 	}
 	return nil
@@ -4156,4 +4214,42 @@ func ensureOverlayAttr(
 		return fmt.Errorf("set %s on %s: %w", attr, overlayDN, err)
 	}
 	return nil
+}
+
+// accesslogSyncprovCheckpointDefault is the checkpoint the operator writes to
+// every accesslog DB's syncprov overlay unless told otherwise (ADR-022
+// amendment / ITS#9398).
+//
+// "1 1" and not a cheaper value, deliberately: in accesslog_response the log
+// entry is ADDed before minCSN is modified, and that entry carries the CSN of
+// the write. With si_chkops = 1 the checkpoint therefore fires on the log
+// entry's own operation (syncprov.c:2607, :2615) and contextCSN reaches disk
+// carrying the new serverID BEFORE minCSN gains it. With any larger value the
+// two come apart for the span between two adjacent operations, and an unclean
+// stop in that span is the ITS#9398 fatal state. Measured: "100 5" stormed at
+// 1473/s after a SIGKILL, "1 1" did not (docs/its9398/).
+const accesslogSyncprovCheckpointDefault = "1 1"
+
+// desiredAccesslogSyncprovCheckpoint resolves
+// spec.replication.accesslogSyncprovCheckpoint.
+//
+// The opposite default to desiredSyncprovCheckpoint, which is NOT an
+// inconsistency: an unwritten checkpoint on a DATA DB is a performance trade,
+// while on a LOG DB it is the storm precondition. The sentinel still opts out
+// entirely, because a user who has measured the write cost and prefers the
+// exposure is making a choice the operator should not override — ADR-024's
+// rule that a field which cannot be honoured is reported, never ignored, cuts
+// both ways.
+func desiredAccesslogSyncprovCheckpoint(sd *ldapv1alpha1.SlapdDatabase) string {
+	if sd == nil {
+		return accesslogSyncprovCheckpointDefault
+	}
+	v := strings.TrimSpace(sd.Spec.Replication.AccesslogSyncprovCheckpoint)
+	if strings.EqualFold(v, noneSentinel) {
+		return ""
+	}
+	if v == "" {
+		return accesslogSyncprovCheckpointDefault
+	}
+	return v
 }

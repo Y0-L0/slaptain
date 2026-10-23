@@ -151,6 +151,43 @@ type DatabaseReplicationConfig struct {
 	// created, so edits were silently ignored — ADR-024 R4.)
 	// +optional
 	SyncprovCheckpoint string `json:"syncprovCheckpoint,omitempty"`
+	// accesslogSyncprovCheckpoint sets the syncprov checkpoint on this
+	// database's *accesslog* DB (olcSpCheckpoint on cn=accesslog-<name>).
+	// Same format as syncprovCheckpoint: "<ops> <minutes>".
+	//
+	// Unlike the data DB's, this one DEFAULTS ON, at "1 1", because its absence
+	// is a correctness cliff rather than a performance trade — it is the
+	// precondition for the ITS#9398 stale-cookie storm, in which a provider
+	// refuses EVERY consumer of a log database, permanently, after an unclean
+	// stop.
+	//
+	// Why: a log DB's contextCSN is written only by a checkpoint or a clean
+	// shutdown, while its minCSN is durable from the first write carrying a
+	// serverID the log has not seen. An unclean stop in between leaves minCSN
+	// naming a serverID that contextCSN has never heard of, and
+	// syncprov_findcsn then fails for every consumer. Measured both ways in
+	// docs/its9398/: "100 5" stormed at 1473/s after a SIGKILL, "1 1" did not.
+	//
+	// "1 1" IS NOT A DIAL — do not tune it down to save writes. In
+	// accesslog_response the log entry is added BEFORE minCSN is modified, so
+	// chkops=1 checkpoints on that very operation and contextCSN reaches disk
+	// first. Any larger value reopens the window between two adjacent
+	// operations, which is exactly what "100 5" measured.
+	//
+	// Cost, measured on a load harness as its own arm: it does NOT cost
+	// throughput or latency (270,277 ops/s at p99 16.9 ms, never reaching the
+	// 20 ms criterion). It costs replication headroom — one second of
+	// replication lag arrives about 7% earlier than on the baseline arms.
+	// Measured on bare metal with fast local storage; slower or shared storage
+	// is not measured and is the case this field's opt-out exists for.
+	//
+	// The explicit sentinel "none" removes the attribute entirely, restoring
+	// the pre-0.5.0 behaviour and with it the storm exposure. Converged on
+	// every reconcile, so the default reaches accesslog overlays that already
+	// exist — which is every one of them, since the attribute has never been
+	// written before.
+	// +optional
+	AccesslogSyncprovCheckpoint string `json:"accesslogSyncprovCheckpoint,omitempty"`
 	// syncprovSessionlog sizes the syncprov overlay's in-memory session log on
 	// this database's *data* DB, in operations (olcSpSessionlog). The session
 	// log lets a reconnecting consumer whose cookie is still inside the window

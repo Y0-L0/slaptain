@@ -130,6 +130,53 @@ var _ = Describe("syncprov sessionlog", Label("sessionlog"), Ordered, func() {
 				pod, dn)
 		}
 	}, NodeTimeout(5*time.Minute))
+
+	// The ITS#9398 storm precondition, asserted at its cause rather than at its
+	// symptom. A log DB's contextCSN is written only by a checkpoint or a clean
+	// shutdown, while its minCSN is durable from the first write carrying a
+	// serverID the log has not seen; an unclean stop in between is the fatal
+	// state, permanently, for every consumer of that log.
+	//
+	// This is the assertion that turns every subsequent suite run into a data
+	// point for the default. It is deliberately about the CONFIGURATION rather
+	// than about storm lines: a run that happens not to storm proves nothing,
+	// whereas a pod whose accesslog overlay has lost its checkpoint is exposed
+	// whether or not this particular run was unlucky.
+	It("gives the accesslog database's syncprov a checkpoint, on every RW pod", func(ctx SpecContext) {
+		for _, pod := range rwPods {
+			By("inspecting cn=config on " + pod)
+			conn := dialPodConfigEventually(ctx, pod)
+
+			logDB, ok := findMdb(observedMdbDatabases(conn), logSuffix)
+			if !ok {
+				conn.Close()
+				Skip(fmt.Sprintf("pod %s has no accesslog DB %q — the database is not delta-sync",
+					pod, logSuffix))
+			}
+
+			dn, values := syncprovAttr(conn, logDB.dn, "olcSpCheckpoint")
+			conn.Close()
+
+			Expect(dn).NotTo(BeEmpty(),
+				"pod %s: accesslog DB %q has no syncprov overlay", pod, logSuffix)
+			Expect(values).To(HaveLen(1),
+				"pod %s: %s must carry exactly one olcSpCheckpoint — without it the log DB's "+
+					"contextCSN is never written and an unclean stop leaves this pod refusing "+
+					"every consumer forever (ITS#9398)", pod, dn)
+
+			// chkops MUST be 1. Any larger value reopens the window between the
+			// log entry's ADD and the minCSN modify that follows it, which is
+			// exactly what the `100 5` control measured storming.
+			fields := strings.Fields(values[0])
+			Expect(fields).To(HaveLen(2), "pod %s: %s olcSpCheckpoint %q is not \"<ops> <minutes>\"",
+				pod, dn, values[0])
+			Expect(fields[0]).To(Equal("1"),
+				"pod %s: %s olcSpCheckpoint is %q — the ops half must be 1. The checkpoint has to "+
+					"fire on the log entry's own operation, so that contextCSN reaches disk before "+
+					"minCSN gains the new serverID; a larger value reopens the window between two "+
+					"adjacent operations", pod, dn, values[0])
+		}
+	}, NodeTimeout(5*time.Minute))
 })
 
 // syncprovSessionlog returns the DN of the syncprov overlay under dbDN and its

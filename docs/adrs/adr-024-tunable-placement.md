@@ -477,3 +477,91 @@ mapping back to the fields that produced it. That mapping belongs next to the
 fields and in `docs/TUNING.md` — not only here, where nobody reads it at 3am.
 
 R5 is unchanged: unset still means slaptain's default, now per quantity.
+
+## Amendment, 2026-10-23: the accesslog DB's checkpoint defaults ON, and its sibling still does not
+
+A second `olcSpCheckpoint` enters the API, on the *accesslog* database's
+syncprov overlay, and it inverts the rule its sibling follows. Recorded here
+because the two are one `grep olcSpCheckpoint` apart and the reason they differ
+is invisible at either call site.
+
+**The data DB's checkpoint has no operator default** and that stands: an
+unwritten `olcSpCheckpoint` there means slapd's own behaviour, which is a
+performance trade. R4's "unset means slaptain's default rather than slapd's"
+yields to the fact that slaptain has no opinion worth imposing.
+
+**The accesslog DB's checkpoint defaults to `1 1`**, because its absence is not
+a trade, it is a correctness cliff. A log DB's `contextCSN` is written only by a
+checkpoint or a clean shutdown, while its `minCSN` is durable from the first
+write carrying a serverID the log has not seen. An unclean stop between those
+two leaves `minCSN` naming a serverID `contextCSN` has never heard of, and
+`syncprov_findcsn` then refuses **every** consumer of that log, permanently.
+That is ITS#9398, it is upstream's, it is fixed in no release, and until now
+every accesslog DB slaptain ever created carried a bare syncprov overlay.
+
+Measured in `docs/its9398/`: `100 5` stormed at 1473/s after a `SIGKILL`,
+`1 1` did not.
+
+### `1 1` is not a dial
+
+The value cannot be tuned down to save writes without losing the property, and
+this is the part a future reader will get wrong. In `accesslog_response` the
+log entry is ADDed *before* `minCSN` is modified, and that entry carries the
+write's CSN — so with `si_chkops = 1` the checkpoint fires on the log entry's
+own operation (`syncprov.c:2607`, `:2615`) and `contextCSN` reaches disk
+carrying the new serverID **before** `minCSN` gains it. With any larger value
+the two come apart for the span between two adjacent operations, and a crash in
+that span is the fatal state. It is an ordering property, not a probability one.
+
+The e2e asserts the ops half is exactly `1`, with that reasoning in the failure
+message.
+
+### What this costs — measured, and not where you would expect
+
+The mechanism suggests an expensive default: a `contextCSN` write per logged
+operation on the accesslog environment, whose single LMDB writer also takes
+every client write (ADR-037). A dedicated load harness measured `1 1` on the
+accesslog DB's syncprov overlay as its own arm, and the shape is not that.
+
+**It does not cost throughput or latency.** The arm ran to 270,277 ops/s with
+p99 at 16.9 ms, never reaching the 20 ms criterion — read on latency alone the
+run has no knee, it simply ends.
+
+**It costs replication headroom, and loses that first.** The same arm's CSN
+spread reached 13.4 s, and it crossed one second of replication lag at
+255,903 ops/s — about **7 % below** where the baseline arms cross it. So the
+configuration does not buy its safety with throughput; it buys it with the rate
+at which the mesh can still keep up.
+
+That 7 % is the honest number to quote, and quoting only the throughput result
+would be the more flattering half of a measurement that has two. It also
+carries a condition: this was bare metal with fast local storage. Storage that
+is slower, or shared, has not been measured and is exactly the case where the
+opt-out below earns its place.
+
+The measurement also explains why nobody saw this before: every ramp before
+2026-10-16 was measuring the accesslog purge rather than the server, because
+the purge stalls the whole workload on a fixed cycle and a ramp tips when a
+purge lands rather than when the server saturates.
+
+Shipping it is then the alpha posture ADR-040 decision 8 already stated — a
+choice made on today's evidence rather than a conclusion waiting on more of
+it — with the difference that the evidence here is a load run rather than a
+hope. The cost is bounded, reversible in one edit, and paid in a dimension the
+storm takes away entirely.
+
+### It converges, which is the whole point
+
+The accesslog syncprov overlay was configured at creation only, so no existing
+database has ever had this attribute. A default that applied to new overlays
+alone would leave every running cluster exposed forever. The operator therefore
+converges it on every reconcile — the same lesson R4 already recorded for the
+data DB's checkpoint, which used to be written only into the creation request
+and silently ignored edits.
+
+### The escape hatch is real
+
+`accesslogSyncprovCheckpoint: none` removes the attribute. A user who has
+measured the write cost on their own workload and prefers the exposure is
+making a choice the operator should not override; R4's rule that a field which
+cannot be honoured is reported rather than ignored cuts both ways.

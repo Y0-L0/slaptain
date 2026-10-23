@@ -71,6 +71,42 @@ Running our patches is now a deliberate act, which is also what gives the
 rotation a real two-act opt-in: turn the feature on, *and* ask for a build that
 can express it.
 
+### The accesslog database gets a syncprov checkpoint, and it is on by default
+
+Every accesslog DB's syncprov overlay now carries `olcSpCheckpoint: 1 1`. The
+operator converges it on every reconcile, so it reaches overlays that already
+exist — which is all of them: the attribute has never been written before.
+
+**Why this is on rather than offered.** A log DB's `contextCSN` is written only
+by a checkpoint or a clean shutdown, while its `minCSN` is durable from the
+first write carrying a serverID the log has not seen. An unclean stop between
+those two leaves `minCSN` naming a serverID `contextCSN` has never heard of,
+and the pod then refuses **every** consumer of that log, permanently, with
+`sync cookie is stale`. That is upstream's ITS#9398, fixed in no release, and
+it is the failure this project has hit most often.
+
+**What it costs**, measured on a load harness as its own arm: no throughput and
+no latency cost (270,277 ops/s at p99 16.9 ms), but about **7% less replication
+headroom** — one second of replication lag arrives 7% earlier than without it.
+Measured on bare metal with fast local storage. **Slower or shared storage is
+not measured**, and if your write path is storage-bound this is the knob to
+look at first.
+
+**To opt out:**
+
+```yaml
+spec:
+  replication:
+    accesslogSyncprovCheckpoint: none
+```
+
+That removes the attribute and restores the pre-0.5.0 behaviour — including the
+ITS#9398 exposure. Any explicit value is used verbatim, but **do not tune the
+ops half above 1**: the checkpoint has to fire on the log entry's own operation
+so that `contextCSN` reaches disk before `minCSN` gains the new serverID. A
+larger value reopens the window between two adjacent operations, which is what
+the `100 5` control measured storming.
+
 ---
 
 ## v0.4.0 — ADR-024 R6: `accesslogPurge` becomes an object, and a stored string stops the operator

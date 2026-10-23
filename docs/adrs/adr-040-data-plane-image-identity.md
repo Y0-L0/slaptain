@@ -558,3 +558,88 @@ upstream's and not ours.
 - ADR-039 — which tier a given image is offered in.
 - ADR-013 — an operator upgrade must not roll or break a running cluster;
   decision 4 is what keeps a default move inside that rule.
+
+## Amendment, 2026-10-23: the selector is built, and it sits beside the images rather than inside one
+
+The selector landed. Three things the amendment of 2026-10-22 specified were
+changed on contact with the code, and one it did not specify had to be decided.
+
+### It is `spec.images.select`, not `spec.images.slapd.select`
+
+The amendment's YAML put it under `slapd`. Its own rationale argues against
+that in the next paragraph: *"It also drives **both** images… one selector, one
+matched pair."* A field that governs two images should not live inside one of
+them — `kubectl explain slapdcluster.spec.images.slapd.select` describing
+something that also changes the init image is a surprise, and `kubectl explain`
+is what ADR-039 says people actually read.
+
+So it is a sibling of `slapd`, `init` and `exporter`. The rationale was right
+and the example was a draft; this records which one won.
+
+### An explicit tag wins, and keeps its exact value
+
+Not stated before and it matters, because the alternative is defensible:
+appending the selector's suffix to a pinned tag would make the selector
+authoritative over every image. It is not. Pinning an artifact means **that**
+artifact, and rewriting someone's pin would quietly turn a pin into a
+suggestion. A user who pins *and* selects has said two things, and the more
+specific one wins — the same precedence `repository` already had.
+
+### Every data-plane call site goes through one resolver
+
+Not an implementation detail: it is the mechanism behind "pin both or neither".
+`dataPlaneImage` is the only way to name a slapd or slapd-init image, so the
+StatefulSet's two containers, the mkdir Jobs, the backup Job and the restore
+Job cannot diverge by someone adding a sixth call site that forgets the
+selector.
+
+The Jobs are the ones that would have been missed, and the failure would not
+have been cosmetic: the backup Job runs `slapcat` and the restore Job runs
+`slapadd` **against the cluster's own volume**. On a cluster that selected
+`lmdb0.9`, an unsuffixed init image cannot open what it was pointed at. The
+selector is a compatibility axis, so every tool that touches the volume has to
+be on the same side of it.
+
+### The default flavour flip ships WITH the selector, and that forced the alias
+
+The amendment left the flip to a later step, behind two prerequisites that are
+now met (a validated pure pair; the version-string collision fixed). Shipping
+it here rather than later was a deliberate choice, and it had a consequence the
+execution order had not drawn out: **a `pure` default is only true if the
+unsuffixed tag is the pure build.** Otherwise the operator's default resolves
+either to a tag that is not published at all — an `ImagePullBackOff` for
+everyone who said nothing — or to a patched image wearing a `pure` label.
+
+So decision 2's alias inversion is not a separate later step after all; it is
+what makes the default honest, and it landed with it. The patched pair is now
+`<tag>-ol2.7.1-slaptain` and is in `all` and `push`, because the operator can
+resolve to it and an unpublished cell is a defect waiting for whoever selects
+it.
+
+One consequence worth stating because it is counter-intuitive: the flip
+**changes no rendered pod template**. The default resolves to the same tag
+string as before, so the golden templates stay byte-identical and ADR-013's
+rule is satisfied textually. What changes is which build that tag carries — a
+build and publish change, not a reconcile one. That is also why it needs an
+`UPGRADING.md` entry rather than a condition: nothing in the cluster's own
+state will look different.
+
+### What is still open
+
+- **Decision 1's tag scheme is only half applied.** The 2.7 line is in the new
+  form (`-ol2.7.1-slaptain`, and the unsuffixed alias); the 2.6 line still uses
+  the opaque `-ol26` / `-ol26src`, which name neither which 2.6 nor which
+  patches. The selector hides that from users — they say `lmdb0.9` and
+  `flavour`, never a tag — so the remaining rename is now a change to one table
+  in the operator and the Makefile, with nothing a user has written down
+  depending on it. That is the selector paying for itself.
+- **The volume preflight (decision 5) is not built.** The selector lets a user
+  declare the wrong format for their volumes; slapd then refuses to start, and
+  today that is an unexplained CrashLoopBackOff rather than the legible refusal
+  decision 5 asks for.
+- **The suffix table and the Makefile derive the OpenLDAP version
+  independently** and would drift silently the day the changelog moves to
+  2.7.2 — with the symptom being an `ImagePullBackOff` for everyone who
+  selected `flavour: slaptain`, both halves looking correct in review. A unit
+  test reads the changelog and compares; it was taken red for that exact
+  mutation.

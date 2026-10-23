@@ -783,13 +783,23 @@ func (r *SlapdClusterReconciler) clusterIPService(sc *ldapv1alpha1.SlapdCluster)
 
 // reconcileStatefulSet applies the StatefulSet via SSA.
 func (r *SlapdClusterReconciler) reconcileStatefulSet(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
+	// The selector is validated once per pass by the gate in Reconcile, which
+	// withholds the StatefulSet rather than letting an unresolvable selector
+	// reach a pod (ADR-040 decision 5: detect to refuse, not to choose). Asking
+	// again here is belt-and-braces and costs a map lookup; what it buys is that
+	// this function cannot be moved in front of the gate and quietly start
+	// guessing a build.
+	tagSuffix, err := imageTagSuffixForSelector(sc.Spec.Images.Select)
+	if err != nil {
+		return err
+	}
 	sts := &appsv1.StatefulSet{
 		TypeMeta: metav1.TypeMeta{APIVersion: apiVersionAppsV1, Kind: kindStatefulSet},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sc.Name,
 			Namespace: sc.Namespace,
 		},
-		Spec: r.buildStatefulSetSpec(sc, false),
+		Spec: r.buildStatefulSetSpec(sc, false, tagSuffix),
 	}
 	if err := controllerutil.SetControllerReference(sc, sts, r.Scheme); err != nil {
 		return err
@@ -976,13 +986,17 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyStatefulSet(ctx context.Contex
 	if sc.Spec.ReadReplicas == 0 {
 		return nil
 	}
+	tagSuffix, err := imageTagSuffixForSelector(sc.Spec.Images.Select)
+	if err != nil {
+		return err
+	}
 	sts := &appsv1.StatefulSet{
 		TypeMeta: metav1.TypeMeta{APIVersion: apiVersionAppsV1, Kind: kindStatefulSet},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sc.Name + "-readonly",
 			Namespace: sc.Namespace,
 		},
-		Spec: r.buildStatefulSetSpec(sc, true),
+		Spec: r.buildStatefulSetSpec(sc, true, tagSuffix),
 	}
 	if err := controllerutil.SetControllerReference(sc, sts, r.Scheme); err != nil {
 		return err
@@ -1001,7 +1015,7 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyStatefulSet(ctx context.Contex
 // With the multi-resource architecture (ADR-004), the init container only sets up
 // cn=config infrastructure (modules, TLS). Data databases, schemas, ACLs, and
 // replication are managed by SlapdDatabase and SlapdSchema controllers.
-func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdCluster, readOnly bool) appsv1.StatefulSetSpec {
+func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdCluster, readOnly bool, tagSuffix string) appsv1.StatefulSetSpec {
 	var podLabels map[string]string
 	var replicas int32
 	var serviceName string
@@ -1333,7 +1347,8 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		})
 	}
 
-	initImage := r.imageRef(sc.Spec.Images.Init, defaultDataPlaneRepo(r.OperatorImage, "slapd-init"))
+	initImage := resolveImageRefSelected(sc.Spec.Images.Init,
+		defaultDataPlaneRepo(r.OperatorImage, componentSlapdInit), r.DefaultImageTag, tagSuffix)
 
 	// Init container hardening for PSA "restricted". readOnlyRootFilesystem is
 	// enabled because bootstrap.sh's $TMP_CONF=/tmp/slapd.conf write target is
@@ -1403,7 +1418,8 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		},
 	}
 
-	mainImage := r.imageRef(sc.Spec.Images.Slapd, defaultDataPlaneRepo(r.OperatorImage, "slapd"))
+	mainImage := resolveImageRefSelected(sc.Spec.Images.Slapd,
+		defaultDataPlaneRepo(r.OperatorImage, componentSlapd), r.DefaultImageTag, tagSuffix)
 
 	mainContainer := corev1.Container{
 		Name:            slapdContainerName,

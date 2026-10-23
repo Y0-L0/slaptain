@@ -209,7 +209,14 @@ func (r *SlapdBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// Create the Job if it doesn't exist yet.
 	if !jobExists {
-		job = buildBackupJob(sb, sd, sc, r.imageRef(sc.Spec.Images.Init, defaultDataPlaneRepo(r.OperatorImage, "slapd-init")), r.OperatorImage, objectKey)
+		// slapcat has to be able to open the volume it is dumping, so the
+		// backup Job takes the cluster's image selector rather than the
+		// unsuffixed default (ADR-040).
+		initImage, err := dataPlaneImage(sc, componentSlapdInit, r.OperatorImage, r.DefaultImageTag)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		job = buildBackupJob(sb, sd, sc, initImage, r.OperatorImage, objectKey)
 		if err := controllerutil.SetControllerReference(sb, job, r.Scheme); err != nil {
 			return ctrl.Result{}, err
 		}

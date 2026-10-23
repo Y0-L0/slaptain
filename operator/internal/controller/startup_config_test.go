@@ -208,7 +208,7 @@ func TestPodTemplateMountsStartupConfigByName(t *testing.T) {
 		sc.Spec.Replicas = 3
 		sc.Spec.ReadReplicas = 1
 		sc.Spec.Replication.Enabled = true
-		tmpl := r.buildStatefulSetSpec(sc, readOnly).Template
+		tmpl := r.buildStatefulSetSpec(sc, readOnly, "").Template
 
 		var found bool
 		for _, v := range tmpl.Spec.Volumes {

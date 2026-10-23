@@ -27,7 +27,6 @@ const (
 	operatorTag      = "v0.0.1"
 	operatorImage    = operatorRepo + ":" + operatorTag
 	registryPortRepo = "registry.example:5000/slaptain/operator"
-	componentSlapd   = "slapd"
 )
 
 func TestStripImageTag(t *testing.T) {

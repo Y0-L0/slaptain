@@ -6,6 +6,73 @@ needs this file.
 
 ---
 
+## v0.5.0 — the default slapd image becomes PURE, and `spec.images.select` replaces pinning by tag
+
+Two changes to how a cluster gets its data-plane images. The second is the one
+that changes what runs.
+
+### `spec.images.select` — say what you need, not what it is called
+
+```yaml
+spec:
+  images:
+    select:
+      storageFormat: lmdb1.0   # what can open your volumes
+      flavour: pure            # whether you run slaptain's patches
+```
+
+It drives **both** the slapd and slapd-init images from one declaration, so
+ADR-021's "pin both or neither" stops being a rule you can violate. An explicit
+`spec.images.slapd.tag` still wins and is used verbatim — the selector picks a
+build, it does not take a pin away from anyone who wants one.
+
+Unset is `lmdb1.0` + `pure`, which resolves to the operator's own tag with no
+suffix. **Nothing about a rendered pod template changes**: the image string an
+unpinned cluster gets is the same string it got before this field existed.
+
+### The default image is now the PURE build — this DOES change the binary
+
+The unsuffixed tag used to carry slaptain's behaviour patches. It now carries
+the pure build: the same upstream OpenLDAP 2.7.1, from the same packaging fork,
+with none of our patches (ADR-040 decision 2). The patched pair moves to
+`<tag>-ol2.7.1-slaptain`.
+
+The tag string does not change, so an unpinned cluster rolls onto a different
+binary on operator upgrade without its pod template looking any different.
+`slapd -VV` is how you tell which you are running: a pure build reports
+`2.7.1-0+pure<N>`, a patched one `2.7.1-0+slaptain<N>`.
+
+**Who is affected.** Only clusters using `spec.rotation` with a
+phase-staggering mode (`PurgeAndWrite`, the default, or `PurgeOnly`). The phase
+is a third value of `olcAccessLogPurge` and is ours, not upstream's, so a pure
+slapd refuses it: the operator writes the two-field value, the journal stays
+bounded, and the pods purge in step instead of on the rotation grid. It is
+reported, not silent — `AccesslogPurgeConverged=False/PurgePhaseUnsupported`.
+
+Rotation's `WriteOnly` mode needs no patch and is unaffected. So is every
+cluster not using rotation at all.
+
+**What to do, if you use a phase-staggering rotation mode.** Say so before you
+upgrade:
+
+```yaml
+spec:
+  images:
+    select:
+      flavour: slaptain
+```
+
+That resolves to the patched pair and keeps today's behaviour. It rolls the RW
+pods once, as any image change does.
+
+**Why the default moved.** Nobody should have to run a patched slapd in
+production to use slaptain, and until now everybody did without being told.
+Running our patches is now a deliberate act, which is also what gives the
+rotation a real two-act opt-in: turn the feature on, *and* ask for a build that
+can express it.
+
+---
+
 ## v0.4.0 — ADR-024 R6: `accesslogPurge` becomes an object, and a stored string stops the operator
 
 `SlapdDatabase.spec.replication.accesslogPurge` was a two-token string,

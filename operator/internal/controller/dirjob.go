@@ -195,6 +195,14 @@ func (r *SlapdDatabaseReconciler) buildDirJob(
 	paths []string,
 	readOnly bool,
 ) (*batchv1.Job, error) {
+	// The mkdir Job runs the slapd-init image against the cluster's own data
+	// PVC, so it takes the cluster's selector like every other data-plane
+	// image — a Job on the wrong side of the LMDB format break could not open
+	// what it was pointed at (ADR-040; ADR-021's matched pair).
+	initImage, err := dataPlaneImage(sc, componentSlapdInit, r.OperatorImage, r.DefaultImageTag)
+	if err != nil {
+		return nil, err
+	}
 	quoted := make([]string, 0, len(paths))
 	for _, p := range paths {
 		quoted = append(quoted, "'"+p+"'")
@@ -228,7 +236,7 @@ func (r *SlapdDatabaseReconciler) buildDirJob(
 					ImagePullSecrets: sc.Spec.ImagePullSecrets,
 					Containers: []corev1.Container{{
 						Name:            "mkdir",
-						Image:           r.imageRef(sc.Spec.Images.Init, defaultDataPlaneRepo(r.OperatorImage, "slapd-init")),
+						Image:           initImage,
 						ImagePullPolicy: sc.Spec.Images.Init.PullPolicy,
 						Command:         []string{jobShell, "-c", "set -eux; mkdir -p " + strings.Join(quoted, " ")},
 						VolumeMounts:    mounts,

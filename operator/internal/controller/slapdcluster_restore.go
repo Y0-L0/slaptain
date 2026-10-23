@@ -451,12 +451,19 @@ func (r *SlapdClusterReconciler) runRestoreJobs(ctx context.Context, sc *ldapv1a
 			return false, "", fmt.Errorf("resolve restore source for %q: %w", name, err)
 		}
 
+		// slapadd writes into the volume, so the restore Job must be the same
+		// side of the LMDB format break as the cluster it restores into
+		// (ADR-040).
+		initImage, err := dataPlaneImage(sc, componentSlapdInit, r.OperatorImage, r.DefaultImageTag)
+		if err != nil {
+			return false, "", err
+		}
 		for _, t := range restorePodTargets(sc, sd, rwN, roN) {
 			job := &batchv1.Job{}
 			getErr := r.Get(ctx, client.ObjectKey{Name: t.jobName, Namespace: sc.Namespace}, job)
 			switch {
 			case apierrors.IsNotFound(getErr):
-				job = buildRestoreJob(sc, sd, st, key, r.imageRef(sc.Spec.Images.Init, defaultDataPlaneRepo(r.OperatorImage, "slapd-init")), r.OperatorImage, t)
+				job = buildRestoreJob(sc, sd, st, key, initImage, r.OperatorImage, t)
 				if err := controllerutil.SetControllerReference(sc, job, r.Scheme); err != nil {
 					return false, "", err
 				}

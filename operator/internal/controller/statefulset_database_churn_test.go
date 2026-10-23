@@ -46,7 +46,7 @@ func TestPodTemplateCarriesNoDatabaseSet(t *testing.T) {
 		sc.Spec.Replication.Enabled = true
 		sc.Spec.LDAP.TLS.Enabled = true
 		sc.Spec.LDAP.TLS.SecretName = testTLSSecretName
-		tmpl := r.buildStatefulSetSpec(sc, readOnly).Template
+		tmpl := r.buildStatefulSetSpec(sc, readOnly, "").Template
 
 		for _, c := range append(
 			append([]corev1.Container{}, tmpl.Spec.InitContainers...),

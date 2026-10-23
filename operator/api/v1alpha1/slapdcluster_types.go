@@ -117,6 +117,75 @@ type SlapdImages struct {
 	// is off.
 	// +optional
 	Exporter SlapdImageConfig `json:"exporter,omitempty"`
+	// select picks WHICH data-plane build the slapd and slapd-init images are,
+	// without naming a tag (ADR-040). It is the recommended way to choose, and
+	// it drives BOTH images from one declaration: the matched pair ADR-021
+	// requires ("pin both or neither") stops being a rule you can violate and
+	// becomes a property of the API.
+	//
+	// It sits beside slapd and init rather than inside either, because it
+	// governs both. An explicit tag on an individual image still wins and is
+	// used verbatim — the selector picks a build, it does not take the pin away
+	// from anyone who wants one.
+	//
+	// Unset means the defaults below: the current storage format, without our
+	// patches. That cell resolves to the operator's own tag with no suffix.
+	// +optional
+	Select *SlapdImageSelector `json:"select,omitempty"`
+}
+
+// SlapdImageSelector names a data-plane build by what it GOVERNS rather than by
+// a version number (ADR-040 amendment). Two axes, each chosen so that the thing
+// it controls is the thing it is named after:
+//
+//   - storageFormat is the COMPATIBILITY axis — what can open your volumes. A
+//     selector keyed on the format cannot silently strand a cluster the way a
+//     version-keyed one can: "the current lmdb1.0 build" moving 2.7.1 → 2.7.2
+//     is safe by construction, and moving across formats is impossible because
+//     the format is the thing you named. So slaptain keeps shipping newer slapd
+//     builds, security fixes included, and the only thing that can strand a
+//     volume is the axis you pinned yourself.
+//   - flavour is the TRUST axis — whether you run slaptain's own behaviour
+//     patches on top of upstream OpenLDAP.
+//
+// The two are NOT as independent as the shape suggests, and the field
+// documentation on flavour says where they interact.
+type SlapdImageSelector struct {
+	// storageFormat is the on-disk LMDB format the images can open.
+	//
+	// lmdb1.0 is OpenLDAP 2.7's format and the default. lmdb0.9 is 2.6's.
+	// They are mutually unreadable: a volume written by one cannot be opened
+	// by the other, which is why this axis exists and why changing it on a
+	// populated cluster is a dump/reload, not an upgrade (docs/OPENLDAP-VERSIONS.md;
+	// ADR-023 is the path that makes it cheaper).
+	//
+	// Whoever takes the default never migrates. lmdb0.9 is a deliberate choice
+	// for interoperating with an existing 2.6 deployment (ADR-011 hot
+	// migration) and is an ADR-039 tier-2 surface: functionally valid, honestly
+	// reported, and not the line that gets a mesh cycle every release.
+	// +kubebuilder:validation:Enum=lmdb1.0;lmdb0.9
+	// +kubebuilder:default=lmdb1.0
+	// +optional
+	StorageFormat string `json:"storageFormat,omitempty"`
+	// flavour is whether the build carries slaptain's own behaviour patches.
+	//
+	// pure is upstream OpenLDAP as our packaging builds it, with none of our
+	// patches, and is the default: nobody has to run a patched slapd in
+	// production to use slaptain. slaptain is the patched line; each patch has
+	// a stated reason in images/openldap-deb/debian/changelog, and the package
+	// revision says which you are running (`slapd -VV` reports +pure<N> or
+	// +slaptain<N>).
+	//
+	// WHERE THE TWO AXES INTERACT: spec.rotation's phase-staggering modes need
+	// the accesslog-purge-phase patch, so they work only on flavour: slaptain.
+	// A pure slapd refuses the three-value olcAccessLogPurge and the operator
+	// reports AccesslogPurgeConverged=False/PurgePhaseUnsupported. Rotation's
+	// WriteOnly mode needs no patch — it is a Service the operator repoints —
+	// and works on pure. Measured, not assumed (ADR-040 amendment, cycle B).
+	// +kubebuilder:validation:Enum=pure;slaptain
+	// +kubebuilder:default=pure
+	// +optional
+	Flavour string `json:"flavour,omitempty"`
 }
 
 // SlapdTLSConfig configures TLS for slapd.
@@ -1092,26 +1161,6 @@ type SlapdMonitoringConfig struct {
 // more than it checks.
 // +kubebuilder:validation:XValidation:rule="!has(self.slotLength) || self.slotLength.matches('^([0-9]+([.][0-9]+)?(ns|us|µs|ms|s|m|h))+$')",message="rotation.slotLength must be a Go duration such as 6h, 90m or 12h30m"
 // +kubebuilder:validation:XValidation:rule="!has(self.leadTime) || self.leadTime.matches('^([0-9]+([.][0-9]+)?(ns|us|µs|ms|s|m|h))+$')",message="rotation.leadTime must be a Go duration such as 30s, 1m or 90s"
-// Rotation modes (ADR-037 seventeenth amendment). The two halves of the
-// rotation — staggering each pod's accesslog purge, and moving the write
-// endpoint off the pod that is purging — are one feature today and two
-// decisions in principle. These name them separately.
-//
-// All three are ADR-039 tier 2. The evidence differs per mode and is stated on
-// the Mode field, because under ADR-039 the evidence travels with the knob.
-const (
-	// RotationModePurgeAndWrite staggers the purges AND moves the endpoint.
-	// The default, and the only combination measured end to end.
-	RotationModePurgeAndWrite = "PurgeAndWrite"
-	// RotationModePurgeOnly staggers the purges and leaves the write endpoint
-	// alone. slotsFromWriteToPurge and leadTime have no referent here.
-	RotationModePurgeOnly = "PurgeOnly"
-	// RotationModeWriteOnly moves the endpoint and declares no purge schedule,
-	// so spec.accesslogPurge.interval is its companion rather than a conflict.
-	// slotsFromWriteToPurge and leadTime have no referent here either.
-	RotationModeWriteOnly = "WriteOnly"
-)
-
 type SlapdRotationConfig struct {
 	// enabled turns the rotation on: per-pod purge phases plus a write endpoint
 	// that moves with them.
@@ -1365,6 +1414,26 @@ type SlapdRotationConfig struct {
 	// +optional
 	LeadTime *metav1.Duration `json:"leadTime,omitempty"`
 }
+
+// Rotation modes (ADR-037 seventeenth amendment). The two halves of the
+// rotation — staggering each pod's accesslog purge, and moving the write
+// endpoint off the pod that is purging — are one feature today and two
+// decisions in principle. These name them separately.
+//
+// All three are ADR-039 tier 2. The evidence differs per mode and is stated on
+// the Mode field, because under ADR-039 the evidence travels with the knob.
+const (
+	// RotationModePurgeAndWrite staggers the purges AND moves the endpoint.
+	// The default, and the only combination measured end to end.
+	RotationModePurgeAndWrite = "PurgeAndWrite"
+	// RotationModePurgeOnly staggers the purges and leaves the write endpoint
+	// alone. slotsFromWriteToPurge and leadTime have no referent here.
+	RotationModePurgeOnly = "PurgeOnly"
+	// RotationModeWriteOnly moves the endpoint and declares no purge schedule,
+	// so spec.accesslogPurge.interval is its companion rather than a conflict.
+	// slotsFromWriteToPurge and leadTime have no referent here either.
+	RotationModeWriteOnly = "WriteOnly"
+)
 
 // ExternalPeerReplicationState summarises the replication health of one external peer.
 // +kubebuilder:validation:Enum=Synced;Lagging;PartiallyVerified;Unreachable

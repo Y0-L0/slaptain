@@ -33,7 +33,7 @@ func rwTemplate(replicas int32, replication bool) corev1.PodTemplateSpec {
 	sc.Spec.Replication.Enabled = replication
 	sc.Spec.LDAP.TLS.Enabled = true
 	sc.Spec.LDAP.TLS.SecretName = testTLSSecretName
-	return r.buildStatefulSetSpec(sc, false).Template
+	return r.buildStatefulSetSpec(sc, false, "").Template
 }
 
 // templateDiff names every pod-template difference between two builds in terms

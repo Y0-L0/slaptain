@@ -95,16 +95,23 @@ OPENLDAP_OL26_VERSION ?= 2.6.10+dfsg-1
 # than written here (ADR-040 decision 1), so the two cannot disagree.
 OPENLDAP_27_VERSION := $(shell head -1 images/openldap-deb/debian/changelog | tr -d '()' | awk '{print $$2}' | cut -d- -f1)
 
-# SLAPTAIN_PATCHES: whether a 2.7 build carries our own behaviour patches.
-# 1 today, and the pure pair below is what has to go through a multi-site cycle
-# before ADR-040 decision 2 can invert that default.
-SLAPTAIN_PATCHES ?= 1
+# SLAPTAIN_PATCHES: whether the DEFAULT (unsuffixed) 2.7 build carries our own
+# behaviour patches. It is also the knob for building a one-off of the other
+# flavour under the usual tag.
+#
+# ADR-040 decision 2, EXECUTED 2026-10-23: the unsuffixed build is the PURE
+# one. It used to be the patched one, and inverting it is what gives the
+# rotation a real two-act opt-in — turn the feature on, AND ask for a build
+# that can express it — and what makes `spec.images.select.flavour: pure`,
+# the operator's default, true rather than a label on a patched image.
+SLAPTAIN_PATCHES ?= 0
 
-# The PURE 2.7 pair: same source, same packaging fork, none of our patches.
-# Named in ADR-040's target scheme, with the OpenLDAP component derived.
-OPENLDAP_DEB_IMAGE_PURE = localhost/$(PROJECT)/openldap-deb:$(IMAGE_TAG)-ol$(OPENLDAP_27_VERSION)
-INIT_IMAGE_PURE  = $(REGISTRY)/$(PROJECT)/slapd-init:$(IMAGE_TAG)-ol$(OPENLDAP_27_VERSION)
-SLAPD_IMAGE_PURE = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)-ol$(OPENLDAP_27_VERSION)
+# The PATCHED 2.7 pair, in ADR-040's target scheme with the OpenLDAP component
+# derived: <slaptain>-ol<openldap>-slaptain. The operator reaches it through
+# `spec.images.select.flavour: slaptain`, never by anyone typing this tag.
+OPENLDAP_DEB_IMAGE_SLAPTAIN = localhost/$(PROJECT)/openldap-deb:$(IMAGE_TAG)-ol$(OPENLDAP_27_VERSION)-slaptain
+INIT_IMAGE_SLAPTAIN  = $(REGISTRY)/$(PROJECT)/slapd-init:$(IMAGE_TAG)-ol$(OPENLDAP_27_VERSION)-slaptain
+SLAPD_IMAGE_SLAPTAIN = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)-ol$(OPENLDAP_27_VERSION)-slaptain
 
 INIT_IMAGE_OL26  = $(REGISTRY)/$(PROJECT)/slapd-init:$(IMAGE_TAG)-ol26
 SLAPD_IMAGE_OL26 = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)-ol26
@@ -118,9 +125,20 @@ INIT_IMAGE_OL26SRC  = $(REGISTRY)/$(PROJECT)/slapd-init:$(IMAGE_TAG)-ol26src
 SLAPD_IMAGE_OL26SRC = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)-ol26src
 
 # Tag suffix applied to the slapd/slapd-init image tags when DEPLOYING (only —
-# the operator and toolkit tags are untouched). Empty = OpenLDAP 2.7.1;
-# SLAPD_TAG_SUFFIX=-ol26 deploys the legacy 2.6 pair:
-#   make cluster-helm-install SLAPD_TAG_SUFFIX=-ol26
+# the operator and toolkit tags are untouched). It PINS a pair, which is why it
+# bypasses spec.images.select: an explicit tag wins, by design.
+#
+# Empty = the default build: OpenLDAP 2.7.1, PURE (ADR-040 decision 2). The
+# other three cells of the matrix:
+#
+#   make cluster-helm-install SLAPD_TAG_SUFFIX=-ol2.7.1-slaptain   # 2.7, our patches
+#   make cluster-helm-install SLAPD_TAG_SUFFIX=-ol26               # 2.6, Debian's binary
+#   make cluster-helm-install SLAPD_TAG_SUFFIX=-ol26src            # 2.6, our patches
+#
+# This is also how the second tier-1 e2e lane runs (ADR-040 decision 7): the
+# rotation's phase-staggering modes need the patch, so a suite run against the
+# default pure pair exercises WriteOnly and skips the rest. Run the patched
+# lane with SLAPD_TAG_SUFFIX=-ol2.7.1-slaptain.
 SLAPD_TAG_SUFFIX ?=
 
 # Debug variants of the slapd runtime image (see docs/DEBUG-IMAGES.md). Built
@@ -226,11 +244,11 @@ define import-if-needed
 	fi
 endef
 
-.PHONY: all build-pure push-pure build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-openldap-deb-ol26src build-init-ol26src build-slapd-ol26src build-ol26src import-init-ol26src import-slapd-ol26src import-ol26src build-openldap-deb-debug build-slapd-debug build-openldap-deb-asan build-slapd-asan import-slapd-debug import-slapd-asan push-slapd-debug push-slapd-asan build-toolkit build-operator build-exporter build-slctl install-slctl push gencert helm-deploy cluster-helm-install cluster-helm-uninstall mesh-helm-install mesh-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-exporter import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag helm-lint verify-generated tidy test-init
+.PHONY: all build-slaptain push-slaptain build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-openldap-deb-ol26src build-init-ol26src build-slapd-ol26src build-ol26src import-init-ol26src import-slapd-ol26src import-ol26src build-openldap-deb-debug build-slapd-debug build-openldap-deb-asan build-slapd-asan import-slapd-debug import-slapd-asan push-slapd-debug push-slapd-asan build-toolkit build-operator build-exporter build-slctl install-slctl push gencert helm-deploy cluster-helm-install cluster-helm-uninstall mesh-helm-install mesh-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-exporter import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag helm-lint verify-generated tidy test-init
 
 ## all: the seven pushable images plus slctl. build-ol26 is included so a
 ## release build carries the legacy OpenLDAP 2.6 pair too (ADR-021).
-all: build-init build-slapd build-ol26 build-ol26src build-toolkit build-operator build-exporter build-slctl
+all: build-init build-slapd build-slaptain build-ol26 build-ol26src build-toolkit build-operator build-exporter build-slctl
 
 ## Stamp-file backed build targets (incremental)
 
@@ -268,40 +286,43 @@ $(STAMPS)/registry: FORCE | $(STAMPS)
 $(STAMPS)/openldap-deb: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
 	$(CONTAINER_ENGINE) build \
 		--build-arg RUN_UPSTREAM_TESTS=$(RUN_UPSTREAM_TESTS) \
+		--build-arg SLAPTAIN_PATCHES=$(SLAPTAIN_PATCHES) \
 		-t $(OPENLDAP_DEB_IMAGE) images/openldap-deb/
 	@touch $@
 
-## The PURE 2.7 pair (ADR-040 decision 2): the same upstream source and the same
-## packaging fork, with none of slaptain's behaviour patches. It exists to be
-## VALIDATED — the alias cannot be inverted until it has been through a
-## multi-site cycle, because every image this project has built so far was
-## patched. Not in `all` or `push` yet, for the same reason.
-$(STAMPS)/openldap-deb-pure: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
+## The PATCHED 2.7 pair (ADR-040 decision 2). It is no longer the default — the
+## unsuffixed build is pure — so it is built and pushed under its own tag and
+## reached through spec.images.select.flavour: slaptain. In `all` and `push`,
+## because the operator can now resolve to it and an unpublished cell would be
+## an ImagePullBackOff waiting for whoever selects it.
+$(STAMPS)/openldap-deb-slaptain: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
 	$(CONTAINER_ENGINE) build \
 		--build-arg RUN_UPSTREAM_TESTS=$(RUN_UPSTREAM_TESTS) \
-		--build-arg SLAPTAIN_PATCHES=0 \
-		-t $(OPENLDAP_DEB_IMAGE_PURE) images/openldap-deb/
+		--build-arg SLAPTAIN_PATCHES=1 \
+		-t $(OPENLDAP_DEB_IMAGE_SLAPTAIN) images/openldap-deb/
 	@touch $@
 
-$(STAMPS)/init-pure: $(INIT_SRCS) $(STAMPS)/openldap-deb-pure $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
+$(STAMPS)/init-slaptain: $(INIT_SRCS) $(STAMPS)/openldap-deb-slaptain $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
 	$(CONTAINER_ENGINE) build \
-		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_PURE) \
-		-t $(INIT_IMAGE_PURE) images/slapd-init/
+		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_SLAPTAIN) \
+		-t $(INIT_IMAGE_SLAPTAIN) images/slapd-init/
 	@touch $@
 
-$(STAMPS)/slapd-pure: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-pure $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
+$(STAMPS)/slapd-slaptain: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-slaptain $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
 	$(CONTAINER_ENGINE) build \
-		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_PURE) \
-		-t $(SLAPD_IMAGE_PURE) images/slapd/
+		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_SLAPTAIN) \
+		-t $(SLAPD_IMAGE_SLAPTAIN) images/slapd/
 	@touch $@
 
-## build-pure: the pure 2.7 slapd/slapd-init pair, tagged -ol<version>.
-build-pure: $(STAMPS)/init-pure $(STAMPS)/slapd-pure
+## build-slaptain: the PATCHED 2.7 slapd/slapd-init pair, tagged
+## -ol<version>-slaptain. The pure pair is the unsuffixed default (`build-slapd`).
+build-slaptain: $(STAMPS)/init-slaptain $(STAMPS)/slapd-slaptain
 
-## push-pure: deliver it so an e2e run can pin it.
-push-pure: build-pure
-	$(CONTAINER_ENGINE) push $(INIT_IMAGE_PURE)
-	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE_PURE)
+## push-slaptain: deliver it so an e2e run or a cluster selecting
+## flavour: slaptain can pull it.
+push-slaptain: build-slaptain
+	$(CONTAINER_ENGINE) push $(INIT_IMAGE_SLAPTAIN)
+	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE_SLAPTAIN)
 
 $(STAMPS)/init: $(INIT_SRCS) $(STAMPS)/openldap-deb $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
 	$(CONTAINER_ENGINE) build \
@@ -429,9 +450,11 @@ install-slctl: build-slctl
 ## 2.6 pair (-ol26), toolkit, operator, and the slapd exporter at its own
 ## EXPORTER_IMAGE_TAG. The openldap-deb build artifact carrier is local-only and
 ## deliberately not pushed.
-push: build-init build-slapd build-ol26 build-ol26src build-toolkit build-operator build-exporter
+push: build-init build-slapd build-slaptain build-ol26 build-ol26src build-toolkit build-operator build-exporter
 	$(CONTAINER_ENGINE) push $(INIT_IMAGE)
 	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE)
+	$(CONTAINER_ENGINE) push $(INIT_IMAGE_SLAPTAIN)
+	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE_SLAPTAIN)
 	$(CONTAINER_ENGINE) push $(INIT_IMAGE_OL26)
 	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE_OL26)
 	$(CONTAINER_ENGINE) push $(INIT_IMAGE_OL26SRC)

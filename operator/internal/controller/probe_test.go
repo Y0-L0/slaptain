@@ -37,7 +37,7 @@ func TestSlapdContainerProbes(t *testing.T) {
 		sc.Spec.Replication.Enabled = true
 		sc.Spec.LDAP.TLS.Enabled = true
 		sc.Spec.LDAP.TLS.SecretName = testTLSSecretName
-		tmpl := r.buildStatefulSetSpec(sc, readOnly).Template
+		tmpl := r.buildStatefulSetSpec(sc, readOnly, "").Template
 
 		var slapd *corev1.Container
 		for i := range tmpl.Spec.Containers {

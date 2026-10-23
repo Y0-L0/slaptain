@@ -236,6 +236,63 @@ spec:
                           you need to pin slapd/init to a different version than the operator.
                         type: string
                     type: object
+                  select:
+                    description: |-
+                      select picks WHICH data-plane build the slapd and slapd-init images are,
+                      without naming a tag (ADR-040). It is the recommended way to choose, and
+                      it drives BOTH images from one declaration: the matched pair ADR-021
+                      requires ("pin both or neither") stops being a rule you can violate and
+                      becomes a property of the API.
+
+                      It sits beside slapd and init rather than inside either, because it
+                      governs both. An explicit tag on an individual image still wins and is
+                      used verbatim — the selector picks a build, it does not take the pin away
+                      from anyone who wants one.
+
+                      Unset means the defaults below: the current storage format, without our
+                      patches. That cell resolves to the operator's own tag with no suffix.
+                    properties:
+                      flavour:
+                        default: pure
+                        description: |-
+                          flavour is whether the build carries slaptain's own behaviour patches.
+
+                          pure is upstream OpenLDAP as our packaging builds it, with none of our
+                          patches, and is the default: nobody has to run a patched slapd in
+                          production to use slaptain. slaptain is the patched line; each patch has
+                          a stated reason in images/openldap-deb/debian/changelog, and the package
+                          revision says which you are running (`slapd -VV` reports +pure<N> or
+
+                          WHERE THE TWO AXES INTERACT: spec.rotation's phase-staggering modes need
+                          the accesslog-purge-phase patch, so they work only on flavour: slaptain.
+                          A pure slapd refuses the three-value olcAccessLogPurge and the operator
+                          reports AccesslogPurgeConverged=False/PurgePhaseUnsupported. Rotation's
+                          WriteOnly mode needs no patch — it is a Service the operator repoints —
+                          and works on pure. Measured, not assumed (ADR-040 amendment, cycle B).
+                        enum:
+                        - pure
+                        - slaptain
+                        type: string
+                      storageFormat:
+                        default: lmdb1.0
+                        description: |-
+                          storageFormat is the on-disk LMDB format the images can open.
+
+                          lmdb1.0 is OpenLDAP 2.7's format and the default. lmdb0.9 is 2.6's.
+                          They are mutually unreadable: a volume written by one cannot be opened
+                          by the other, which is why this axis exists and why changing it on a
+                          populated cluster is a dump/reload, not an upgrade (docs/OPENLDAP-VERSIONS.md;
+                          ADR-023 is the path that makes it cheaper).
+
+                          Whoever takes the default never migrates. lmdb0.9 is a deliberate choice
+                          for interoperating with an existing 2.6 deployment (ADR-011 hot
+                          migration) and is an ADR-039 tier-2 surface: functionally valid, honestly
+                          reported, and not the line that gets a mesh cycle every release.
+                        enum:
+                        - lmdb1.0
+                        - lmdb0.9
+                        type: string
+                    type: object
                   slapd:
                     description: slapd is the main slapd runtime image.
                     properties:
@@ -1295,6 +1352,13 @@ spec:
                     format: int32
                     type: integer
                 type: object
+                x-kubernetes-validations:
+                - message: rotation.slotLength must be a Go duration such as 6h, 90m
+                    or 12h30m
+                  rule: '!has(self.slotLength) || self.slotLength.matches(''^([0-9]+([.][0-9]+)?(ns|us|µs|ms|s|m|h))+$'')'
+                - message: rotation.leadTime must be a Go duration such as 30s, 1m
+                    or 90s
+                  rule: '!has(self.leadTime) || self.leadTime.matches(''^([0-9]+([.][0-9]+)?(ns|us|µs|ms|s|m|h))+$'')'
               securityContext:
                 description: |-
                   securityContext overrides the pod-level security context.

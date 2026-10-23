@@ -154,7 +154,7 @@ func TestPodTemplateIsUnchangedWhileMonitoringIsOff(t *testing.T) {
 
 	for _, readOnly := range []bool{false, true} {
 		if *updatePodTemplateGolden {
-			got := marshalTemplate(t, goldenReconciler().buildStatefulSetSpec(goldenCluster(), readOnly).Template)
+			got := marshalTemplate(t, goldenReconciler().buildStatefulSetSpec(goldenCluster(), readOnly, "").Template)
 			if err := os.MkdirAll("testdata", 0o755); err != nil {
 				t.Fatal(err)
 			}
@@ -168,7 +168,7 @@ func TestPodTemplateIsUnchangedWhileMonitoringIsOff(t *testing.T) {
 		for _, v := range variants {
 			sc := goldenCluster()
 			v.set(sc)
-			got := marshalTemplate(t, goldenReconciler().buildStatefulSetSpec(sc, readOnly).Template)
+			got := marshalTemplate(t, goldenReconciler().buildStatefulSetSpec(sc, readOnly, "").Template)
 			if !bytes.Equal(got, want) {
 				t.Errorf("readOnly=%v, %s: the pod template differs from %s — every existing cluster "+
 					"would roll on operator upgrade (ADR-013 amendment 2026-10-08).\n--- got ---\n%s",
@@ -196,11 +196,11 @@ func TestMonitoringEnabledAddsOnlyTheExporterContainer(t *testing.T) {
 
 func monitoringEnabledAddsOnlyTheExporter(t *testing.T, readOnly bool) {
 	t.Helper()
-	golden := goldenReconciler().buildStatefulSetSpec(goldenCluster(), readOnly).Template
+	golden := goldenReconciler().buildStatefulSetSpec(goldenCluster(), readOnly, "").Template
 
 	sc := goldenCluster()
 	sc.Spec.Monitoring.Enabled = new(true)
-	got := goldenReconciler().buildStatefulSetSpec(sc, readOnly).Template
+	got := goldenReconciler().buildStatefulSetSpec(sc, readOnly, "").Template
 
 	if n, want := len(got.Spec.Containers), len(golden.Spec.Containers)+1; n != want {
 		t.Fatalf("readOnly=%v: %d containers, want %d (slapd + exporter)", readOnly, n, want)
@@ -304,7 +304,7 @@ func TestExporterSidecarShape(t *testing.T) {
 				sc := goldenCluster()
 				sc.Spec.Monitoring.Enabled = new(true)
 				tc.set(sc)
-				tmpl := goldenReconciler().buildStatefulSetSpec(sc, readOnly).Template
+				tmpl := goldenReconciler().buildStatefulSetSpec(sc, readOnly, "").Template
 				c := findExporter(t, tmpl, label)
 
 				// slapd is the first container (pinned by
@@ -429,7 +429,7 @@ func assertExporterSecurityContext(t *testing.T, got, slapdSec *corev1.SecurityC
 func exporterContainer(t *testing.T, r *SlapdClusterReconciler, sc *ldapv1alpha1.SlapdCluster) corev1.Container {
 	t.Helper()
 	sc.Spec.Monitoring.Enabled = new(true)
-	return findExporter(t, r.buildStatefulSetSpec(sc, false).Template, "exporter image")
+	return findExporter(t, r.buildStatefulSetSpec(sc, false, "").Template, "exporter image")
 }
 
 // spec.images.exporter resolves like slapd and init — the repository is the
@@ -540,7 +540,7 @@ func TestExporterTemplateUnderOperatorUpgrade(t *testing.T) {
 			sc.Spec.Images.Slapd = ldapv1alpha1.SlapdImageConfig{Repository: "registry.example/slaptain/slapd", Tag: testOperatorVersion}
 			sc.Spec.Images.Init = ldapv1alpha1.SlapdImageConfig{Repository: "registry.example/slaptain/slapd-init", Tag: testOperatorVersion}
 		}
-		return r.buildStatefulSetSpec(sc, false).Template
+		return r.buildStatefulSetSpec(sc, false, "").Template
 	}
 	const before, after = goldenOperatorImage, "registry.example/slaptain/operator:1.3.0"
 

@@ -317,6 +317,34 @@ as the DEFAULT build (cycle B validated the pair, never as the default), the
 image selector, and the `+pure3` / `+slaptain3` version split on published
 images.
 
+### Mesh cycle 2, 2026-10-23 — the storm stays away
+
+Three sites, `sha-8d9b96c`: **98 passed, 1 failed, 22 skipped**, and again
+**zero stale-cookie lines** from the PVC-loss recovery, with all three sites
+clean on `accesslog-mincsn`. Two consecutive clean cycles against six prior
+reproductions. Still not proof; it is the series starting.
+
+First mesh exposure of the session-log default, and it converged: the pods did
+take `olcSpSessionlogSource` on a fresh three-site cluster.
+
+The `PurgeOnly` failure from cycle 1 is gone, so that fix held on a mesh.
+
+**Four spec defects have now come out of this one default change, all the same
+family: a precondition inherited from the default rather than stated.**
+`phaseRefused` read a condition off the wrong resource; `sessionlog` asserted
+the in-memory log unconditionally; `startup-config` declared `Accesslog` to
+create a divergence that had become a no-op, and then asserted an empty
+cluster-wide table while a second database still contributed a line. Every one
+passed for as long as the old default kept it on the happy path, and no unit
+test could see any of them.
+
+That is an argument for moving a default rather than against it: **the move is
+what tests the tests.** It also says something about what a green suite means
+on a project whose defaults are still moving — it means the defaults have not
+moved, not that the specs would survive it.
+
+### Cycle 1's failure
+
 The single failure was a TEST defect, not a product one, and the new default is
 what exposed it: `phaseRefused` read `AccesslogPurgeConverged` from the
 SlapdCluster, where that condition never appears. On a patched build the spec's

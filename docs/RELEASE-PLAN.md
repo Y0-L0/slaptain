@@ -285,11 +285,14 @@ for a migration the user experiences once either way.
 | ADR-037 rotation decomposition — the `mode` enum | done |
 | Debian version pin, all three 2.6 paths | done |
 | slaptain patches as a build axis + the pure 2.7 pair | done; cycle B validated it (109/2, both explained) |
-| the alias inversion — unsuffixed means pure | to build |
-| the image **selector** (`select.{storageFormat,flavour}`) + the volume preflight | to build |
+| ~~the alias inversion — unsuffixed means pure~~ | done — `<tag>` is the pure build, patched moves to `<tag>-ol2.7.1-slaptain`; both in `all`/`push`. Verified on pulled images: default reports `+pure3`, the slaptain cell `+slaptain3` |
+| ~~the image **selector** (`spec.images.select.{storageFormat,flavour}`)~~ | done — drives BOTH images, explicit tag still wins, every data-plane call site resolves through one function. Validated live: clearing the pinned tags moved slapd *and* slapd-init together |
+| the volume preflight (ADR-041) | **designed, not built** — the measurement moved it from "nice diagnostics" to "the native failure recommends a destructive action" |
+| an unhealthy pod blocks its own replacement | **found 2026-10-23, not built** — correcting the spec is necessary and not sufficient; shape 1 (say so in a condition) is small. `docs/BACKLOG.md` |
+| the selector has no e2e coverage | **gap** — the fixture pins image tags, so the suite bypasses the selector entirely |
 | ~~the version-string collision~~ | done — the revision token is derived from `SLAPTAIN_PATCHES` (`+slaptain<N>` / `+pure<N>`), asserted by a symmetric build gate; both arms built and measured. The `pure` default is no longer blocked |
 | ~~**default OpenLDAP version → 2.6**~~ | **withdrawn** — ADR-040 decision 8 reversed the same day; 2.7 stays. What flips is the default **flavour** to `pure` |
-| accesslog `syncprov-checkpoint` on by default | to build |
+| accesslog `syncprov-checkpoint` on by default | **blocked, not merely to build** — the control arms were read properly 2026-10-23: the effect is real, but `1 1` wins by ordering (read from source, never measured inside the window), its cost under load is unmeasured, and one arm's instrument did not run |
 | `syncprovSessionlogSource: Accesslog` by default | to build |
 
 One `UPGRADING.md` entry, one migration for anyone moving 0.4 → 0.5.

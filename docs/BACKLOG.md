@@ -95,6 +95,63 @@ tests, so the atomic `Replace` remains guarded by prose.
 
 ---
 
+## The CRD samples are unreadable as a starting point
+
+Reported 2026-10-23, from somebody who wanted a cluster and a database without
+the e2e script and without the mesh chart, and sat looking at the samples
+unable to find the spec in them.
+
+The reaction is the evidence:
+
+```
+cat ldap_v1alpha1_slapdcluster.yaml  | yq '... comments=""' > lab-cluster.yaml
+cat ldap_v1alpha1_slapddatabase.yaml | yq '... comments=""' > lab-database.yaml
+cat ldap_v1alpha1_slapdschema.yaml   | yq '... comments=""' > lab-schema.yaml
+```
+
+Stripping every comment leaves a *usable* file. That is the measurement: the
+commentary is not annotating the example, it is burying it. The cluster sample
+is roughly four fifths comment, most of it fields that are commented OUT — so
+a reader scanning for "what do I actually have to set" has to distinguish
+prose from disabled YAML from live YAML, three kinds of line that all start
+with whitespace.
+
+**This is a consequence of a decision that was right.** The samples are
+deliberately "one commented example per CRD — the shape of every field, with
+the non-obvious ones explained inline" (README). That is genuinely useful as a
+reference, and it is where several hard-won warnings live. The defect is that
+the same file is also advertised as the thing to `kubectl apply`, and it is bad
+at that.
+
+**What exists already, and why it does not close this.** README's Quick Start
+carries a perfectly good minimal replicated cluster — but as fenced YAML in
+prose, not as a file. So the copy-pasteable thing is not applicable and the
+applicable thing is not readable.
+
+### Shape of a fix
+
+A `operator/config/samples/minimal/` (or `docs/examples/`) holding the smallest
+manifests that actually stand a cluster up: a `SlapdCluster`, one
+`SlapdDatabase`, optionally one `SlapdSchema`. Only fields that are REQUIRED or
+whose default is wrong for a real deployment; no commented-out alternatives; a
+one-line header pointing at the annotated sample for everything else. The
+existing samples stay exactly as they are and get a line saying which file to
+start from.
+
+Two things to decide rather than assume:
+
+- **Whether it is checked.** A sample that drifts is worse than none. The
+  cheapest guard is to have the samples parsed and validated against the CRDs
+  in CI — which would also have caught the stale `tag: 0.2.1` that sat in the
+  cluster sample until 0.5.0. A stronger one applies them to a kind cluster.
+- **Where it lives.** Under `operator/config/samples/` keeps one place to look;
+  under `docs/` puts it next to the walkthrough. The README links both either
+  way.
+
+Related: `docs/demo/` already holds applyable manifests for the walkthrough, and
+may be most of this already — worth checking whether it just needs pointing at
+rather than duplicating.
+
 ## A SlapdCluster cannot influence where its pods are scheduled
 
 Observed 2026-10-23 on a four-node lab, a three-replica cluster plus one RO

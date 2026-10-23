@@ -8,11 +8,28 @@ local patches applied. The decision and its reasoning are in
 
 ## Which image is which
 
-| Image tag | OpenLDAP | Use it for |
+**Choose with `spec.images.select`, not by typing a tag.** Since 0.5.0 the
+operator takes two axes — the on-disk format a build can open, and whether it
+carries slaptain's patches — and resolves both data-plane images from them, so
+the pair cannot be mismatched:
+
+```yaml
+spec:
+  images:
+    select:
+      storageFormat: lmdb1.0   # lmdb1.0 = OpenLDAP 2.7 (default) | lmdb0.9 = 2.6
+      flavour: pure            # pure (default) | slaptain
+```
+
+The tags below are what those selections resolve to. An explicit
+`spec.images.slapd.tag` still wins and is used verbatim.
+
+| selection | image tag | OpenLDAP, and where the binary comes from |
 |---|---|---|
-| `<registry>/slaptain/slapd:<tag>` + `slapd-init:<tag>` | 2.7.1 (`2.7.1-0+slaptain2`) | everything — this is the default |
-| `<registry>/slaptain/slapd:<tag>-ol26` + `slapd-init:<tag>-ol26` | 2.6, Debian trixie binary, **pinned** (`OPENLDAP_OL26_VERSION`) | legacy interop and hot-migration clusters that must match a 2.6 source (ADR-011) |
-| `<registry>/slaptain/slapd:<tag>-ol26src` + `slapd-init:<tag>-ol26src` | 2.6, Debian trixie **source** + local patches, same pin | a **2.6** build carrying the local patches — measurement arms against `-ol26`, and 2.6 clusters that need a patched feature |
+| `lmdb1.0` + `pure` | `slapd:<tag>` + `slapd-init:<tag>` | **the default.** 2.7.1, our build from pristine upstream with Debian's packaging forward-ported onto it. None of our patches (`slapd -VV` ends `+pure<N>`) |
+| `lmdb1.0` + `slaptain` | `:<tag>-ol2.7.1-slaptain` | the same build, with our patches (`+slaptain<N>`). Needed by `spec.rotation`'s purge phases |
+| `lmdb0.9` + `pure` | `:<tag>-ol26` | 2.6, **Debian's own prebuilt binary**, pinned (`OPENLDAP_OL26_VERSION`). Not built by us at all — the most conservative thing on offer. Legacy interop and hot migration (ADR-011) |
+| `lmdb0.9` + `slaptain` | `:<tag>-ol26src` | 2.6, Debian's **source** package rebuilt with our patches, same pin. Measurement arms against `-ol26`, and 2.6 clusters needing a patched feature |
 
 The 2.6 version is pinned, not floated: one Makefile variable,
 `OPENLDAP_OL26_VERSION`, drives both binary images and the source build, so
@@ -20,24 +37,39 @@ the pair cannot drift apart and the patches apply to a fixed tree. When a
 Debian point release retires it the build stops resolving — bump the variable
 and re-run the 2.6 e2e cycle (ADR-040 decision 1).
 
-The local patches are **not** exclusive to `-ol26src`. The default 2.7 pair
-carries them too, from `2.7.1-0+slaptain2` onward — that is what makes the
-`logpurge` phase (ADR-037) usable on the images clusters actually run. What
-`-ol26src` is for is having the same patches on **2.6**, which the plain tag
-cannot give you. Within the 2.7 pair, the package revision in `slapd -VV` is
-what tells two of our builds apart; there is no image label.
+**The default pair is PURE since 0.5.0.** It used to carry the local patches;
+it no longer does, because nobody should run a patched slapd without having
+chosen to. The patches are reached by `flavour: slaptain` on either format
+line, and the package revision in `slapd -VV` tells you which you got —
+`+slaptain<N>` or `+pure<N>`. There is no image label for it; the version
+string is the check, and before 0.5.0 it could not tell them apart at all.
 
 `<tag>` is the same release tag for all three pairs — the suffixes are only
 suffixes, never separate version lines. `slapd-toolkit` and `operator` have one tag each and
 carry no suffix.
 
-2.7 is the default because OpenLDAP 2.6 is affected by upstream
-[ITS#9580](https://bugs.openldap.org/show_bug.cgi?id=9580): a pod that loses its
-volumes and resyncs from peers drives the whole mesh into a
-`sync cookie is stale` refresh loop for minutes. The fix is released only in
-2.7.0/2.7.1, and no distribution packages 2.7 as of 2026-09-11 — hence the 2.7
-images come from a vendored Debian packaging fork
-([`images/openldap-deb/`](../images/openldap-deb/README.md)).
+### Why 2.7 is the default
+
+**Not** because of ITS#9580. This page used to say so; that reasoning is
+retracted. The refresh storm we actually hit is
+[ITS#9398](https://bugs.openldap.org/show_bug.cgi?id=9398), it is fixed in no
+release of either line, and slaptain addresses it with a log-database
+checkpoint that works on both (`docs/ITS-9398-HANDLING.md`).
+
+The reason that holds is the format break itself. The two LMDB formats cannot
+read each other, so **whichever line is the default, every cluster that said
+nothing is eventually billed a dump-and-reload when that default moves.**
+Defaulting to 2.7 — where the format line is going anyway — means whoever takes
+the default never migrates, and anyone on 2.6 is there deliberately and can
+plan the move. Defaulting to 2.6 would just mean changing our minds later, on
+everyone else's maintenance window.
+
+The cost of that choice is that **no distribution packages OpenLDAP 2.7 yet**.
+It is released and supported upstream, but recent and not widely deployed, so
+shipping it means maintaining a forward-ported Debian packaging fork
+([`images/openldap-deb/`](../images/openldap-deb/README.md)). On the 2.6 line
+`flavour: pure` gives you Debian's own binary instead; on 2.7 there is no such
+option, and that asymmetry is real.
 
 ### `-ol26` and `-ol26src` are three characters apart and only one is patched
 
@@ -172,10 +204,13 @@ tag):
 SLAPD_TAG_SUFFIX=-ol26 ./tests/e2e.sh all <context>
 ```
 
-In a **multi-site mesh with an idle site**, expect `dataloss_recovery_test`'s
-ITS#9580 spec to **fail** there (a fresh single-site cluster does not reproduce
-the storm — no SID is dormant, measured 2026-09-11): that failure
-is the behaviour the version bump fixes.
+`dataloss_recovery_test`'s no-storm assertion is the one to watch on a
+multi-site run. It used to be described here as an ITS#9580 spec that 2.7
+fixes; it is not. It asserts the absence of the ITS#9398 stale-cookie storm,
+which affects both version lines and which no release fixes — what addresses it
+is the accesslog `syncprov-checkpoint` that 0.5.0 turns on by default, on 2.6
+and 2.7 alike. A fresh single-site cluster does not reproduce the storm at all
+(no serverID is dormant), so a green single-site run says nothing either way.
 
 ## Migrating an existing 2.6 cluster to 2.7
 
@@ -340,18 +375,26 @@ Compare the entry count against what you had before step 3.
 ### Multi-site meshes
 
 Migrate one site at a time. A 2.6 site and a 2.7 site replicate with each other
-normally — syncrepl is unchanged across the versions — but note that the sites
-still on 2.6 remain exposed to ITS#9580 until they are migrated. (A mixed mesh
-is wire-compatible by construction; we have not run a cross-site validation of
+normally — syncrepl is unchanged across the versions. (A mixed mesh is
+wire-compatible by construction; we have not run a cross-site validation of
 one — see ADR-021.)
+
+This page used to add that the un-migrated 2.6 sites "remain exposed to
+ITS#9580". That is retracted: the storm we hit is ITS#9398, it is present in
+both lines, and since 0.5.0 both are given the accesslog checkpoint that
+addresses it. Migrating does not buy you an escape from it, and staying does
+not expose you to it any more than 2.7 does.
 
 ### The alternative: wipe one pod and resync
 
 You can also migrate a replicated cluster pod by pod: delete one pod's PVCs, let
-it come back on the 2.7 images and refresh from its peers. It works, and the
-refreshing pod runs the *fixed* code — but the peers serving that refresh are
-still 2.6, so every such pod costs one ITS#9580 storm. Prefer backup/restore for
-anything but a lab.
+it come back on the 2.7 images and refresh from its peers. It works — but it is
+ADR-012 case 2, a pod rebuilt from replication, which is the exact shape that
+reproduced the ITS#9398 stale-cookie storm six times before the accesslog
+checkpoint default. That default is on both version lines now and two
+three-site cycles have run clean, but this is a deliberate rebuild of every pod
+in turn, so it is the operation most likely to find out whether that holds.
+Prefer backup/restore for anything but a lab.
 
 ## Rollback to 2.6
 

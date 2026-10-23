@@ -117,6 +117,42 @@ Keyed on the storage format rather than a version, deliberately: newer slapd
 builds keep shipping under the same selection, and the only thing that can
 strand a volume is the axis you pinned yourself.
 
+**What the two formats actually are.** `lmdb0.9` is OpenLDAP **2.6**, `lmdb1.0`
+is OpenLDAP **2.7**. They are named for the on-disk format because that is the
+property that decides whether a given build can open your volumes — the two are
+mutually unreadable, which is why crossing them is a dump-and-reload rather
+than an upgrade.
+
+**And they are built very differently**, which is worth knowing before you pick
+one:
+
+| selection | where the slapd binary comes from |
+|---|---|
+| `lmdb0.9` + `pure` | **Debian's own `slapd` package**, installed from the archive at a pinned version. Not built by us at all. |
+| `lmdb0.9` + `slaptain` | Debian's own **source** package, rebuilt with our patches applied on top. |
+| `lmdb1.0` + `pure` | **Our build**, from pristine upstream 2.7.1 with Debian's packaging forward-ported onto it. No patches of ours. |
+| `lmdb1.0` + `slaptain` | The same build, with our patches. |
+
+So on the 2.6 line you can have the distribution's own binary, byte for byte,
+and that is the most conservative thing slaptain can offer. The 2.7 line has no
+such option: **no distribution packages OpenLDAP 2.7 yet.** It is released and
+supported upstream, but it is recent and not widely deployed, so shipping it at
+all means maintaining a forward-ported packaging fork — which is what
+`images/openldap-deb/` is.
+
+**Why carry that cost, if 2.6 is what the world runs?** Two reasons, and the
+second is the one that made it the default:
+
+1. This project leans forward. Anyone running a young operator for multi-master
+   OpenLDAP is not waiting on a distribution to package 2.7.
+2. **It avoids a silent default flip later.** The two formats cannot read each
+   other, so whichever line is the default, every cluster that said nothing is
+   eventually billed a dump-and-reload when that default moves. Defaulting to
+   2.7 now — while 2.7 is where the format line is going anyway — means
+   **whoever takes the default never migrates**, and anyone on 2.6 is there
+   because they chose it and can plan the move. The alternative was to default
+   to 2.6 and change our minds later, on everyone else's maintenance window.
+
 `slapd -VV` now discriminates the flavours — a patched build reports a version
 ending in `+slaptain<N>`, a pure one `+pure<N>`. Before this release both
 reported the same string, which made the `PurgePhaseUnsupported` message's own

@@ -527,17 +527,19 @@ accesslog DB's syncprov overlay as its own arm, and the shape is not that.
 p99 at 16.9 ms, never reaching the 20 ms criterion — read on latency alone the
 run has no knee, it simply ends.
 
-**It costs replication headroom, and loses that first.** The same arm's CSN
-spread reached 13.4 s, and it crossed one second of replication lag at
-255,903 ops/s — about **7 % below** where the baseline arms cross it. So the
-configuration does not buy its safety with throughput; it buys it with the rate
-at which the mesh can still keep up.
+**What it does move is replication headroom at extreme load.** The arm kept
+replication current up to **255,903 ops/s**, where the baseline arms stay
+current to roughly 7 % higher before their replication lag reaches one second.
 
-That 7 % is the honest number to quote, and quoting only the throughput result
-would be the more flattering half of a measurement that has two. It also
-carries a condition: this was bare metal with fast local storage. Storage that
-is slower, or shared, has not been measured and is exactly the case where the
-opt-out below earns its place.
+Read that as a ceiling moving, not as a capability lost: replication works
+normally, and the number at which the difference appears is a quarter of a
+million operations per second. The 7 % is worth quoting because the measurement
+has two halves and the throughput half is the flattering one — not because a
+checkpointed accesslog has trouble replicating. It does not.
+
+It carries a condition: bare metal with fast local storage. Slower or shared
+storage has not been measured, and is exactly the case where the opt-out below
+earns its place.
 
 The measurement also explains why nobody saw this before: every ramp before
 2026-10-16 was measuring the accesslog purge rather than the server, because

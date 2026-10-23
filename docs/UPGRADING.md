@@ -86,11 +86,16 @@ and the pod then refuses **every** consumer of that log, permanently, with
 it is the failure this project has hit most often.
 
 **What it costs**, measured on a load harness as its own arm: no throughput and
-no latency cost (270,277 ops/s at p99 16.9 ms), but about **7% less replication
-headroom** — one second of replication lag arrives 7% earlier than without it.
-Measured on bare metal with fast local storage. **Slower or shared storage is
-not measured**, and if your write path is storage-bound this is the knob to
-look at first.
+no latency cost — 270,277 ops/s at p99 16.9 ms. Replication stays current up to
+**255,903 ops/s**, where the same setup without the checkpoint stays current to
+roughly 7% higher before replication lag reaches one second.
+
+That is a ceiling moving at a quarter of a million operations per second, not a
+problem replicating: a checkpointed accesslog replicates normally, and if you
+are nowhere near those rates this costs you nothing measurable. Measured on
+bare metal with fast local storage. **Slower or shared storage is not
+measured**, and if your write path is storage-bound this is the knob to look at
+first.
 
 **To opt out:**
 

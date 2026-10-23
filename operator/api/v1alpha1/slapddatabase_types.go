@@ -174,12 +174,13 @@ type DatabaseReplicationConfig struct {
 	// first. Any larger value reopens the window between two adjacent
 	// operations, which is exactly what "100 5" measured.
 	//
-	// Cost, measured on a load harness as its own arm: it does NOT cost
-	// throughput or latency (270,277 ops/s at p99 16.9 ms, never reaching the
-	// 20 ms criterion). It costs replication headroom — one second of
-	// replication lag arrives about 7% earlier than on the baseline arms.
-	// Measured on bare metal with fast local storage; slower or shared storage
-	// is not measured and is the case this field's opt-out exists for.
+	// Cost, measured on a load harness as its own arm: no throughput or latency
+	// cost (270,277 ops/s at p99 16.9 ms, never reaching the 20 ms criterion).
+	// Replication stays current to 255,903 ops/s, where the baseline arms stay
+	// current to about 7% higher — a ceiling moving at a quarter of a million
+	// operations per second, not a difficulty replicating. Measured on bare
+	// metal with fast local storage; slower or shared storage is not measured
+	// and is the case this field's opt-out exists for.
 	//
 	// The explicit sentinel "none" removes the attribute entirely, restoring
 	// the pre-0.5.0 behaviour and with it the storm exposure. Converged on

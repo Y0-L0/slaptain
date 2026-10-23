@@ -1824,6 +1824,51 @@ grow one just for this.
 
 ---
 
+## An unhealthy pod blocks its own replacement, so a bad image change is a one-way door
+
+Found 2026-10-23 while measuring ADR-041's case, and it is the half that
+ADR-041 deliberately does NOT fix.
+
+Apply a bad image (wrong LMDB format, a tag that does not exist, anything that
+stops the pod reaching Ready) and the StatefulSet rolls it. Then correct the
+spec. The template updates — and **the pod stays on the old image**. Under
+`podManagementPolicy: OrderedReady` the controller will not replace a pod that
+is not Ready, so the broken pod blocks the very update that would fix it.
+
+Measured: `storageFormat` put back to the correct value, StatefulSet template
+confirmed back on the 2.7 image, pod still running the `-ol26` image through
+five restarts with no progress. `kubectl delete pod slapd-2` recovered it in
+under 15 s with both databases intact.
+
+So the user reaches this with one CR edit and cannot leave it with another.
+ADR-041's preflight makes the state much harder to ENTER; nothing makes it
+easier to LEAVE, and the format mismatch is only one of the ways in.
+
+**Why it is not obviously the operator's to fix.** Deleting a user's pod is a
+destructive act on state the operator did not create, and "the pod is not Ready
+and its image differs from the template" is also true, transiently, during
+every normal roll. A fix has to distinguish "mid-roll" from "wedged", and the
+honest signal for that is time plus restart count, which is a heuristic.
+
+Shape of a fix, in increasing order of nerve:
+
+1. **Say so.** A condition naming the pod, its image, the template's image, and
+   the fact that correcting the spec will not move it — with the
+   `kubectl delete pod` escape. Pure observability, no new risk, and it closes
+   the gap between "the operator knows" and "the user knows".
+2. **Offer it.** An explicit, imperative, one-shot request (the
+   `SlapdRollingReplace`/`SlapdForceWritable` shape) that carries the human's
+   assertion and does the delete.
+3. **Do it.** Automatically delete a pod that is crashlooping on a stale
+   revision past some threshold. Needs the heuristic above to be right, and
+   gets it wrong during a slow image pull.
+
+1 is clearly worth building and is a small amount of work. 2 fits the existing
+pattern. 3 wants evidence nobody has.
+
+Documented meanwhile in `docs/OPENLDAP-VERSIONS.md`, which now tells the reader
+that correcting the spec is necessary but not sufficient.
+
 ## A version-crossing image change on a populated cluster fails without explanation
 
 Editing a populated 2.6 cluster's `spec.images` to the 2.7 pair (or back)

@@ -34,8 +34,8 @@ different question:
 helm pull oci://ghcr.io/chuck-chuck-chuck-net/charts/<chart> --version <X.Y.Z>
 ```
 
-`--version` takes the bare version, **without the leading `v`** — `--version 0.2.0` for the
-`v0.2.0` release. Helm passes it through to the registry as a tag and does not normalise it,
+`--version` takes the bare version, **without the leading `v`** — `--version 0.5.0` for the
+`v0.5.0` release. Helm passes it through to the registry as a tag and does not normalise it,
 so the wrong spelling is a 404 rather than a warning. See [Versioning](docs/VERSIONING.md).
 
 ### 2. Deploy a Cluster
@@ -211,34 +211,73 @@ Authoritative field documentation is the CRD itself — `kubectl explain
 slapdcluster.spec.replication`, or the Go types in
 [`operator/api/v1alpha1/`](operator/api/v1alpha1/).
 
-## OpenLDAP 2.7 by default
+## The data-plane images: which slapd you get, and why
 
-The slapd images ship **OpenLDAP 2.7.1**, built from a vendored Debian
-packaging fork — at a time when no distribution packages 2.7 at all. That is a
-deliberately early adoption, for two reasons:
+Slaptain ships **four** slapd/slapd-init pairs. You pick one with two fields
+that name what they govern, rather than by typing a tag:
 
-1. **It addresses an issue we actually ran into.** A pod that loses its volumes
-   and resyncs from its peers can drive an OpenLDAP 2.6 mesh into a
-   `sync cookie is stale` refresh storm
-   ([ITS#9580](https://bugs.openldap.org/show_bug.cgi?id=9580)) — minutes of
-   pegged CPU while the cluster reports itself healthy. The fix is released
-   only in the 2.7 line. Upstream calls it a partial fix, so 2.7 *addresses*
-   the failure mode rather than provably closing it — but partial and released
-   beats complete and hypothetical.
-2. **This project leans forward.** Anyone bold enough to run a young operator
-   for multi-master OpenLDAP is not the audience that needs to wait for a
-   distro to package 2.7.
+```yaml
+spec:
+  images:
+    select:
+      storageFormat: lmdb1.0   # what can open your volumes — lmdb1.0 | lmdb0.9
+      flavour: pure            # whether you run our patches — pure | slaptain
+```
 
-The previous Debian-packaged 2.6 build stays available as the `<tag>-ol26`
-image pair — needed for hot-migration clusters that must match a 2.6 source.
+| `storageFormat` | `flavour` | what it is |
+|---|---|---|
+| `lmdb1.0` | `pure` | **the default** — OpenLDAP 2.7.1, no slaptain patches |
+| `lmdb1.0` | `slaptain` | 2.7.1 plus our behaviour patches |
+| `lmdb0.9` | `pure` | OpenLDAP 2.6, Debian's own build |
+| `lmdb0.9` | `slaptain` | 2.6 plus our behaviour patches |
 
-> **⚠ There is no in-place 2.6 → 2.7 upgrade.** OpenLDAP 2.7 uses LMDB 1.0,
-> whose on-disk format 2.6 cannot read and vice versa. Editing a populated 2.6
-> cluster's `spec.images` to 2.7 is **not** an upgrade: every pod crashloops on
-> volumes it cannot open, and the operator currently neither refuses the change
-> nor explains the crashloop. The supported migration is a dump and reload —
-> the runbook, the tag scheme, and the reasoning live in
-> [`docs/OPENLDAP-VERSIONS.md`](docs/OPENLDAP-VERSIONS.md).
+The selector drives **both** images from one declaration, which is why "pin
+both or neither" is not a rule you can get wrong. An explicit
+`spec.images.slapd.tag` still wins and is used verbatim — the selector picks a
+build, it does not take a pin away from anyone who wants one.
+
+**The two axes are named for what they decide, not for a version.** Keying on
+the storage format means we can keep shipping newer slapd builds — security
+fixes included — under the same selection, because the only thing that can
+strand a volume is the axis you pinned yourself.
+
+### Why 2.7 is the default
+
+Not because of a bug fix. An earlier version of this page said 2.7 was adopted
+to escape a `sync cookie is stale` refresh storm; that reasoning was
+**retracted** — the storm is
+[ITS#9398](https://bugs.openldap.org/show_bug.cgi?id=9398), it is fixed in no
+release of either line, and slaptain addresses it with a log-database
+checkpoint that works on both (see
+[`docs/ITS-9398-HANDLING.md`](docs/ITS-9398-HANDLING.md)).
+
+The real reason is simpler: **whoever takes the default never migrates.**
+OpenLDAP 2.7 uses LMDB 1.0, 2.6 uses 0.9, and the two on-disk formats cannot
+read each other. Defaulting to 2.6 would mean every cluster that said nothing
+eventually pays a dump-and-reload to reach 2.7. Defaulting to 2.7 costs that
+nobody. 2.6 stays available, deliberately chosen, for interoperating with an
+existing 2.6 deployment during a migration (ADR-011).
+
+### Why `pure` is the default flavour
+
+Nobody should have to run a patched slapd in production without having chosen
+to. The `slaptain` flavour carries our own behaviour patches — each with a
+stated reason in `images/openldap-deb/debian/changelog` — and today its one
+user is the [purge rotation](#the-accesslog-purge-rotation), whose per-pod
+phase is a third field of `olcAccessLogPurge` that upstream does not accept.
+Asking for it is a deliberate act, and the package revision tells you which
+you got: `slapd -VV` reports `+slaptain<N>` or `+pure<N>`.
+
+> **⚠ Changing `storageFormat` on a populated cluster is not an upgrade.** The
+> two LMDB formats are mutually unreadable, so every pod crashloops on volumes
+> it cannot open — and slapd's message for it says
+> `MDB_INVALID: File is not an LMDB file … Restore from backup!`, which is
+> wrong: the volume is healthy and restoring would be destructive. Worse, the
+> pod then blocks its own replacement, so correcting the spec is necessary but
+> not sufficient; you must delete the stuck pod by hand. The supported
+> migration is a dump and reload. Read
+> [`docs/OPENLDAP-VERSIONS.md`](docs/OPENLDAP-VERSIONS.md) **before** you touch
+> this field.
 
 ## Key Features
 
@@ -250,10 +289,52 @@ image pair — needed for hot-migration clusters that must match a 2.6 source.
 - **Multi-database support**: run multiple independent databases (each with its own suffix, credentials, ACLs, replication config) in one cluster.
 - **Security**: rootless execution (UID 1024), no privilege escalation, read-only root filesystem, distroless runtime images, TLS encryption.
 - **Database lifecycle**: cleanup policy (Retain/Delete) controls what happens when a `SlapdDatabase` CR is deleted. Default: Retain (database stays in slapd, becomes unmanaged).
+- **Data-plane image selection**: `spec.images.select` names the build by what it governs — the on-disk format its volumes are in, and whether it carries slaptain's patches — and drives both the slapd and slapd-init images from one declaration, so a mismatched pair is not a state you can reach.
+- **Accesslog purge rotation** (optional): stagger each pod's journal purge and move the write endpoint off the pod that is purging, so the purge never blocks the writes. See [The Accesslog Purge Rotation](#the-accesslog-purge-rotation).
 - **Backup & restore**: on-demand and scheduled `slapcat`→S3 backups with retention (`SlapdBackup` / `SlapdScheduledBackup`); restore into a fresh database (`SlapdDatabase.spec.bootstrapFrom`) or roll back an existing one in place (`SlapdRestore`). See [Backup & Restore](docs/BACKUP.md).
 - **Multi-site meshes**: describe the sites once in a `SlapdMesh` and apply one chart with one values file at every site; the operator derives each site's serverID stride slot, its cross-site peers, the network mode and the trust wiring from the mesh plus its own `siteName`. See [Multi-Site Deployments](docs/MULTI-SITE.md).
 - **Diagnostics**: `slctl` inspects every pod directly and judges what it finds — CSN convergence per database, topology, stanza counts, suffix visibility — and collects a full incident bundle with `debug-dump`. See [slctl](docs/slctl.md).
 - **Server-side apply**: all resource management uses SSA — no optimistic concurrency conflicts.
+
+## The Accesslog Purge Rotation
+
+Delta-syncrepl writes every change to a per-database journal, and that journal
+has to be pruned. The problem is *where* the pruning happens:
+`accesslog_purge()` deletes expired entries in an unpaced loop while holding
+the journal environment's single LMDB writer — and every client write appends
+to that same environment. **So a provider purging its own journal stalls its
+own writes.** Measured at 100k ops/s: a 30-second write stall per cycle, with
+reads continuing at roughly 75 %.
+
+Scheduling alone cannot fix it. The duty cycle is `write rate / delete rate`
+and the interval does not appear in that fraction, so a provider that takes
+writes pays regardless of how often it purges.
+
+The rotation moves the work instead of rescheduling it: every pod gets its own
+purge phase on a shared grid, and a `<cluster>-write` Service follows one slot
+behind, so **the pod taking writes is never the pod purging**. Measured with
+the endpoint moving early enough for clients to drain, the per-boundary stall
+is gone rather than smaller — 137,626 ms worst-case write latency became
+2,314 ms.
+
+It is **opt-in**, it needs clients that re-dial (a Service does not re-wire an
+established connection), and the sizing is arithmetic you have to do for your
+own write rate. It also needs the `slaptain` image flavour, because the per-pod
+phase is a field upstream slapd does not accept.
+
+```yaml
+spec:
+  images:
+    select:
+      flavour: slaptain
+  rotation:
+    enabled: true
+    slotLength: 6h
+```
+
+Read [`docs/PURGE-ROTATION.md`](docs/PURGE-ROTATION.md) before enabling it — it
+leads with the client-connection contract, which decides whether the feature
+pays for you at all.
 
 ## Multi-Site Meshes
 
@@ -376,13 +457,16 @@ Running a replicated OpenLDAP cluster on Kubernetes creates lifecycle problems t
 - [Multi-Site Deployments](docs/MULTI-SITE.md) — the mesh model, the cross-site invariants, a multi-site install, and how to check a mesh is healthy
 - [Bootstrap Internals](docs/BOOTSTRAP.md) — init container and operator bootstrap sequencing
 - [Backup & Restore](docs/BACKUP.md) — S3 backup, scheduled backups + retention, restore into a fresh DB, in-place rollback
+- [Purge Rotation](docs/PURGE-ROTATION.md) — the client-connection contract first, then how to turn the rotation on, the sizing arithmetic, and what it cannot do
+- [Monitoring](docs/MONITORING.md) — what slaptain exposes to Prometheus, the join keys, and what it still cannot tell you
+- [Upgrading](docs/UPGRADING.md) — what an operator upgrade does to a running mesh, per release
 - [Tuning & Sizing](docs/TUNING.md) — what is tunable, slaptain's defaults and how they differ from slapd's, and sizing a cluster from lab to production
 - [Versioning](docs/VERSIONING.md) — where the `v` goes (git tags) and where it must not (images, charts, `--version`)
 - [TLS Certificates](docs/TLS.md) — where certificates come from (org PKI, cert-manager, the cluster CA), and how clients come to trust them
 - [slctl](docs/slctl.md) — the diagnostic CLI: status, inspect, debug-dump, ldapsearch/add/modify/delete against a managed cluster
 - [OpenLDAP Versions](docs/OPENLDAP-VERSIONS.md) — the 2.7/2.6 image pairs, the tag scheme, and the 2.6 -> 2.7 migration runbook
 - [Sample manifests](operator/config/samples/) — one commented example per CRD
-- [Architecture Decision Records](docs/adrs/) — ADR-001 through ADR-030
+- [Architecture Decision Records](docs/adrs/) — ADR-001 through ADR-041
 - [Development Guide](docs/DEVELOPMENT.md) — prerequisites, image builds, operator dev loop, e2e cycle, debugging, project discipline
 - [GitHub Issues](https://github.com/chuck-chuck-chuck-net/slaptain/issues) — bug reports and feature requests
 

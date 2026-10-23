@@ -59,7 +59,28 @@ spec:
   replication:
     ridSegment: 1
     # deltaSync: true                # default
-    # syncprovCheckpoint: "500 15"
+    # syncprovCheckpoint: "500 15"   # the DATA db's checkpoint; no default
+    #
+    # The ACCESSLOG db's checkpoint, which defaults ON at "1 1" and is the one
+    # you should leave alone. A log DB's contextCSN is written only by a
+    # checkpoint or a clean shutdown, while its minCSN is durable from the
+    # first write carrying a new serverID — and an unclean stop in between
+    # leaves the pod refusing EVERY consumer of that log, permanently
+    # (ITS#9398). "1 1" is not a dial: the checkpoint has to fire on the log
+    # entry's own operation, so a larger value reopens the window.
+    # Measured cost: no throughput or latency penalty; ~7% less replication
+    # headroom at a quarter of a million ops/s, on fast local storage.
+    # accesslogSyncprovCheckpoint: "none"   # opt out, and take the exposure back
+    #
+    # WHERE the data DB's session log comes from. Unset means Accesslog since
+    # 0.5.0: the in-memory log is lost at every restart, so a consumer that
+    # reconnects after one takes a full refresh it did not need, while the
+    # journal is already on disk. STARTUP-ONLY — editing this changes nothing
+    # on a running pod; the operator reports
+    # StartupConfigConverged=False/RestartRequired and leaves the restart to
+    # you (ADR-034).
+    # syncprovSessionlogSource: InMemory    # the pre-0.5.0 behaviour, by name
+    #
     # accesslogPurge: what this database KEEPS. WHEN the purge runs is the
     # cluster's (SlapdCluster.spec.accesslogPurge.interval, or spec.rotation).
     # accesslogPurge:

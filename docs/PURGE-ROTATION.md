@@ -125,6 +125,23 @@ this feature does.
 | `spec.replication.enabled` with `deltaSync`, and `spec.replicas ≥ 2` | A pod with no change journal has nothing to purge, and with one pod there is no pod to rotate to |
 | Clients that re-dial — see [above](#read-this-first-the-feature-only-pays-for-clients-that-re-dial) | A Service does not move an established connection |
 
+### Asking for a patched image
+
+Since 0.5.0 the **default slapd build is pure** — upstream OpenLDAP with none
+of our patches — so a default cluster cannot express a purge phase. That is
+deliberate: nobody should have to run a patched slapd without having chosen to.
+Choosing is one field, and it drives both data-plane images together:
+
+```yaml
+spec:
+  images:
+    select:
+      flavour: slaptain          # pure (default) | slaptain
+```
+
+Verify what you actually got with `slapd -VV` inside a pod: a patched build
+reports a version ending in `+slaptain<N>`, a pure one `+pure<N>`.
+
 A pod whose slapd refuses the phase keeps a **bounded** journal: the operator
 writes the two-field `<retention> <interval>` value instead and reports it per
 database as `AccesslogPurgeConverged=False/PurgePhaseUnsupported`. The feature
@@ -147,10 +164,47 @@ spec:
 spec:
   rotation:                       # form B: staggered, plus the write endpoint
     enabled: true
+    mode: PurgeAndWrite           # unset = PurgeAndWrite; see below
     slotLength: 6h                # required when enabled; NO default
     leadTime: 180s                # how early the endpoint moves; unset = 0
     slotsFromWriteToPurge: 1      # unset = 1; leave it alone unless measuring
 ```
+
+### `mode` — which of the two halves run
+
+The rotation is two mechanisms that ship as one: staggering each pod's purge,
+and moving the write endpoint off the pod that is purging. They are separable,
+and the evidence for each differs, so they are separately settable.
+
+| mode | what runs | what it needs |
+|---|---|---|
+| `PurgeAndWrite` (unset) | both halves | a patched image |
+| `PurgeOnly` | staggered purges, endpoint stays put | a patched image |
+| `WriteOnly` | the endpoint moves, no purge phases | **works on a pure build** |
+
+**`PurgeAndWrite` is the only shape measured end to end**, and the only one the
+charts offer. The other two are ADR-039 tier 2: functionally valid, honestly
+reported, and carrying less evidence.
+
+What the evidence actually says, so you can weigh it:
+
+- **`PurgeOnly`** — staggering alone measured as *baseline* for writer
+  throughput at n=2 and 100k ops/s: a pinned writer purges once per `T` either
+  way, for the same duration. What no arm isolated is **fleet read capacity** —
+  reads keep flowing at ~75 % on a purging provider, so a synchronised purge
+  drops the whole fleet to ~75 % at one instant while a staggered one degrades
+  one pod at a time. Plausible, unmeasured.
+- **`WriteOnly`** — needs no patch, because repointing a Service is not
+  something slapd has to understand. Its own argument is ADR-036: rotating the
+  write endpoint keeps every provider's own serverID advancing, which bears on
+  the dormancy class behind the stale-cookie failures. Never measured as its
+  own arm.
+
+Fields that have no referent in the mode you chose are **reported, not
+ignored**: `slotsFromWriteToPurge` and `leadTime` mean nothing under
+`WriteOnly` (there is no purge slot to displace from), and the operator says so
+with `RotationConfigured=False/FieldHasNoReferentInMode`, naming the field and
+the mode.
 
 ```yaml
 # SlapdDatabase — WHAT to keep

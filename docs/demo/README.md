@@ -325,5 +325,10 @@ kubectl get crd -o name | grep ldap.chuck-chuck-chuck.net | xargs kubectl delete
 - [Backup & Restore](../BACKUP.md): scheduled backups, retention, restoring
   into a new database.
 - [Multi-Site Deployments](../MULTI-SITE.md): replication across clusters.
+- [OpenLDAP Versions](../OPENLDAP-VERSIONS.md): the four data-plane image
+  pairs, how to select one, and why changing the storage format on a populated
+  cluster is a migration rather than an upgrade.
+- [Purge Rotation](../PURGE-ROTATION.md): keeping the accesslog purge off the
+  pod that is taking writes.
 - [slctl](../slctl.md): the diagnostic CLI.
 - [Architecture Decision Records](../adrs/).

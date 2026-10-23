@@ -9,17 +9,33 @@ metadata:
 spec:
   # images is OPTIONAL. Omitted, the operator defaults both data-plane images to
   # its own registry path and tag, so a cluster tracks the operator it is
-  # running under. Set fields here only to pin deliberately (e.g. the -ol26
-  # OpenLDAP 2.6 pair for hot-migration interop — always pin both or neither,
-  # see docs/OPENLDAP-VERSIONS.md).
+  # running under.
+  #
+  # To choose a DIFFERENT build, prefer select over typing a tag: it names what
+  # the build governs rather than what it is called, and it drives BOTH images,
+  # so a mismatched pair is not a state you can reach.
   # images:
+  #   select:
+  #     # What can open your volumes. lmdb1.0 = OpenLDAP 2.7 (default),
+  #     # lmdb0.9 = 2.6. The two formats are mutually unreadable: changing this
+  #     # on a POPULATED cluster is a dump-and-reload, not an upgrade. Read
+  #     # docs/OPENLDAP-VERSIONS.md first.
+  #     storageFormat: lmdb1.0
+  #     # Whether the build carries slaptain's own behaviour patches.
+  #     # pure (default) is upstream as our packaging builds it; slaptain is
+  #     # needed only by spec.rotation's purge phases (docs/PURGE-ROTATION.md).
+  #     # `slapd -VV` reports +pure<N> or +slaptain<N>, so you can check.
+  #     flavour: pure
+  #
+  # An explicit tag still WINS over select and is used verbatim — pinning an
+  # artifact means that artifact. Pin both or neither.
   #   slapd:
   #     repository: ghcr.io/chuck-chuck-chuck-net/slaptain/slapd
-  #     tag: 0.2.1
+  #     tag: 0.5.0
   #     pullPolicy: IfNotPresent
   #   init:
   #     repository: ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-init
-  #     tag: 0.2.1
+  #     tag: 0.5.0
   #     pullPolicy: IfNotPresent
 
   ldap:
@@ -86,3 +102,41 @@ spec:
   #       tlsSecretName: "site-b-ca"
   #       bindDN: "cn=replication,dc=chuck-chuck-chuck,dc=net"
   #       bindPasswordSecretName: "shared-repl-creds"
+
+  # WHEN the accesslog journals are purged. This is the CLUSTER's to decide —
+  # a schedule is a property of the fleet, not of one database — while WHAT
+  # each database keeps is on the SlapdDatabase (spec.replication.accesslogPurge).
+  #
+  # Exactly one of the two forms below. Setting both is REFUSED, never resolved
+  # by precedence: RotationConfigured=False/ScheduleDeclaredTwice, with the
+  # operator's 24h default still in force so nothing goes unpurged meanwhile.
+
+  # Form A — one schedule, every pod purging together. Unset means 24h.
+  # accesslogPurge:
+  #   interval: 24h
+
+  # Form B — the purge rotation (OPT-IN, docs/PURGE-ROTATION.md). Each pod
+  # purges in its own slot and a <cluster>-write Service follows one slot
+  # behind, so the pod taking writes is never the pod purging. A purge holds
+  # the journal's single LMDB writer, which is the same writer client writes
+  # need, so this is the difference between a periodic write stall and none.
+  #
+  # Read the guide before enabling: it only pays for clients that RE-DIAL (a
+  # Service does not re-wire an established connection), and the sizing is
+  # arithmetic for your own write rate.
+  # rotation:
+  #   enabled: true
+  #   # Which halves run. Unset = PurgeAndWrite, the only shape measured end to
+  #   # end. PurgeOnly staggers without moving the endpoint; WriteOnly moves
+  #   # the endpoint without purge phases and is the one that works on a PURE
+  #   # image. Both are ADR-039 tier 2.
+  #   mode: PurgeAndWrite
+  #   slotLength: 6h              # required when enabled; NO default
+  #   leadTime: 180s              # move the endpoint this early; unset = 0
+  #   # slotsFromWriteToPurge: 1  # leave alone unless you are measuring
+  #
+  # NOTE: the purge PHASE is a third field of olcAccessLogPurge that upstream
+  # slapd rejects, so PurgeAndWrite and PurgeOnly need spec.images.select
+  # .flavour: slaptain. A pure slapd keeps a bounded journal and the operator
+  # reports AccesslogPurgeConverged=False/PurgePhaseUnsupported — the feature
+  # degrades to "no rotation", never to "no purge".

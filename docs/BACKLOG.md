@@ -95,6 +95,69 @@ tests, so the atomic `Replace` remains guarded by prose.
 
 ---
 
+## A rotating write endpoint has no answer for read-after-write clients
+
+Idea raised 2026-10-23. With `spec.rotation` on, a client that needs
+"my own write is visible to my next read" can lose that guarantee at a slot
+boundary, and the window is not small.
+
+**The mechanism, and it is measured rather than hypothetical.** `<name>-write`
+moves to a different pod every slot. A Service never re-wires an established
+connection, so a client only follows the move when it re-dials — which is the
+documented contract. But at the moment it *does* re-dial it lands on a pod that
+may not yet carry the write it made seconds earlier on the previous one, and
+the previous pod is by construction the one that just started purging. ADR-037's
+twelfth amendment measured exactly that residue: `contextCSN` spread alternates
+between **0.01 s and 96-150 s** on the slot rhythm. So the stale window is not
+a replication hiccup, it is up to two and a half minutes, arriving on a
+schedule.
+
+The corner the reporter named is the sharp one: a connection TTL expiring
+*just* as the endpoint moves. Nothing is wrong, every component behaves as
+designed, and the client reads its own write back as absent.
+
+**Today there is no sanctioned answer.** The operator creates `<name>` (whole
+RW fleet, round-robin), `<name>-write` (rotating, one pod), and the two
+read-only Services. Nothing offers "the same pod, every time", and
+`sessionAffinity` is not set anywhere.
+
+### What a fix would have to trade
+
+This cannot be solved by routing. Read-after-write across an asynchronous
+multi-master mesh is a consistency property, and a Service can only decide
+*where* a request goes. So any option here buys consistency by giving
+something up, and the entry should say which:
+
+| option | gives you | costs |
+|---|---|---|
+| `sessionAffinity: ClientIP` on `<name>` | stickiness without new API | wrong granularity — NATed or proxied clients share one IP and land together; affinity has its own timeout; still re-balances when the endpoint set changes |
+| document the existing pod DNS (`<name>-<n>.<name>-headless`) | zero new surface, works today | the client hardcodes an ordinal and gets no failover; it is pod identity, not a service |
+| per-pod ClusterIP Services (`<name>-0`, …) | a real endpoint per pod, failover-free but nameable | N more Services per cluster, and the client still picks |
+| a second, NON-rotating `<name>-sticky` | one name, stable | it must pin to *some* pod, and that pod purges 1/n of the time — so this client gets the full write stall the rotation exists to avoid |
+
+The last row is the honest core of it: **a client that refuses to move is a
+client that will sit on a purging pod.** That is not an argument against the
+feature — it is the trade the user should be making deliberately, and ADR-037
+already frames the rotation as a recommendation rather than an enforcement
+("writes sent elsewhere stay legal and cost one stall").
+
+### Worth checking before building anything
+
+- **Does `leadTime` already cover most of it?** The lead exists so a connection
+  no older than `d` never delivers writes into the purge that starts at the
+  boundary. A client whose TTL is comfortably under `leadTime` re-dials to the
+  new writer *before* the old one starts purging, so its write is replicated
+  out of a pod that is not yet busy. If that closes the practical case, the
+  answer is documentation plus a sizing rule, not a Service.
+- **What the client actually needs.** "Read-after-write" is often satisfied by
+  reading back on the same *connection*, which already works — the Service
+  does not move an established one. The problem is specifically clients that
+  pool, expire and re-dial between the write and the read.
+
+If it is built, `docs/PURGE-ROTATION.md` is where it belongs: that guide
+already leads with the client-connection contract, and this is the same
+contract read from the other side.
+
 ## The CRD samples are unreadable as a starting point
 
 Reported 2026-10-23, from somebody who wanted a cluster and a database without

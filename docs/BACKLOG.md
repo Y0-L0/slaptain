@@ -3738,39 +3738,117 @@ pre-release check rather than a pre-merge one.
   grep, `accesslog-mincsn` per site, `DataPresent`, and the invariant that no
   replicated database is ever left without a purge value.
 
-## The rotation-aware read Service, waiting on numbers it does not have
+## The rotation-aware read Service — deferred a third time, now on topology rather than on numbers
 
-ADR-037's second amendment designs it and `docs/PURGE-ROTATION-PLAN.md` puts it
-out of scope deliberately: reads go to the read-only replicas **plus the
-current writer**. Nothing in the rotation work built it, and reads still go to
-`<cluster>` (the whole fleet) and `<cluster>-readonly`.
+ADR-037's second amendment designs it (`adr-037`, "The reads") and
+`docs/PURGE-ROTATION-PLAN.md` put it out of scope deliberately: reads go to the
+read-only replicas **plus the current writer**. Nothing in the rotation work
+built it, and reads still go to `<cluster>` (the whole read-write fleet) and
+`<cluster>-readonly`, with no Service spanning both.
 
-**The argument is freshness, not latency.** Only one provider purges at a time,
-so latency alone would justify excluding exactly that pod. The real claim is
-that a provider which has just purged is working off replication lag — measured
-peaking near 35 s — while under the preferred offset the writer is by
-construction the most-recovered provider.
+**Deferred again on 2026-10-25, and this time for a different reason.** The two
+numbers the earlier entry waited on are no longer what blocks it; a topology
+decision does.
 
-**Its cost scales inversely with `readReplicas`.** At `readReplicas: 0` the
-read service collapses onto one pod, which on a read-dominated profile is a
-cliff. So the default would have to follow `readReplicas`, with "every pod that
-is not purging" as the other mode — one of the few places where the right
-answer is a property of the deployment rather than of the design.
+### What changed: the contradiction is resolved
 
-### What it is waiting for
+The earlier entry said to resolve this before sizing anything — slapload's
+record says *"a purge stall blocks reads, not just writes"*, ADR-037 says reads
+flow at ~75 % while writes block. Both measured.
 
-Two numbers, both of which the load work should produce:
+They are **not in conflict**, and ADR-037 had already recorded the hole they
+fall into (`adr-037`, Context): *"the controlled runs show writes stalling while
+reads continue, the field reports full unresponsiveness. That discrepancy is
+unresolved and it matters."* slapload is the third data point and the first
+instrumented one, on the field side. Its record (`docs/FINDINGS.md`, and the
+rules in its `CLAUDE.md`) adds the mechanism: a purge does not make reads
+**fail**, it makes them **wait**, so the signal is dropped iterations, not
+errors.
 
-- **replication lag on a just-purged provider**, to say whether excluding it
-  buys enough freshness to pay for the lost read capacity;
-- **read-path cost at a given `readReplicas`**, to size the default.
+Mean capacity and tail behaviour are different quantities, and both readings
+can be true at once: a pod can average ~75 % of its read throughput across a
+purge window while containing multi-second intervals in which it serves
+nothing.
 
-And one contradiction to resolve first. slapload's `CLAUDE.md` records *"a purge
-stall blocks reads, not just writes"* (20,136 VUs parked at 138k ops/s);
-ADR-037 records reads flowing at ~75 % while writes block. Both are measured.
-If slapload's reading holds for the purging pod specifically, this feature is
-worth materially more than its own ADR currently argues — so resolve it before
-sizing anything.
+### An arithmetic check nobody has closed
+
+ADR-037 states *"Reads keep flowing at ~75 %"* bare in Context, with no run
+cited and no scope declared. 75 % is exactly 3/4, which is also what a four-pod
+fleet reports when one pod serves nothing — so the figure cannot be told apart
+from a fleet aggregate by reading the ADR.
+
+slapload's provider-vs-consumer pair is an independent route at it. Three
+read-write providers served 220k ops/s; three read-only consumers served 224k —
+98.2 %. For a three-pod fleet with staggered purges, expected fleet capacity is
+`1 − (n·P/T)·(1−f)/n` where `f` is the purging pod's retained fraction. At
+`t = 600 s`, `P ≈ 140 s`, `T = n·t`: `f = 0` predicts 92.2 % and `f = 0.75`
+predicts 98.1 %.
+
+If slapload's slot length and purge duration in that ramp were near those
+values, the ~75 % is a **per-pod** property measured twice by instruments that
+fail differently, and the two records never disagreed. **This needs that run's
+`t` and `P` to close, and until it does neither side should quote 75 % as the
+purging pod's read capacity.** All figures here come from one platform and are
+not transferable; slapload's are its own.
+
+### Why it is deferred anyway
+
+The feature harvests read capacity from providers while dodging the purge. The
+intended topology does not want it:
+
+- **`n` stays small.** N-way multi-master grids want to be small, and the
+  deployment shape is two read-write pods per site across three sites. Read
+  scale-out is by **consumers**, not by adding providers.
+- **Providers scale only for write capacity** — to satisfy `P < (n−1)·t` during
+  bulk provisioning. Steady-state write rates are low; bulk windows run against
+  an agreed write-rate ceiling, so a wider provider grid is an exception, not a
+  growth path.
+
+At `n = 2` the read-specific mathematics collapses onto the write mathematics:
+
+- the band where writes are healthy and reads are structurally squeezed,
+  `t < P < (n−1)·t`, is **empty**, because `(n−1)·t = t`;
+- the recovery asymmetry scales as `n−1`, so it is a factor of one. Writes get
+  `(n−1)·t − P = t − P`; reads get `t − d − P`. They differ only by the lead.
+
+And the capacity it would harvest is **anti-correlated with write load**: `P`
+grows with the write rate, so during the bulk windows that are the only reason
+to widen the provider grid, the purge is longest and the one non-purging
+provider is also the write target. A read path resting on that capacity loses
+it exactly when it is needed.
+
+Under "reads go to consumers", purge exposure on the read path is already zero
+and `<cluster>-readonly` **is** the read Service. There is nothing left for the
+hybrid to buy at this topology.
+
+### Reopen on any of
+
+- **Three or more read-write pods per site.** The empty band opens, the
+  asymmetry becomes a factor of `n−1`, and the question is live again.
+- **`readReplicas: 0` becoming a shape worth supporting for reads.** Then
+  providers carry reads by necessity and exposure is `P/T` per pod with no
+  alternative.
+- **Consumers failing to carry the read load** for a reason other than their
+  own thread pool — which is its own entry below and must be ruled out first,
+  since per-pod read capacity is currently a config default rather than a
+  hardware property.
+
+### If it is ever built
+
+It is **one parameter, not two designs.** Exclude the purging pod for `m` slots:
+
+- `m >= ceil((d+P)/t)` is forced — a pod still purging cannot be re-admitted;
+- `m = 1` is "every pod that is not purging", maximum read capacity;
+- `m = n−1` is ADR-037's stated default, RO replicas plus the current writer.
+
+Two further notes for whoever picks it up. A Service selector is label
+*equality*, so "not pod-k" is not expressible — it needs an operator-written
+pod label driven by the grid (a write to Pod objects, not to the pod template,
+so it rolls nothing; whether the StatefulSet controller reconciles such a label
+away is unverified). And the read lead wants to sit **just above** the client
+connection TTL rather than comfortably above it, the opposite of the write
+lead, because every second of lead comes out of the trailing margin
+`t − d − P`, which is what absorbs the just-purged pod's replication catch-up.
 
 ### Also parked with it
 
@@ -3778,6 +3856,13 @@ sizing anything.
   and every measured arm so far has been 2+2. Unknown rather than guessed.
 - Upstreaming the `logpurge` phase patch. It is ours and local; the packaging
   fork carries it.
+- **Documentation, which survives the deferral.** `docs/PURGE-ROTATION.md`
+  tells a client *"Reads stay on `<cluster>` (or `<cluster>-readonly`)"* — two
+  names and no guidance. Under the topology above the answer is
+  `<cluster>-readonly` whenever `readReplicas > 0`, and a load generator that
+  defaulted to the read-write Service read from providers while consumers sat
+  idle for a full day of runs before a dashboard showed it. Say which name, and
+  say why.
 
 ## A context the lab file does not describe can collide with a real site
 
@@ -3825,3 +3910,203 @@ differ by three characters with a quiet failure mode.
   lack.
 - Red first: build twice with a patch added in between, assert the reported
   version differs.
+
+## `olcThreads` has no CRD field, and the condition for adding one is now met
+
+`spec.tuning.toolThreads` is `olcToolThreads`, which only slapadd and slapindex
+read. The **runtime worker pool**, `olcThreads`, is neither set nor exposed, so
+the single directive that sets per-pod throughput cannot be expressed through
+the operator's API. Changing it means hand-editing `cn=config`, outside the
+operator, subject to whatever it reconciles and whatever the init container
+converges at pod start.
+
+That omission was deliberate and conditional. `slapdcluster_types.go` (above
+`SlapdTuningConfig`), `docs/TUNING.md` and this file all say the same thing:
+
+> upstream's defaults are defensible, the reference production platform leaves
+> them alone too, and a thread count we cannot measure is a knob we would be
+> guessing at. They stay recorded in `docs/BACKLOG.md` as escape hatches to add
+> **when a measurement asks for one**.
+
+**A measurement now asks for one.** Measured 2026-10-25 against a 3 read-write
++ 3 read-only cluster (one platform, figures not transferable):
+
+| read targets | total | per pod |
+|---|---|---|
+| 4 pods (2 rw + 2 ro) | 276k ops/s | 69k |
+| 3 pods (the providers) | 220k ops/s | 73k |
+| 3 pods (the consumers) | 224k ops/s | 75k |
+
+One ceiling per pod across three cluster shapes, with
+`openldap_threads_active` at 16 of 16 on every pod, `openldap_threads_pending`
+climbing to 16,577, and ~7.8 container cores used on nodes with far more. Not
+CPU-bound, not I/O-bound, not write-contended — out of worker threads at
+OpenLDAP's default `olcThreads 16`, which is independent of the machine the pod
+lands on.
+
+The providers-vs-consumers row is the one that rules out the alternative
+explanation: moving every read off the providers onto dedicated consumers
+removes all write, replication-replay and accesslog work from the read path and
+changed throughput by 2 %.
+
+**What it costs to not have it.** "How do we add read capacity" has exactly one
+answer today: more consumers — a PVC, a pod, and a full syncrepl refresh
+measured in hours for a large DIT. With `olcThreads` reachable it has two, and
+the second is a restart. On large nodes the second is often right.
+
+It also distorts how the read path is reasoned about: per-pod read capacity
+looks like a hardware property and is not. Spreading reads over more pods
+multiplies a default while the nodes idle.
+
+### Shape of a fix (not written)
+
+- **Determine the placement class first, empirically, before any field
+  exists.** This family has already produced two directives that hang slapd
+  outright on a live `ldapmodify` — `olcIdleTimeout` and `olcWriteTimeout`,
+  which is why they have no field either. Test `olcThreads` against a live pod,
+  then pick ADR-024 R1 (converged), R2 (bootstrap-time) or ADR-034
+  (startup-only, converged offline at pod start). Offering a field the operator
+  cannot honour is what ADR-024 R4 forbids.
+- Then `spec.tuning.threads`, with **no default and no recommended value** —
+  the `leadTime` precedent. Unset means slapd's 16.
+- **Do not quote slapload's old `olcThreads` table** (16 → 16,350 ops/s, 64 →
+  41,362, 128 → ~37,900). Those were taken before its uid index existed, when
+  every search was a full scan and 16 threads pinned 16.0 cores. Indexed, the
+  same 16 threads occupy 7.8 cores and wait on something other than CPU. The
+  mechanism transfers; the values do not, and the old optimum was found in a
+  regime that no longer exists.
+- Red first: a unit assertion that the rendered `cn=config` carries the
+  requested value, and a live check that a pod which started with it serves
+  normally.
+
+## No thread-saturation rule, and the refutation named the wrong metric
+
+`monitoring/prometheus-rules.yaml` records, correctly:
+
+> No thread-saturation rule. `cn=Pending,cn=Threads > 0` sustained was the
+> proposed signal, and live it read Pending > 0 with only 2-9 of 16 threads
+> active: Pending counts queued operations, not exhausted workers, so it cannot
+> say "every thread is busy".
+
+That refutes `Pending > 0`. It does not refute `Active == Max`, which is the
+saturation signal — and `docs/MONITORING.md` **already says so in prose**:
+*"Saturation is a queue that grows while Active sits at Max."* We export both
+`openldap_threads_active` and `openldap_threads_max`. We have the metrics, we
+have the correct formulation written down, and there is no rule.
+
+The 2026-10-25 run is exactly that shape: 16 of 16 active with pending climbing
+to 16,577, sustained, on a pod that was neither CPU- nor I/O-bound.
+
+This is ADR-039's own rule — *a refutation names what it tested* — biting for
+the third time, after ADR-037's seventeenth amendment and the ~75 % scoping
+question above. The pattern each time: a measurement refutes one formulation
+and gets filed as refuting the phenomenon.
+
+### Shape of a fix (not written)
+
+- Rule on `openldap_threads_active / openldap_threads_max` at 1 sustained,
+  with `openldap_threads_pending` rising, over a window longer than a purge.
+- Red first: a promtool test with a series at Active == Max, and a second at
+  Pending > 0 with Active well below Max that must **not** fire — the case the
+  original note correctly rejected.
+
+## `openldap_waiters{direction="read"}` may be `connections_current` renamed
+
+Reported 2026-10-25: `direction="read"` tracks `openldap_connections_current`
+sample for sample, because every idle open connection sits in the event loop
+waiting to be read. `direction="write"` stayed at 0 through a sweep peaking at
+278k ops/s.
+
+If that holds, we export one quantity twice, which ADR-033 forbids ("No
+quantity is exported twice; the one sanctioned overlap is `up`"), under a name
+that reads as contention. `docs/MONITORING.md` documents the family and the
+dashboard graphs it in the collapsed "Threads and waiters" panel, where a
+reader will take it for queue depth.
+
+### Shape of a fix (not written)
+
+- Confirm by our own route first: graph
+  `openldap_waiters{direction="read"} - openldap_connections_current` over a
+  run. Flat zero settles it; this is a reading, so it wants a second instrument
+  rather than a mutation.
+- If confirmed, **keep the metric** — it is a faithful reading of
+  `cn=Read,cn=Waiters` — and fix what claims it means: say in
+  `docs/MONITORING.md` that read waiters are open connections, and drop it from
+  the panel that implies otherwise. Only `direction="write"` carries contention.
+
+## A purge is invisible to every instrument slaptain currently has
+
+A purge stall does not make operations fail, it makes them wait. Three columns,
+and only one of them sees it (slapload's record, 2026-10-25):
+
+| instrument | during a purge stall | why |
+|---|---|---|
+| error rate | ~0 | a stalled operation is not a failed one |
+| p99 latency | flat, or **down** | stalled operations never complete, so the percentile is computed from the fast ones that did |
+| dropped iterations | **the signal** | requests the client could not issue, because every worker is parked |
+
+The honest reading of a zero error rate during a purge is "no reads failed",
+never "reads were unaffected".
+
+**Our own side is worse, because we have no client at all.** The exporter
+collects on scrape with a 5 s socket deadline and, per ADR-033, unreadable
+evidence is **absent, never 0**. So a stalling pod reports nothing rather than
+something bad. The only rule watching that is `SlaptainSlapdExporterDown` at
+`for: 5m`; a purge of order 140 s produces a silent gap with no alert,
+indistinguishable from a scrape blip. The PodMonitor default interval is 30 s,
+which is about four samples across such a purge — enough to establish presence,
+not shape, and useless against the few-second stalls inside it.
+
+There is an inversion worth naming: ADR-033's "absent, never 0" exists to stop
+absence masquerading as a healthy zero. Here absence **is** the signal, and the
+principle converts it back into "unknown", which on a dashboard reads as fine.
+
+**And two different phenomena look alike.** A 25k/s dropped-iteration figure
+seen the same day turned out to be a ramp knee at ~275k ops/s, not a purge:
+drops rising monotonically with offered rate, no periodicity, errors ~0. A
+purge shows as **periodic bursts at a fixed offered rate, on the purge cycle**.
+Any future claim resting on drop rates has to carry that discriminator.
+
+### Shape of a fix (not written)
+
+- **The operator exports a per-pod "purging now" gauge.** It already computes
+  the epoch-anchored grid for the write endpoint, so this is ADR-033 Surface 2
+  by the book — the operator observes it directly rather than relaying it, and
+  it needs no new reading from slapd. It turns an invisible event into a
+  labelled window, after which any metric, ours or a load generator's, can be
+  split in-purge versus out-of-purge.
+- Without it, confirming anything about purge impact means correlating by wall
+  clock against a grid reconstructed by hand.
+- Red first: a unit assertion that the gauge is 1 exactly on `[k·t, k·t+P)` for
+  pod `k` and 0 elsewhere, against the same pure grid function the write
+  endpoint uses.
+
+## OpenLDAP 2.7.1 segfaults reliably under load testing
+
+Observed 2026-10-25 during load-tooling work: 2.7.1 segfaults quite reliably
+under test load, and the measurement arms moved back to the `-ol26` 2.6.10 pair
+as a result. **Not investigated** — deliberately deferred, because that session
+was building load tooling rather than debugging slapd. No core, no stack, no
+isolated arm, no statement of which operation mix triggers it.
+
+Recorded because the detail is perishable and because it is **material to
+ADR-040 decision 8**, which holds OpenLDAP 2.7 as the default on the argument
+that ITS#10597 is temporary and self-resolving (fixed in 2.7.2, inside the same
+storage-format line, no migration) while a move to 2.6 would be a permanent
+migration — the wrong trade, since whoever takes the default never migrates.
+
+A reproducible segfault under load is a different fact from a known upstream
+bug with a fix in flight, and it was not in that pricing. It does not reverse
+the decision on its own — an uncharacterised crash is not a comparable to a
+read ITS — but the decision was taken on a balance that now has an unweighed
+term on one side.
+
+### Shape of a fix (not written)
+
+- Capture one under the `-asan` image before the detail erodes
+  (`docs/DEBUG-IMAGES.md`): libasan names an invalid free or use-after-free at
+  the moment it happens, and the in-process symbolizer works in the distroless
+  image.
+- Record the operation mix, the offered rate and whether the pod was purging —
+  the three things that would let anyone else reproduce it.
+- Then, and only then, revisit ADR-040 decision 8 with it weighed.

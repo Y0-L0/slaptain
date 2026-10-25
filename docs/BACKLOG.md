@@ -4101,6 +4101,14 @@ the decision on its own — an uncharacterised crash is not a comparable to a
 read ITS — but the decision was taken on a balance that now has an unweighed
 term on one side.
 
+**And it may not be a 2.7-specific fact.** The entry below records a SIGSEGV on
+**2.6** (`-ol26src`) with a demonstrated trigger: `olcAccessLogPurge` rewritten
+while that database's purge was running. Before weighing this against ADR-040
+decision 8, check whether the 2.7.1 crashes correlate with purges, with
+rotation being on, or with scale events — if they do, these are one defect with
+two version labels, and this entry's bearing on the default-version decision
+evaporates.
+
 ### Shape of a fix (not written)
 
 - Capture one under the `-asan` image before the detail erodes
@@ -4110,3 +4118,125 @@ term on one side.
 - Record the operation mix, the offered rate and whether the pod was purging —
   the three things that would let anyone else reproduce it.
 - Then, and only then, revisit ADR-040 decision 8 with it weighed.
+
+## slapd segfaults when `olcAccessLogPurge` is rewritten while that database's purge is running
+
+**Observed once, 2026-10-25, on `slapd:sha-56d22dd-ol26src` (OpenLDAP 2.6,
+source-built).** Not investigated — recorded with enough detail to try to
+reproduce it.
+
+A `spec.replicas` scale-down from 3 to 2 on a rotation-enabled cluster
+(`{enabled: true, mode: PurgeAndWrite, slotLength: 300s, leadTime: 180s}`)
+crashed `slapd` on pod 0 with **exit code 139 (SIGSEGV)**. The pod was not
+replaced — the container restarted in place, so the only outward sign was
+`RESTARTS 1` on a pod 35 h old.
+
+### Why a scale changes the purge schedule at all
+
+Under rotation the purge interval is `replicas × slotLength`, so **a replica
+change necessarily rewrites `olcAccessLogPurge` on every surviving read-write
+pod** — here `T` went 900 s to 600 s, and the per-pod phases moved with it.
+There is no timing luck available: the rewrite is what a scale event *is*,
+under rotation.
+
+### The sequence, read from the two pods' logs
+
+Pod 0 logged two purge **starts** (`accesslog_purge: updating minCSN with 3
+values`) and two **completions** (`accesslog_purge: dn=… etime=… nentries=…`):
+
+| time (UTC) | pod 0 |
+|---|---|
+| 21:00:00 | purge #1 **starts** |
+| 21:00:28.1c | `MOD dn="olcOverlay={1}accesslog,olcDatabase={3}mdb,cn=config" attr=olcAccessLogPurge` |
+| 21:00:28.1e | purge #2 **starts** — same second as the MOD, while #1 is still running |
+| 21:00:28.21 | `MOD attr=olcSyncRepl` (dropping the departed peer's stanza) |
+| 21:00:30 | purge #1 completes, `etime=29.960435 nentries=84377` |
+| 21:00:32 | purge #2 completes, `etime=4.034848 nentries=10857` |
+| 21:00:34 | **SIGSEGV** |
+
+Two `accesslog_purge()` executions overlapped on one accesslog database for
+about two seconds, and slapd died two seconds after the second returned.
+
+**Pod 1 received the identical pair of modifies in the same reconcile pass and
+did not crash.** Its difference is the whole discriminator: its purge started
+*after* the MOD (start 21:00:28.2a, completion 21:01:01, `etime=33.334573
+nentries=89464`). It was not mid-purge when the schedule was rewritten.
+
+### Where to look first — this may be our patch, not upstream's
+
+The operator writes the attribute as a plain single `Replace`
+(`ensureOverlayAttr`, `slapddatabase_controller.go`), not as the
+delete-then-re-set that ADR-037 decision 5a describes. On stock 2.7.1 sources
+ADR-037 read that a Replace on an existing task *"only assigns
+`re->interval.tv_sec` and leaves `next_sched` alone"* — which would **not**
+fire a second purge. So the observed second purge is not explained by the
+upstream behaviour the ADR recorded.
+
+What is different here is that this build carries
+`images/openldap-deb/local-patches/accesslog-purge-phase.patch`, ours, which
+rewrites exactly that config path. In the live-update branch it now takes
+`rq_mutex` and writes `re->interval.tv_sec`, `re->phase.tv_sec` and
+`re->aligned`; the sibling branch inserts a **new** runqueue task when
+`re == NULL`. Two questions to answer first, both cheap and both from source:
+
+- Is `li->li_task` non-NULL for the whole time a purge is *running*? If the
+  runqueue clears or detaches it while the task executes, a config modify
+  arriving mid-purge takes the `else if ( li->li_open )` branch and **inserts a
+  second task**, which is exactly the shape observed.
+- Does the resched arithmetic (`next_sched = ph + ((now − ph)/iv + 1)·iv`) ever
+  land in the past or at `now` when `interval` and `phase` both change under a
+  running task?
+
+The patch's own comment records that this path was already racy before it
+(*"leaving `re->interval.tv_sec` to a racing unlocked write"*), so it is a
+known-delicate site that we narrowed rather than one we introduced from
+nothing — but it is ours, locally maintained, and in the crash's path. Treat
+"slapd has a bug" as the second hypothesis, not the first.
+
+### Shape of a reproduction (not attempted)
+
+The window is the purge duration inside the interval — here ~30 s in 600 s, so
+roughly 5 %. Widen it rather than retrying blindly: short `retention`, a high
+write rate and a large journal make `P` most of the cycle.
+
+1. Rotation-enabled cluster, `n >= 2`, on a build carrying both local patches
+   (the logging one is what makes any of this visible: `-ol26src`, or a 2.7
+   build which has its own timing line).
+2. Drive writes until a purge takes tens of seconds. Watch for
+   `accesslog_purge: updating minCSN with N values` — that line marks the
+   **start**; `accesslog_purge: dn=… etime=…` marks the **completion**. Both
+   are needed to see an overlap.
+3. While a purge is in flight, force the attribute to be rewritten. Either
+   route should do it, and the second one isolates the operator out of the
+   picture:
+   - change `spec.replicas` or `spec.rotation.slotLength` (the operator then
+     Replaces `olcAccessLogPurge` on every read-write pod); or
+   - `slctl ldapmodify --as config --pod <n>` a Replace of `olcAccessLogPurge`
+     on `olcOverlay={1}accesslog,olcDatabase={N}mdb,cn=config` directly, with a
+     changed interval.
+4. Expect a second purge start within the same second as the MOD, overlapping
+   the first, and watch for exit 139.
+
+Run it under the `-asan` image (`docs/DEBUG-IMAGES.md`) from the start — libasan
+names an invalid free or use-after-free at the moment it happens and the
+in-process symbolizer works in the distroless image, which is the difference
+between this entry and a root cause.
+
+### Why it matters beyond one restart
+
+- It sits on the rotation feature's path and is triggered by an **ordinary
+  operation**. ADR-013's rule is that scaling must not roll pods; this does not
+  roll one, it crashes one.
+- **The operator cannot avoid it today.** ADR-037 decision 5a establishes that
+  `back-monitor` has no runqueue subsystem — *"Phase cannot be read back"* — so
+  the operator has no way to know a purge is in flight and defer the write.
+- It may be a third member of a family ADR-024 already names: *never modify
+  `olcDbMaxSize`/`olcDbEnvFlags` on a live database — slapd segfaults*. If
+  `olcAccessLogPurge` cannot be modified safely while its purge runs, its
+  ADR-024 R6 placement is in question and ADR-034 (startup-only, converged
+  offline at pod start) is the obvious alternative — at the cost of making a
+  replica change require a restart, which ADR-016 prices as a topology event at
+  every peer.
+- It is **2.6**, which means it is not the 2.7.1 crash recorded above and the
+  two entries should not be merged until someone checks whether they are one
+  defect.

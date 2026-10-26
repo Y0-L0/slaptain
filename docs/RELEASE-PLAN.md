@@ -144,10 +144,36 @@ messages**. The first rewrite on v0.4.0 fixed file contents only, and `pre-push`
 — which scans every outgoing commit's message too — caught the rest on the
 final check.
 
-### Publishing: by hand, because the workflow has never worked
+### Publishing: the workflow works since 2026-10-25; the hand path stays written down
+
+**Resolved for the images, 2026-10-25.** The ghcr image packages were entitled
+by hand (the repository added under *Manage Actions access*), and the failed
+`publish-main` run for `70dd083` was re-run: attempt 2 succeeded, and the
+registry confirms it by a second route — `sha-70dd083` is listed on every image
+package, with the `-ol26` and `-ol26src` variants on the slapd pair, so all nine
+images landed and not just the first. That is the first publish ever made by
+CI in this repository: all twelve `publish-main` runs before it had failed, and
+so had the one `publish.yml` run (v0.4.0).
+
+**Not yet shown for the charts.** `publish.yml` also runs `make charts-push`,
+into four packages of their own — `charts/slaptain`, `charts/slapd`,
+`charts/slapd-mesh`, `charts/slapd-toolkit` — and every version on them,
+0.4.0 included, was pushed by hand, so they were created by a personal token
+exactly as the image packages were. `publish-main` never touches them, so the
+successful run above says nothing about them. Entitle the four the same way
+**before** tagging 0.5.0, or the tag run will build and push nine images and
+then die at the first chart with the same `write_package`. Whether that was
+already done on 2026-10-25 is not recorded here; the check is the package
+settings page, or the tag run itself. The GitHub Release step, the `slctl`
+binaries and the CRD bundle have likewise never been produced by CI.
+
+Nothing below this line should be deleted before the 0.5.0 tag has run
+`publish.yml` to the end. The analysis is the record of why, and the four traps
+bind any hand push just the same (a lab registry, a hotfix, a rebuild from a
+tag).
 
 `.github/workflows/publish.yml` triggers on `push: tags: v*` and looks complete.
-It is not. It was added on 2026-10-11 (`Ci/GitHub actions (#3)`) and **v0.4.0 was
+Until 2026-10-25 it was not. It was added on 2026-10-11 (`Ci/GitHub actions (#3)`) and **v0.4.0 was
 its first execution ever** — the repository has eight version tags and, before
 v0.4.0, zero GitHub Releases. Every release so far was hand-pushed.
 
@@ -166,8 +192,8 @@ role (or the equivalent "inherit access from repository"). `permissions:
 packages: write` in the workflow is necessary and not sufficient — it scopes the
 token, it does not entitle it to a package it does not own.
 
-Until that is fixed, publish from a workstation. The four traps, in the order
-they bite:
+Until 2026-10-25 that meant publishing from a workstation. The four traps, in
+the order they bite, hold for any push made from one:
 
 1. **`REGISTRY` may already be set in your environment**, in which case the
    Makefile's `REGISTRY ?= ghcr.io/chuck-chuck-chuck-net` never applies — `?=`
@@ -204,9 +230,10 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags='-s -w'   -o
 gh release create v0.4.0 --title v0.4.0 --notes-file notes.md --verify-tag dist/*
 ```
 
-Fixing the workflow is a packages-permission change plus one real run; it does
-not need the build touched. Worth doing before 0.5.0, since every release until
-then pays this by hand.
+Fixing the workflow was a packages-permission change plus one real run, and
+the build was not touched — done for the image packages 2026-10-25, see the
+top of this section. The chart packages are the open half; 0.5.0 is the first
+tag that can show `publish.yml` running to the end.
 
 ### Git history
 

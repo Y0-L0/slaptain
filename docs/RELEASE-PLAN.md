@@ -155,17 +155,19 @@ images landed and not just the first. That is the first publish ever made by
 CI in this repository: all twelve `publish-main` runs before it had failed, and
 so had the one `publish.yml` run (v0.4.0).
 
-**Not yet shown for the charts.** `publish.yml` also runs `make charts-push`,
-into four packages of their own — `charts/slaptain`, `charts/slapd`,
-`charts/slapd-mesh`, `charts/slapd-toolkit` — and every version on them,
-0.4.0 included, was pushed by hand, so they were created by a personal token
-exactly as the image packages were. `publish-main` never touches them, so the
-successful run above says nothing about them. Entitle the four the same way
-**before** tagging 0.5.0, or the tag run will build and push nine images and
-then die at the first chart with the same `write_package`. Whether that was
-already done on 2026-10-25 is not recorded here; the check is the package
-settings page, or the tag run itself. The GitHub Release step, the `slctl`
-binaries and the CRD bundle have likewise never been produced by CI.
+**The charts, entitled 2026-10-26.** `publish.yml` also runs `make
+charts-push`, into four packages of their own — `charts/slaptain`,
+`charts/slapd`, `charts/slapd-mesh`, `charts/slapd-toolkit` — and every version
+on them, 0.4.0 included, was pushed by hand, so they were created by a personal
+token exactly as the image packages were; `publish-main` never touches them, so
+the successful run above said nothing about them. They are not under the
+`slaptain/` prefix, which is why the repository's Packages page did not list
+them. On 2026-10-26 the repository was added to all four (and connected to
+them: the repository's Packages page now lists nine packages, charts
+included). That entitlement is a settings-page fact and has no run behind it
+yet — 0.5.0 is the first tag that can show `publish.yml` reaching the end: the
+chart push, the GitHub Release, the `slctl` binaries and the CRD bundle have
+never been produced by CI.
 
 Nothing below this line should be deleted before the 0.5.0 tag has run
 `publish.yml` to the end. The analysis is the record of why, and the four traps
@@ -231,9 +233,9 @@ gh release create v0.4.0 --title v0.4.0 --notes-file notes.md --verify-tag dist/
 ```
 
 Fixing the workflow was a packages-permission change plus one real run, and
-the build was not touched — done for the image packages 2026-10-25, see the
-top of this section. The chart packages are the open half; 0.5.0 is the first
-tag that can show `publish.yml` running to the end.
+the build was not touched — images 2026-10-25, charts 2026-10-26, see the top
+of this section. 0.5.0 is the first tag that can show `publish.yml` running to
+the end.
 
 ### Git history
 

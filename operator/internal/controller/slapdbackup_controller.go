@@ -78,14 +78,6 @@ func (r *SlapdBackupReconciler) clusterDomain() string {
 	return ResolveClusterDomain()
 }
 
-// imageRef builds "repository:tag", falling back to the operator's running tag
-// (then "latest") when the tag is unpinned and to the operator-derived default
-// repository (defaultRepo) when the repository is unset. Mirrors the SlapdCluster
-// controller's resolution.
-func (r *SlapdBackupReconciler) imageRef(img ldapv1alpha1.SlapdImageConfig, defaultRepo string) string {
-	return resolveImageRef(img, defaultRepo, r.DefaultImageTag)
-}
-
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapdbackups,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapdbackups/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapddatabases;slapdclusters,verbs=get;list;watch

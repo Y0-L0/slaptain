@@ -39,13 +39,13 @@ func TestSessionlogSourceDefaultsToAccesslog(t *testing.T) {
 			name:     "unset now means the accesslog, not the in-memory log",
 			sd:       db("", nil),
 			wantKind: sessionlogKindAccesslog,
-			wantDN:   "cn=accesslog-example-db",
+			wantDN:   testAccesslogDB,
 		},
 		{
 			name:     "explicit Accesslog is unchanged",
 			sd:       db(ldapv1alpha1.SyncprovSessionlogSourceAccesslog, nil),
 			wantKind: sessionlogKindAccesslog,
-			wantDN:   "cn=accesslog-example-db",
+			wantDN:   testAccesslogDB,
 		},
 		{
 			name:     "explicit InMemory is how you ask for the old behaviour",
@@ -71,7 +71,7 @@ func TestSessionlogSourceDefaultsToAccesslog(t *testing.T) {
 			name:     "but an EXPLICIT Accesslog source outranks 0 — the user named a source",
 			sd:       db(ldapv1alpha1.SyncprovSessionlogSourceAccesslog, n(0)),
 			wantKind: sessionlogKindAccesslog,
-			wantDN:   "cn=accesslog-example-db",
+			wantDN:   testAccesslogDB,
 		},
 	}
 	for _, tc := range cases {
@@ -94,14 +94,14 @@ func TestSessionlogSourceDefaultsToAccesslog(t *testing.T) {
 func TestTheDefaultReachesTheStartupConfigTable(t *testing.T) {
 	sd := ldapv1alpha1.SlapdDatabase{}
 	sd.Name = "example-db"
-	sd.Spec.ClusterRef = "slapd"
+	sd.Spec.ClusterRef = testClusterName
 	sd.Spec.Suffix = "dc=example,dc=org"
 
 	got := startupConfigFor([]ldapv1alpha1.SlapdDatabase{sd}, "slapd")
 	if len(got.Records) != 1 {
 		t.Fatalf("a database that says nothing must now be in the startup table, got %d records", len(got.Records))
 	}
-	if got.Records[0].Value != "cn=accesslog-example-db" {
+	if got.Records[0].Value != testAccesslogDB {
 		t.Errorf("record value = %q, want the journal DN", got.Records[0].Value)
 	}
 }

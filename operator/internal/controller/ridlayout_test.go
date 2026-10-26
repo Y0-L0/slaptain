@@ -185,6 +185,7 @@ func TestRIDLayoutForWithholdsWhenTheMeshCannotBeRead(t *testing.T) {
 			if err == nil {
 				t.Fatalf("layout %+v returned with no error: an unreadable mesh is an unknown layout, "+
 					"and unknown withholds rather than defaulting", got)
+				return
 			}
 			if got.Validate() == nil {
 				t.Errorf("layout %+v is usable alongside the error — a caller that drops the error "+
@@ -209,6 +210,7 @@ func TestAnUnreadableMeshsLayoutIsRefusedByTheSegmentJudgement(t *testing.T) {
 	layout, err := ridLayoutFor(context.Background(), c, sc)
 	if err == nil {
 		t.Fatalf("the mesh is absent and ridLayoutFor did not refuse")
+		return
 	}
 
 	db := ridDB("alpha", testRIDCluster, new(int32(0)))

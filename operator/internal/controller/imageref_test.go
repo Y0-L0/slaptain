@@ -114,7 +114,7 @@ func TestResolveImageRef(t *testing.T) {
 		},
 		{
 			name:       "explicit repository overrides default",
-			img:        ldapv1alpha1.SlapdImageConfig{Repository: "example.com/custom/slapd"},
+			img:        ldapv1alpha1.SlapdImageConfig{Repository: testCustomRepo},
 			defaultTag: operatorTag,
 			want:       "example.com/custom/slapd:v0.0.1",
 		},
@@ -126,7 +126,7 @@ func TestResolveImageRef(t *testing.T) {
 		},
 		{
 			name:       "fully pinned",
-			img:        ldapv1alpha1.SlapdImageConfig{Repository: "example.com/custom/slapd", Tag: "dev"},
+			img:        ldapv1alpha1.SlapdImageConfig{Repository: testCustomRepo, Tag: "dev"},
 			defaultTag: operatorTag,
 			want:       "example.com/custom/slapd:dev",
 		},

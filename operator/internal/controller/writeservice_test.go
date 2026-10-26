@@ -681,6 +681,7 @@ func TestEligibleForWrites(t *testing.T) {
 			pred := eligibleForWrites(tc.ready, tc.heldReadOnly)
 			if pred == nil {
 				t.Fatal("eligibleForWrites returned a nil predicate — writeTarget would panic calling it")
+				return
 			}
 			if got := pred(tc.ordinal); got != tc.want {
 				t.Fatalf("eligibleForWrites(...)(%d) = %v, want %v — %s",

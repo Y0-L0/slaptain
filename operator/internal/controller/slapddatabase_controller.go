@@ -77,11 +77,6 @@ type SlapdDatabaseReconciler struct {
 	Observations *obsmetrics.Store[obsmetrics.DatabaseObservation]
 }
 
-// imageRef resolves a data-plane image reference for this controller's Jobs.
-func (r *SlapdDatabaseReconciler) imageRef(img ldapv1alpha1.SlapdImageConfig, defaultRepo string) string {
-	return resolveImageRef(img, defaultRepo, r.DefaultImageTag)
-}
-
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapddatabases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapddatabases/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapddatabases/finalizers,verbs=update

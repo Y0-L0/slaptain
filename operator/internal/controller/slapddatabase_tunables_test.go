@@ -178,6 +178,7 @@ func TestParseMaxSize(t *testing.T) {
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("parseMaxSize(%q) = %d, want error", tc.in, got)
+					return
 				}
 				return
 			}

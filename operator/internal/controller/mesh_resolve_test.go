@@ -395,6 +395,7 @@ func TestDeriveClusterWiring(t *testing.T) {
 			if tc.wantReason != "" {
 				if err == nil {
 					t.Fatalf("deriveClusterWiring() = %+v, nil; want error with reason %q", got, tc.wantReason)
+					return
 				}
 				var re *meshResolveError
 				if !errors.As(err, &re) {

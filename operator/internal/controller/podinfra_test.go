@@ -56,6 +56,7 @@ func TestRunConvergenceSteps(t *testing.T) {
 		}
 		if err == nil {
 			t.Fatal("the failure must still be reported, not swallowed")
+			return
 		}
 		if !strings.Contains(err.Error(), "tunables") || !strings.Contains(err.Error(), "err 53") {
 			t.Errorf("error must name the step that failed: %v", err)
@@ -69,6 +70,7 @@ func TestRunConvergenceSteps(t *testing.T) {
 		)
 		if err == nil {
 			t.Fatal("expected an error")
+			return
 		}
 		for _, want := range []string{"boom-a", "boom-b"} {
 			if !strings.Contains(err.Error(), want) {

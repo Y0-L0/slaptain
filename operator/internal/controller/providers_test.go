@@ -124,6 +124,7 @@ func TestPodOrdinal(t *testing.T) {
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("podOrdinal(%q) = %d, want an error — %s", tc.podName, got, tc.because)
+					return
 				}
 				if tc.podName != "" && !strings.Contains(err.Error(), tc.podName) {
 					t.Errorf("error %q does not name the offending pod %q — the caller holds many pods and must be told which one", err, tc.podName)
@@ -386,6 +387,7 @@ func TestProvidersFromPods(t *testing.T) {
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("providersFromPods() = %+v, want an error — %s", got, tc.because)
+					return
 				}
 				if len(got) != 0 {
 					t.Errorf("providersFromPods() returned %d providers alongside its error, want none — %s", len(got), tc.because)

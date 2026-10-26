@@ -404,6 +404,7 @@ func assertExporterSecurityContext(t *testing.T, got, slapdSec *corev1.SecurityC
 	sec := got
 	if sec == nil {
 		t.Fatal("securityContext is nil; the sidecar must be as hardened as slapd")
+		return
 	}
 	if !reflect.DeepEqual(sec, slapdSec) {
 		t.Errorf("securityContext = %+v, want slapd's %+v", sec, slapdSec)

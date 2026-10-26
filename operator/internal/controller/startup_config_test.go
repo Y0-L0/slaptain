@@ -217,8 +217,8 @@ func TestPodTemplateMountsStartupConfigByName(t *testing.T) {
 	for _, readOnly := range []bool{false, true} {
 		r := &SlapdClusterReconciler{ClusterDomain: testClusterDomain}
 		sc := &ldapv1alpha1.SlapdCluster{}
-		sc.Name = "slapd"
-		sc.Namespace = "slaptain"
+		sc.Name = testClusterName
+		sc.Namespace = testNamespace
 		sc.Spec.Replicas = 3
 		sc.Spec.ReadReplicas = 1
 		sc.Spec.Replication.Enabled = true
@@ -259,6 +259,7 @@ func TestPodTemplateMountsStartupConfigByName(t *testing.T) {
 		}
 		if init == nil {
 			t.Fatalf("readOnly=%v: no init container", readOnly)
+			return
 		}
 
 		var mounted bool

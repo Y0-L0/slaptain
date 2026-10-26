@@ -41,28 +41,28 @@ func TestImageTagSuffixForSelector(t *testing.T) {
 		},
 		{
 			name: "current format, our patches",
-			sel:  &ldapv1alpha1.SlapdImageSelector{StorageFormat: "lmdb1.0", Flavour: "slaptain"},
-			want: "-ol2.7.1-slaptain",
+			sel:  &ldapv1alpha1.SlapdImageSelector{StorageFormat: "lmdb1.0", Flavour: flavourSlaptain},
+			want: tagSuffixSlaptain27,
 		},
 		{
 			name: "legacy format, pure — Debian's own 2.6 binary",
-			sel:  &ldapv1alpha1.SlapdImageSelector{StorageFormat: "lmdb0.9", Flavour: "pure"},
-			want: "-ol26",
+			sel:  &ldapv1alpha1.SlapdImageSelector{StorageFormat: storageFormatLegacy, Flavour: "pure"},
+			want: tagSuffixOL26,
 		},
 		{
 			name: "legacy format, our patches",
-			sel:  &ldapv1alpha1.SlapdImageSelector{StorageFormat: "lmdb0.9", Flavour: "slaptain"},
-			want: "-ol26src",
+			sel:  &ldapv1alpha1.SlapdImageSelector{StorageFormat: storageFormatLegacy, Flavour: flavourSlaptain},
+			want: tagSuffixOL26Src,
 		},
 		{
 			name: "one axis set, the other defaulted",
-			sel:  &ldapv1alpha1.SlapdImageSelector{StorageFormat: "lmdb0.9"},
-			want: "-ol26",
+			sel:  &ldapv1alpha1.SlapdImageSelector{StorageFormat: storageFormatLegacy},
+			want: tagSuffixOL26,
 		},
 		{
 			name: "the other axis set alone",
-			sel:  &ldapv1alpha1.SlapdImageSelector{Flavour: "slaptain"},
-			want: "-ol2.7.1-slaptain",
+			sel:  &ldapv1alpha1.SlapdImageSelector{Flavour: flavourSlaptain},
+			want: tagSuffixSlaptain27,
 		},
 		{
 			name:    "an unknown storage format is refused, never guessed",
@@ -81,6 +81,7 @@ func TestImageTagSuffixForSelector(t *testing.T) {
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("imageTagSuffixForSelector(%+v) = %q, want an error", tc.sel, got)
+					return
 				}
 				return
 			}
@@ -117,31 +118,31 @@ func TestResolveImageRefWithSelector(t *testing.T) {
 		{
 			name: "selector reaches the slapd image",
 			img:  ldapv1alpha1.SlapdImageConfig{},
-			repo: slapdRepo, suffix: "-ol26",
+			repo: slapdRepo, suffix: tagSuffixOL26,
 			want: slapdRepo + ":v0.0.1-ol26",
 		},
 		{
 			name: "and the SAME selector reaches the init image",
 			img:  ldapv1alpha1.SlapdImageConfig{},
-			repo: initRepo, suffix: "-ol26",
+			repo: initRepo, suffix: tagSuffixOL26,
 			want: initRepo + ":v0.0.1-ol26",
 		},
 		{
 			name: "an explicit tag wins over the selector, and is used verbatim",
 			img:  ldapv1alpha1.SlapdImageConfig{Tag: "v9.9.9"},
-			repo: slapdRepo, suffix: "-ol26",
+			repo: slapdRepo, suffix: tagSuffixOL26,
 			want: slapdRepo + ":v9.9.9",
 		},
 		{
 			name: "an explicit repository still takes the selector's tag",
-			img:  ldapv1alpha1.SlapdImageConfig{Repository: "example.com/custom/slapd"},
+			img:  ldapv1alpha1.SlapdImageConfig{Repository: testCustomRepo},
 			repo: slapdRepo, suffix: "-ol26src",
 			want: "example.com/custom/slapd:v0.0.1-ol26src",
 		},
 		{
 			name: "the latest fallback carries the suffix too",
 			img:  ldapv1alpha1.SlapdImageConfig{},
-			repo: slapdRepo, suffix: "-ol26",
+			repo: slapdRepo, suffix: tagSuffixOL26,
 			want: slapdRepo + ":latest-ol26",
 		},
 	}

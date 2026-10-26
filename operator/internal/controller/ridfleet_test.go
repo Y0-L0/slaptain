@@ -230,6 +230,7 @@ func TestJudgeRIDLayoutSeparatesUnreadableFromUnusable(t *testing.T) {
 		v := judgeRIDLayout(sc, ridcoord.Layout{}, boom)
 		if v == nil {
 			t.Fatalf("no refusal: an unknown layout must withhold (RID-PLAN hazard 3)")
+			return
 		}
 		if v.OK {
 			t.Fatalf("verdict is OK while the layout could not be read")

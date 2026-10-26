@@ -101,6 +101,7 @@ func TestMonitorDBAddRequest(t *testing.T) {
 	req := monitorDBAddRequest()
 	if req == nil {
 		t.Fatal("monitorDBAddRequest returned nil")
+		return
 	}
 	if req.DN != "olcDatabase=monitor,cn=config" {
 		t.Errorf("DN = %q, want olcDatabase=monitor,cn=config (slapd assigns the {N})", req.DN)

@@ -206,6 +206,7 @@ func TestFleetWriteServiceSelectsTheWholeReadWriteFleet(t *testing.T) {
 	svc := r.fleetWriteService(sc)
 	if svc == nil {
 		t.Fatal("fleetWriteService returned nil — there is nothing to repoint the retired endpoint at")
+		return
 	}
 	if svc.Name != testWriteSvcName {
 		t.Fatalf("Name = %q, want %q — it must be the same object, not a second one", svc.Name, testWriteSvcName)

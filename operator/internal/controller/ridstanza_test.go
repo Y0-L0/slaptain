@@ -230,6 +230,7 @@ func TestInClusterStanzaRIDsPropagateRidcoordRefusals(t *testing.T) {
 			got, err := inClusterStanzaRIDs(tc.layout, tc.segment, tc.replicas, tc.selfOrd)
 			if err == nil {
 				t.Fatalf("no refusal; got rids %v — slapd accepts every one of these into a stanza", got)
+				return
 			}
 			if !errors.Is(err, tc.want) {
 				t.Errorf("error = %v, want one wrapping %v: the refusal names which axis a human must change", err, tc.want)
@@ -280,6 +281,7 @@ func TestExternalStanzaRIDRefusesAPeerSitePastTheRemoteBlock(t *testing.T) {
 			"That number is inside slapd's 0..999 band, so it is accepted into a stanza, "+
 			"and it decodes to segment %d — a database this cluster does not have",
 			got, segment, siteIndex, (got-1)/layout.SegmentWidth())
+		return
 	}
 	if !errors.Is(err, ridcoord.ErrSiteIndexOutOfRange) {
 		t.Errorf("error = %v, want one wrapping %v — the refusal must name the axis the deployer can widen "+

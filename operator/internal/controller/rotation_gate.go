@@ -21,6 +21,10 @@ import (
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
+// fieldRotationLeadTime is the spec path reported when a mode has no referent
+// for the field; the gate names the field the user actually wrote.
+const fieldRotationLeadTime = "spec.rotation.leadTime"
+
 // The purge-schedule gate (ADR-037, ninth amendment "the API, consolidated";
 // ADR-024 R6).
 //
@@ -272,7 +276,7 @@ func evaluateRotation(sc *ldapv1alpha1.SlapdCluster) rotationPlan {
 			field string
 		}{
 			{r.SlotsFromWriteToPurge != nil, "spec.rotation.slotsFromWriteToPurge"},
-			{r.LeadTime != nil, "spec.rotation.leadTime"},
+			{r.LeadTime != nil, fieldRotationLeadTime},
 		} {
 			if !f.set {
 				continue

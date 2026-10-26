@@ -96,6 +96,7 @@ func TestGuardedModifyRefusesStartupOnlyAttribute(t *testing.T) {
 			err := guardedModify(w, req)
 			if err == nil {
 				t.Fatal("guardedModify accepted a startup-only attribute")
+				return
 			}
 			if !strings.Contains(err.Error(), startupAttrSessionlogSource) {
 				t.Errorf("error %q does not name the attribute", err)
@@ -125,6 +126,7 @@ func TestGuardedAddRefusesStartupOnlyAttribute(t *testing.T) {
 	err := guardedAdd(w, req)
 	if err == nil {
 		t.Fatal("guardedAdd accepted a startup-only attribute")
+		return
 	}
 	if !strings.Contains(err.Error(), startupAttrSessionlogSource) {
 		t.Errorf("error %q does not name the attribute", err)

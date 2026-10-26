@@ -22,6 +22,11 @@ const (
 	testTLSSecretName = "slapd-tls"
 	testHeadlessSvc   = "slapd-headless"
 	testClusterDomain = "cluster.local"
+	// testCustomRepo is a repository a user pinned explicitly, used wherever a
+	// test asserts that an explicit value outranks an operator-derived default.
+	testCustomRepo = "example.com/custom/slapd"
+	// testAccesslogDB is the journal database of testDBName (ADR-019).
+	testAccesslogDB = "cn=accesslog-example-db"
 
 	testDBName    = "example-db"
 	testDefaultDB = "default"

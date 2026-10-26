@@ -47,6 +47,7 @@ func TestSlapdContainerProbes(t *testing.T) {
 		}
 		if slapd == nil {
 			t.Fatalf("readOnly=%v: no slapd container", readOnly)
+			return
 		}
 
 		// An RO pod serves clients too, and its readiness is what keeps a

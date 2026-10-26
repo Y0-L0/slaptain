@@ -97,15 +97,6 @@ type SlapdClusterReconciler struct {
 	Observations *obsmetrics.Store[obsmetrics.ClusterObservation]
 }
 
-// imageRef builds the "repository:tag" image reference for a data-plane image,
-// falling back to the operator's running tag (then "latest") when the tag is
-// unpinned and to the operator-derived default repository when the repository
-// is unset. defaultRepo is the repository to use when img.Repository is empty
-// (see defaultDataPlaneRepo).
-func (r *SlapdClusterReconciler) imageRef(img ldapv1alpha1.SlapdImageConfig, defaultRepo string) string {
-	return resolveImageRef(img, defaultRepo, r.DefaultImageTag)
-}
-
 // canonicalRegistryPath is the upstream registry/path under which the slaptain
 // images are published. Used only as a last-resort fallback when the operator's
 // own image reference (OPERATOR_IMAGE) is unset (e.g. `make run` locally).

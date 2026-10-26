@@ -614,9 +614,9 @@ func TestEvaluateRotation_ModesSplitTheTwoHalves(t *testing.T) {
 		name, mode, field string
 		tweak             func(*ldapv1alpha1.SlapdRotationConfig)
 	}{
-		{"leadTime under PurgeOnly", ldapv1alpha1.RotationModePurgeOnly, "spec.rotation.leadTime",
+		{"leadTime under PurgeOnly", ldapv1alpha1.RotationModePurgeOnly, fieldRotationLeadTime,
 			func(r *ldapv1alpha1.SlapdRotationConfig) { r.LeadTime = dur(5 * time.Minute) }},
-		{"leadTime under WriteOnly", ldapv1alpha1.RotationModeWriteOnly, "spec.rotation.leadTime",
+		{"leadTime under WriteOnly", ldapv1alpha1.RotationModeWriteOnly, fieldRotationLeadTime,
 			func(r *ldapv1alpha1.SlapdRotationConfig) { r.LeadTime = dur(5 * time.Minute) }},
 		{"slotsFromWriteToPurge under PurgeOnly", ldapv1alpha1.RotationModePurgeOnly, fieldSlotsFromWTP,
 			func(r *ldapv1alpha1.SlapdRotationConfig) { v := int32(1); r.SlotsFromWriteToPurge = &v }},

@@ -26,19 +26,25 @@ const (
 
 	flavourPure     = "pure"
 	flavourSlaptain = "slaptain"
+
+	// The tag suffix naming each build. The unsuffixed cell is the default
+	// (ADR-040 decision 2), so an unqualified tag means pure 2.7.
+	tagSuffixSlaptain27 = "-ol2.7.1-slaptain"
+	tagSuffixOL26       = "-ol26"
+	tagSuffixOL26Src    = "-ol26src"
 )
 
 // imageTagSuffixes is the matrix, keyed [storageFormat][flavour].
 var imageTagSuffixes = map[string]map[string]string{
 	storageFormatCurrent: {
 		flavourPure:     "",
-		flavourSlaptain: "-ol2.7.1-slaptain",
+		flavourSlaptain: tagSuffixSlaptain27,
 	},
 	storageFormatLegacy: {
 		// Debian's own 2.6 binary, from its own source package.
-		flavourPure: "-ol26",
+		flavourPure: tagSuffixOL26,
 		// Debian's 2.6 source plus images/openldap-deb/local-patches/.
-		flavourSlaptain: "-ol26src",
+		flavourSlaptain: tagSuffixOL26Src,
 	},
 }
 

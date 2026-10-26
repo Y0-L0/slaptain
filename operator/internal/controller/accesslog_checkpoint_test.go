@@ -28,9 +28,9 @@ func TestDesiredAccesslogSyncprovCheckpoint(t *testing.T) {
 		sd   *ldapv1alpha1.SlapdDatabase
 		want string
 	}{
-		{"unset takes the operator default", db(""), "1 1"},
-		{"whitespace is still unset", db("   "), "1 1"},
-		{"nil database takes the default too", nil, "1 1"},
+		{"unset takes the operator default", db(""), accesslogSyncprovCheckpointDefault},
+		{"whitespace is still unset", db("   "), accesslogSyncprovCheckpointDefault},
+		{"nil database takes the default too", nil, accesslogSyncprovCheckpointDefault},
 		{"an explicit value is used verbatim", db("100 5"), "100 5"},
 		{"the none sentinel opts out entirely", db("none"), ""},
 		{"the sentinel is case-insensitive", db("NONE"), ""},
@@ -66,14 +66,25 @@ func TestTheDefaultConvergesOntoAnExistingBareOverlay(t *testing.T) {
 	if action != overlayAttrSet {
 		t.Fatalf("a bare overlay must be given the checkpoint, got action %v", action)
 	}
-	if value != "1 1" {
-		t.Errorf("converged value = %q, want %q", value, "1 1")
+	if value != accesslogSyncprovCheckpointDefault {
+		t.Errorf("converged value = %q, want %q", value, accesslogSyncprovCheckpointDefault)
 	}
 	// And the opt-out must remove one that is present, not leave it.
 	sd := &ldapv1alpha1.SlapdDatabase{}
 	sd.Spec.Replication.AccesslogSyncprovCheckpoint = noneSentinel
-	action, _ = planOverlayAttr([]string{"1 1"}, desiredAccesslogSyncprovCheckpoint(sd))
+	action, _ = planOverlayAttr([]string{accesslogSyncprovCheckpointDefault}, desiredAccesslogSyncprovCheckpoint(sd))
 	if action != overlayAttrRemove {
 		t.Errorf("the none sentinel must REMOVE a live checkpoint, got action %v", action)
+	}
+}
+
+// The default's VALUE is pinned here as a literal, on purpose and exactly once.
+// Every other reference in this file now uses the constant, so without this
+// test a change to the constant would move both sides of every assertion
+// together and none of them could catch it.
+func TestAccesslogSyncprovCheckpointDefaultValue(t *testing.T) {
+	if accesslogSyncprovCheckpointDefault != "1 1" {
+		t.Errorf("accesslogSyncprovCheckpointDefault = %q, want \"1 1\" — a checkpoint every write and every second (ADR-037)",
+			accesslogSyncprovCheckpointDefault)
 	}
 }

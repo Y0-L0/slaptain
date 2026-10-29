@@ -12,11 +12,6 @@ permissions:
   contents: read
   packages: write
 
-env:
-  # The Makefile defaults REGISTRY to the upstream owner; a fork publishes
-  # under its own.
-  REGISTRY: ghcr.io/${{ github.repository_owner }}
-
 jobs:
   images:
     name: Build and push images
@@ -34,9 +29,18 @@ jobs:
       #
       # `make push` builds the OpenLDAP 2.7.1 .deb carrier once and feeds it
       # to both 2.7 images from local storage (it is never pushed); the
-      # Makefile drives podman for that, which ubuntu-latest ships.
+      # Makefile drives podman for that.
       - name: Show the tag the Makefile derived
         run: make show-tag
+
+      # The Makefile defaults REGISTRY to the upstream owner; a fork publishes
+      # under its own, lowercased because OCI repository names must be.
+      - name: Point REGISTRY at the repository owner
+        run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+
+      # The Namespace runner image ships no podman, and the Makefile drives it.
+      - name: Install podman
+        run: sudo apt-get update && sudo apt-get install -y podman
 
       - name: Log in to GHCR
         env:

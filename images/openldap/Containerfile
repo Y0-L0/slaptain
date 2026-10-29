@@ -71,7 +71,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=private \
         devscripts \
         equivs \
         fakeroot \
-        quilt
+        quilt \
+    # apt may set up ccache before gcc, leaving no /usr/lib/ccache/cc for the libtool compiles.
+    && update-ccache-symlinks && test -L /usr/lib/ccache/cc
 
 WORKDIR /build
 
@@ -433,7 +435,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=private \
     sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/debian.sources; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        build-essential ca-certificates ccache devscripts equivs fakeroot quilt
+        build-essential ca-certificates ccache devscripts equivs fakeroot quilt; \
+    # apt may set up ccache before gcc, leaving no /usr/lib/ccache/cc for the libtool compiles.
+    update-ccache-symlinks; test -L /usr/lib/ccache/cc
 
 WORKDIR /build
 

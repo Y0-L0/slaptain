@@ -47,6 +47,7 @@ jobs:
       # overlay driver cannot stack on, so storage goes through fuse-overlayfs.
       # Its /proc/sys is read-only, so podman must not set its default
       # net.ipv4.ping_group_range sysctl in every build container.
+      # Short names such as golang:1.26 resolve against Docker Hub, as under docker.
       - name: Install podman
         run: |
           sudo apt-get update && sudo apt-get install -y podman fuse-overlayfs
@@ -54,6 +55,9 @@ jobs:
           printf '[storage]\ndriver = "overlay"\n[storage.options.overlay]\nmount_program = "/usr/bin/fuse-overlayfs"\n' \
             > ~/.config/containers/storage.conf
           printf '[containers]\ndefault_sysctls = []\n' > ~/.config/containers/containers.conf
+          mkdir -p ~/.config/containers/registries.conf.d
+          printf 'unqualified-search-registries = ["docker.io"]\n' \
+            > ~/.config/containers/registries.conf.d/docker-hub.conf
 
       - name: Log in to GHCR
         env:

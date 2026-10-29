@@ -39,8 +39,14 @@ jobs:
         run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
 
       # The Namespace runner image ships no podman, and the Makefile drives it.
+      # Its root filesystem is an overlayfs, which rootless podman's native
+      # overlay driver cannot stack on, so storage goes through fuse-overlayfs.
       - name: Install podman
-        run: sudo apt-get update && sudo apt-get install -y podman
+        run: |
+          sudo apt-get update && sudo apt-get install -y podman fuse-overlayfs
+          mkdir -p ~/.config/containers
+          printf '[storage]\ndriver = "overlay"\n[storage.options.overlay]\nmount_program = "/usr/bin/fuse-overlayfs"\n' \
+            > ~/.config/containers/storage.conf
 
       - name: Log in to GHCR
         env:

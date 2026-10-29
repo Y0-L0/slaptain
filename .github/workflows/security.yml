@@ -58,7 +58,7 @@ jobs:
 
   trivy:
     name: Trivy filesystem scan
-    runs-on: namespace-profile-2x4
+    runs-on: namespace-profile-1x2
     steps:
       - name: Checkout
         uses: actions/checkout@v7

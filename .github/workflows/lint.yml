@@ -19,7 +19,7 @@ concurrency:
 jobs:
   lint:
     name: golangci-lint
-    runs-on: namespace-profile-yo-lo
+    runs-on: namespace-profile-2x8
     steps:
       - name: Clone the code
         uses: actions/checkout@v7
@@ -80,7 +80,7 @@ jobs:
 
   chart:
     name: Helm charts
-    runs-on: namespace-profile-yo-lo
+    runs-on: namespace-profile-2x4
     steps:
       - name: Clone the code
         uses: actions/checkout@v7

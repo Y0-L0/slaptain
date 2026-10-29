@@ -26,7 +26,7 @@ The tags below are what those selections resolve to. An explicit
 
 | selection | image tag | OpenLDAP, and where the binary comes from |
 |---|---|---|
-| `lmdb1.0` + `pure` | `slapd:<tag>` + `slapd-init:<tag>` | **the default.** 2.7.1, our build from pristine upstream with Debian's packaging forward-ported onto it. None of our patches (`slapd -VV` ends `+pure<N>`) |
+| `lmdb1.0` + `pure` | `slapd:<tag>` + `slapd-init:<tag>` | **the default.** 2.7.2, our build from pristine upstream with Debian's packaging forward-ported onto it. None of our patches (`slapd -VV` ends `+pure<N>`) |
 | `lmdb1.0` + `slaptain` | `:<tag>-ol2.7.2-slaptain` | the same build, with our patches (`+slaptain<N>`). Needed by `spec.rotation`'s purge phases |
 | `lmdb0.9` + `pure` | `:<tag>-ol26` | 2.6, **Debian's own prebuilt binary**, pinned (`OPENLDAP_OL26_VERSION`). Not built by us at all — the most conservative thing on offer. Legacy interop and hot migration (ADR-011) |
 | `lmdb0.9` + `slaptain` | `:<tag>-ol26src` | 2.6, Debian's **source** package rebuilt with our patches, same pin. Measurement arms against `-ol26`, and 2.6 clusters needing a patched feature |
@@ -36,6 +36,47 @@ The 2.6 version is pinned, not floated: one Makefile variable,
 the pair cannot drift apart and the patches apply to a fixed tree. When a
 Debian point release retires it the build stops resolving — bump the variable
 and re-run the 2.6 e2e cycle (ADR-040 decision 1).
+
+## The experimental 2.6 forward-port (internal use only)
+
+`make build-ol2616` builds a fourth, **unpublished** pair: upstream **2.6.16**
+with the vendored Debian packaging and both local patches, tagged
+`:<tag>-ol2.6.16-slaptain`.
+
+It is deliberately **not** a `select.flavour` cell. The `lmdb0.9` selections
+above both mean *Debian's* — a pinned binary or a rebuild of Debian's own
+source package — and that is the contract they carry. A forward-port breaks
+it: the packaging is Debian's, the source is not. Reach this pair by pinning
+both image tags, or with `SLAPD_TAG_SUFFIX=-ol2.6.16-slaptain`, and nothing
+else. It is absent from `all`, from `push` and from every chart.
+
+**Why it exists.** Debian offers no recent 2.6 that is safe to run:
+
+| | version | |
+|---|---|---|
+| Debian stable (trixie) | 2.6.10 | May 2025 — 17 months and six releases behind |
+| Debian testing/sid | 2.6.14 | carries ITS#10597's accesslog double-free |
+| upstream | **2.6.16** | first 2.6 with ITS#10597 fixed; packaged by nobody |
+
+ITS#10597 frees a shared `entryUUID` from a path non-write operations reach
+before taking `li_op_rmutex`, so concurrent **searches** against a provider
+carrying an accesslog can double-free it. It is present in 2.6.14, 2.6.15,
+2.7.0 and 2.7.1, and absent from 2.6.10 — which is why our 2.6 measurement
+arms never hit it and our 2.7.1 load runs did.
+
+**What it is for.** A measurement arm. ITS#10465's purge pacing
+(`olcAccessLogPurgeBatch`) never landed on the 2.6 line at all, so 2.6.16's
+purge loop is mechanically the same unpaced loop every ADR-037 figure was
+measured against on 2.6.10. That makes it comparable to those figures in a
+way no 2.7 build is, while carrying 17 months of fixes — five of them on the
+delta-syncrepl path (ITS#10360, #10385, #10413, #10440, #10448).
+
+**What is verified and what is not.** Every patch application is checked:
+Debian's 15-patch series applies to 2.6.16 in sequence, and both local
+patches apply clean on top of it. The package version is overridden to
+`2.6.16-0+slaptain1` so `slapd -VV` cannot claim the 2.7 version the vendored
+changelog names. Nothing has been measured with it, and no e2e has run
+against it.
 
 **The default pair is PURE since 0.5.0.** It used to carry the local patches;
 it no longer does, because nobody should run a patched slapd without having

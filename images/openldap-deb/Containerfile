@@ -66,6 +66,13 @@ RUN set -eux; \
 # The vendored packaging fork.
 COPY debian /build/openldap-${OPENLDAP_VERSION}/debian
 
+# local-patches/ is the ONE copy of slaptain's own patches, shared with the 2.6
+# source build, which copies them the same way. They used to be duplicated into
+# debian/patches/ as well, and the two copies had nothing keeping them in step:
+# regenerating one left the other applying to a tree it no longer matched, and
+# the build would not have said so.
+COPY local-patches /build/local-patches
+
 WORKDIR /build/openldap-${OPENLDAP_VERSION}
 
 # Whether this build carries slaptain's own behaviour patches (ADR-040
@@ -79,6 +86,20 @@ WORKDIR /build/openldap-${OPENLDAP_VERSION}
 # project has ever built and every e2e it has ever run used the patched build.
 # Until that cycle, defaulting to 0 would ship an untested default.
 ARG SLAPTAIN_PATCHES=1
+
+# Which of local-patches/ go in when SLAPTAIN_PATCHES=1. The default is the
+# published 2.7 set: the phase patch alone, because 2.7 already emits the purge
+# timing line natively and accesslog-purge-logging.patch exists only to
+# backport it to a 2.6 tree that does not. A 2.6 forward-port build overrides
+# this to take both. Space-separated, each a basename in local-patches/.
+ARG SLAPTAIN_PATCH_LIST="accesslog-purge-phase.patch"
+
+# Package version override, for a build whose upstream version is NOT the one
+# debian/changelog's top entry names. Empty — the default — uses the changelog
+# as written, which is what every published build does. A forward-port sets it,
+# because a package claiming 2.7.2 while containing 2.6.16 would defeat
+# `slapd -VV`, the OCI labels and ADR-040's whole provenance argument at once.
+ARG OPENLDAP_PKG_VERSION=
 
 # Appended last, after Debian's own series, exactly as the 2.6 source build
 # does it. Pushing and popping the whole series here fails the build on a
@@ -107,9 +128,42 @@ ARG SLAPTAIN_PATCHES=1
 # all). What is derived is which token it wears. `pure` and `slaptain` are the
 # two values of ADR-040's `select.flavour`, deliberately: the version string
 # names the axis with the same words the API does.
+# Package version override, before the flavour token is substituted below so
+# the two compose. Empty is the published path and a no-op.
+#
+# A forward-port builds an upstream version the vendored changelog's top entry
+# does not name, and the changelog is where the package version — and so
+# `slapd -VV`, the OCI labels and every provenance route ADR-040 relies on —
+# comes from. Left alone, a 2.6.16 build would announce itself as 2.7.2.
+RUN set -eux; \
+    if [ -n "${OPENLDAP_PKG_VERSION}" ]; then \
+        cur=$(dpkg-parsechangelog -S Version); \
+        case "${OPENLDAP_PKG_VERSION}" in \
+          *+slaptain[0-9]*) ;; \
+          *) echo "OPENLDAP_PKG_VERSION '${OPENLDAP_PKG_VERSION}' must end in \
++slaptainN: the flavour token below is derived from it" >&2; exit 1 ;; \
+        esac; \
+        case "${OPENLDAP_PKG_VERSION}" in \
+          "${OPENLDAP_VERSION}"-*) ;; \
+          *) echo "OPENLDAP_PKG_VERSION '${OPENLDAP_PKG_VERSION}' does not name \
+the source version '${OPENLDAP_VERSION}' it will contain" >&2; exit 1 ;; \
+        esac; \
+        sed -i "1s|(${cur})|(${OPENLDAP_PKG_VERSION})|" debian/changelog; \
+        got=$(dpkg-parsechangelog -S Version); \
+        [ "$got" = "${OPENLDAP_PKG_VERSION}" ] || { \
+            echo "package version override: rewrote the changelog but it \
+reports '$got'" >&2; exit 1; }; \
+        echo "package version: $cur -> $got (forward-port)"; \
+    fi
+
 RUN set -eux; \
     if [ "${SLAPTAIN_PATCHES}" = "1" ]; then \
-        echo accesslog-purge-phase.patch >> debian/patches/series; \
+        for p in ${SLAPTAIN_PATCH_LIST}; do \
+            test -f "/build/local-patches/$p" || { \
+                echo "no such patch in local-patches/: $p" >&2; exit 1; }; \
+            cp "/build/local-patches/$p" debian/patches/; \
+            echo "$p" >> debian/patches/series; \
+        done; \
         QUILT_PATCHES=debian/patches quilt --quiltrc /dev/null push -a; \
         QUILT_PATCHES=debian/patches quilt --quiltrc /dev/null pop -a; \
         echo "slaptain patches: applied"; \

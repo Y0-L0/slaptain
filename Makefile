@@ -124,6 +124,36 @@ SLAPD_IMAGE_OL26 = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)-ol26
 INIT_IMAGE_OL26SRC  = $(REGISTRY)/$(PROJECT)/slapd-init:$(IMAGE_TAG)-ol26src
 SLAPD_IMAGE_OL26SRC = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)-ol26src
 
+# ── EXPERIMENTAL: the 2.6 FORWARD-PORT pair (internal use only) ─────────────
+# Upstream 2.6.16 built with the vendored Debian packaging and slaptain's own
+# patches — the same mechanism as the 2.7 pair, pointed at the other release
+# line. It is NOT in all/push, NOT in any chart, and NOT reachable through
+# spec.images.select: the selector's lmdb0.9 cells mean "Debian's", which is
+# the contract -ol26 and -ol26src carry and this build deliberately breaks.
+# Reach it by pinning the tag, nothing else.
+#
+# Why it exists: Debian offers no recent 2.6 that is safe. Stable is 2.6.10,
+# 17 months and six releases behind; sid is 2.6.14, which is one of the
+# versions carrying ITS#10597's accesslog double-free. 2.6.16 is the first 2.6
+# with that fixed, and nobody packages it. It is wanted as a MEASUREMENT arm:
+# ITS#10465's purge pacing never landed on the 2.6 line, so 2.6.16's purge
+# loop is mechanically the one every ADR-037 figure was measured against,
+# which makes it comparable to 2.6.10 in a way no 2.7 build is.
+OPENLDAP_OL2616_VERSION     ?= 2.6.16
+OPENLDAP_OL2616_SHA256      ?= 8d8452bc3f56aa7a392c62dd377733f83d1314eed6c52fe44028439a3bb4df18
+OPENLDAP_OL2616_PKG_VERSION ?= 2.6.16-0+slaptain1
+# Both local patches, not just the phase one: 2.6 does not emit the purge
+# timing line natively, and without it a purge's duration and delete rate --
+# the two quantities this arm exists to measure -- are unreadable.
+OPENLDAP_OL2616_PATCHES     ?= accesslog-purge-phase.patch accesslog-purge-logging.patch
+OL2616_SUFFIX                = -ol2.6.16-slaptain
+INIT_IMAGE_OL2616   = $(REGISTRY)/$(PROJECT)/slapd-init:$(IMAGE_TAG)$(OL2616_SUFFIX)
+SLAPD_IMAGE_OL2616  = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)$(OL2616_SUFFIX)
+OPENLDAP_DEB_IMAGE_OL2616 = localhost/$(PROJECT)/openldap-deb:$(IMAGE_TAG)$(OL2616_SUFFIX)
+OL2616_LABELS = --label net.chuck-chuck-chuck.slaptain.local-patches="$(OPENLDAP_OL2616_PATCHES)" \
+		--label net.chuck-chuck-chuck.slaptain.experimental="forward-port, internal use only, not a select.flavour cell" \
+		--label org.opencontainers.image.description="EXPERIMENTAL: upstream OpenLDAP $(OPENLDAP_OL2616_VERSION) with Debian packaging and slaptain local patches"
+
 # Tag suffix applied to the slapd/slapd-init image tags when DEPLOYING (only —
 # the operator and toolkit tags are untouched). It PINS a pair, which is why it
 # bypasses spec.images.select: an explicit tag wins, by design.
@@ -244,7 +274,7 @@ define import-if-needed
 	fi
 endef
 
-.PHONY: all build-slaptain push-slaptain build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-openldap-deb-ol26src build-init-ol26src build-slapd-ol26src build-ol26src import-init-ol26src import-slapd-ol26src import-ol26src build-openldap-deb-debug build-slapd-debug build-openldap-deb-asan build-slapd-asan import-slapd-debug import-slapd-asan push-slapd-debug push-slapd-asan build-toolkit build-operator build-exporter build-slctl install-slctl push gencert helm-deploy cluster-helm-install cluster-helm-uninstall mesh-helm-install mesh-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-exporter import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag helm-lint verify-generated tidy test-init
+.PHONY: all build-slaptain push-slaptain build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-openldap-deb-ol26src build-init-ol26src build-slapd-ol26src build-ol26src build-openldap-deb-ol2616 build-init-ol2616 build-slapd-ol2616 build-ol2616 import-init-ol2616 import-slapd-ol2616 import-ol2616 import-init-ol26src import-slapd-ol26src import-ol26src build-openldap-deb-debug build-slapd-debug build-openldap-deb-asan build-slapd-asan import-slapd-debug import-slapd-asan push-slapd-debug push-slapd-asan build-toolkit build-operator build-exporter build-slctl install-slctl push gencert helm-deploy cluster-helm-install cluster-helm-uninstall mesh-helm-install mesh-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-exporter import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag helm-lint verify-generated tidy test-init
 
 ## all: the seven pushable images plus slctl. build-ol26 is included so a
 ## release build carries the legacy OpenLDAP 2.6 pair too (ADR-021).
@@ -375,6 +405,33 @@ $(STAMPS)/slapd-ol26src: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-ol26src $(STAMPS)/
 		-t $(SLAPD_IMAGE_OL26SRC) images/slapd/
 	@touch $@
 
+# ── EXPERIMENTAL 2.6 forward-port (see the variables above) ─────────────────
+# The ordinary 2.7 Containerfile, pointed at the other release line: same
+# vendored packaging, same gates, three build args. Nothing else depends on
+# these stamps, so the normal loop never pays for them.
+$(STAMPS)/openldap-deb-ol2616: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
+	$(CONTAINER_ENGINE) build -f images/openldap-deb/Containerfile \
+		--build-arg OPENLDAP_VERSION=$(OPENLDAP_OL2616_VERSION) \
+		--build-arg OPENLDAP_SHA256=$(OPENLDAP_OL2616_SHA256) \
+		--build-arg OPENLDAP_PKG_VERSION=$(OPENLDAP_OL2616_PKG_VERSION) \
+		--build-arg SLAPTAIN_PATCH_LIST="$(OPENLDAP_OL2616_PATCHES)" \
+		-t $(OPENLDAP_DEB_IMAGE_OL2616) images/openldap-deb/
+	@touch $@
+
+$(STAMPS)/init-ol2616: $(INIT_SRCS) $(STAMPS)/openldap-deb-ol2616 $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
+	$(CONTAINER_ENGINE) build \
+		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_OL2616) \
+		$(OL2616_LABELS) \
+		-t $(INIT_IMAGE_OL2616) images/slapd-init/
+	@touch $@
+
+$(STAMPS)/slapd-ol2616: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-ol2616 $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
+	$(CONTAINER_ENGINE) build \
+		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_OL2616) \
+		$(OL2616_LABELS) \
+		-t $(SLAPD_IMAGE_OL2616) images/slapd/
+	@touch $@
+
 # ── Debug variants (ADR-free: a diagnostic build, not a shipped artifact) ───
 # Each needs its own package build, so each is a full ~10 min cycle. Nothing
 # else depends on these stamps, so the normal loop never pays for them.
@@ -430,6 +487,19 @@ build-openldap-deb-ol26src: $(STAMPS)/openldap-deb-ol26src
 build-init-ol26src: $(STAMPS)/init-ol26src
 build-slapd-ol26src: $(STAMPS)/slapd-ol26src
 build-ol26src: build-init-ol26src build-slapd-ol26src
+
+## build-ol2616: EXPERIMENTAL upstream 2.6.16 pair (forward-port). Internal
+## use only — never in all/push and not a select.flavour cell. Deploy by
+## pinning BOTH image tags, or with SLAPD_TAG_SUFFIX=-ol2.6.16-slaptain.
+build-openldap-deb-ol2616: $(STAMPS)/openldap-deb-ol2616
+build-init-ol2616: $(STAMPS)/init-ol2616
+build-slapd-ol2616: $(STAMPS)/slapd-ol2616
+build-ol2616: build-init-ol2616 build-slapd-ol2616
+import-init-ol2616: build-init-ol2616
+	$(call import-if-needed,$(INIT_IMAGE_OL2616))
+import-slapd-ol2616: build-slapd-ol2616
+	$(call import-if-needed,$(SLAPD_IMAGE_OL2616))
+import-ol2616: import-init-ol2616 import-slapd-ol2616
 build-toolkit: $(STAMPS)/toolkit
 build-operator: $(STAMPS)/operator
 build-exporter: $(STAMPS)/exporter

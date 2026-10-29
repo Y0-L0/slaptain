@@ -29,10 +29,10 @@
 # ── Package build stage ─────────────────────────────────────────────────────
 FROM debian:trixie-slim AS deb-build
 
-ARG OPENLDAP_VERSION=2.7.1
+ARG OPENLDAP_VERSION=2.7.2
 # sha256 of the upstream release tarball. A mismatch fails the build — this is
 # the only integrity check on the download, so it must never be relaxed.
-ARG OPENLDAP_SHA256=253db80f301258ea69cda1184766d57395b836aaabf41157eb0316eb0fac1341
+ARG OPENLDAP_SHA256=aad731aa22118ff327b9b4ddfc4b6f18ef9476586205da88a532e90940b523d2
 ARG OPENLDAP_URL=https://www.openldap.org/software/download/OpenLDAP/openldap-release/openldap-${OPENLDAP_VERSION}.tgz
 # Upstream test suite: skipped by default (it takes tens of minutes and needs a
 # working loopback/krb5 setup). Set to 1 to run it — see README.md.

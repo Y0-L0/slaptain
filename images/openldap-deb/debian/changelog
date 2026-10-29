@@ -1,3 +1,31 @@
+openldap (2.7.2-0+slaptain1) unstable; urgency=medium
+
+  * New upstream release 2.7.2 (2026-10-21). The one that matters to us is
+    ITS#10597, "slapo-accesslog handling of per-op info state": the overlay
+    freed a shared entryUUID from a path non-write operations reach before
+    taking li_op_rmutex, so concurrent searches against a provider carrying
+    an accesslog could double-free it. It is a read-path crash on a
+    write-path structure, present in 2.7.0, 2.7.1 and 2.6.14/2.6.15, and
+    fixed here and in 2.6.16. Our own load runs against 2.7.1 terminated
+    slapd on a signal often enough to move the measurement arms back to
+    2.6.10; this is the first release in which that is expected not to
+    happen, and it has not yet been re-measured.
+  * patches/accesslog-purge-phase.patch: regenerated against 2.7.2. The
+    ITS#10597 fix removes Entry *li_old and struct berval li_uuid from
+    struct log_info, which were context lines of the patch's first hunk, so
+    against 2.7.2 it applied with fuzz. The insertion point itself did not
+    move and the fuzzy application landed correctly, but a patch that
+    applies with fuzz is one whose context no longer holds and whose next
+    rebase can land somewhere else without failing the build. The
+    regenerated patch adds and removes byte-identical lines (checked both
+    directions) and applies clean to 2.7.2 and with offsets but no fuzz to
+    2.6.16, which the two lines having taken the same struct change makes
+    possible.
+  * The revision restarts at 1 because the upstream version moved; the
+    +slaptain/+pure token and its reason are unchanged.
+
+ -- slaptain <noreply@chuck-chuck-chuck.net>  Wed, 29 Oct 2026 12:00:00 +0100
+
 openldap (2.7.1-0+slaptain3) unstable; urgency=medium
 
   * patches/accesslog-purge-phase.patch: take slapd_rq.rq_mutex around the

@@ -131,14 +131,14 @@ SLAPD_IMAGE_OL26SRC = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)-ol26src
 # Empty = the default build: OpenLDAP 2.7.1, PURE (ADR-040 decision 2). The
 # other three cells of the matrix:
 #
-#   make cluster-helm-install SLAPD_TAG_SUFFIX=-ol2.7.1-slaptain   # 2.7, our patches
+#   make cluster-helm-install SLAPD_TAG_SUFFIX=-ol2.7.2-slaptain   # 2.7, our patches
 #   make cluster-helm-install SLAPD_TAG_SUFFIX=-ol26               # 2.6, Debian's binary
 #   make cluster-helm-install SLAPD_TAG_SUFFIX=-ol26src            # 2.6, our patches
 #
 # This is also how the second tier-1 e2e lane runs (ADR-040 decision 7): the
 # rotation's phase-staggering modes need the patch, so a suite run against the
 # default pure pair exercises WriteOnly and skips the rest. Run the patched
-# lane with SLAPD_TAG_SUFFIX=-ol2.7.1-slaptain.
+# lane with SLAPD_TAG_SUFFIX=-ol2.7.2-slaptain.
 SLAPD_TAG_SUFFIX ?=
 
 # Debug variants of the slapd runtime image (see docs/DEBUG-IMAGES.md). Built

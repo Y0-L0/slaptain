@@ -40,7 +40,7 @@ unpinned cluster gets is the same string it got before this field existed.
 The unsuffixed tag used to carry slaptain's behaviour patches. It now carries
 the pure build: the same upstream OpenLDAP 2.7.1, from the same packaging fork,
 with none of our patches (ADR-040 decision 2). The patched pair moves to
-`<tag>-ol2.7.1-slaptain`.
+`<tag>-ol2.7.2-slaptain`.
 
 The tag string does not change, so an unpinned cluster rolls onto a different
 binary on operator upgrade without its pod template looking any different.

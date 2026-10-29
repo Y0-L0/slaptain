@@ -27,7 +27,7 @@ The tags below are what those selections resolve to. An explicit
 | selection | image tag | OpenLDAP, and where the binary comes from |
 |---|---|---|
 | `lmdb1.0` + `pure` | `slapd:<tag>` + `slapd-init:<tag>` | **the default.** 2.7.1, our build from pristine upstream with Debian's packaging forward-ported onto it. None of our patches (`slapd -VV` ends `+pure<N>`) |
-| `lmdb1.0` + `slaptain` | `:<tag>-ol2.7.1-slaptain` | the same build, with our patches (`+slaptain<N>`). Needed by `spec.rotation`'s purge phases |
+| `lmdb1.0` + `slaptain` | `:<tag>-ol2.7.2-slaptain` | the same build, with our patches (`+slaptain<N>`). Needed by `spec.rotation`'s purge phases |
 | `lmdb0.9` + `pure` | `:<tag>-ol26` | 2.6, **Debian's own prebuilt binary**, pinned (`OPENLDAP_OL26_VERSION`). Not built by us at all — the most conservative thing on offer. Legacy interop and hot migration (ADR-011) |
 | `lmdb0.9` + `slaptain` | `:<tag>-ol26src` | 2.6, Debian's **source** package rebuilt with our patches, same pin. Measurement arms against `-ol26`, and 2.6 clusters needing a patched feature |
 

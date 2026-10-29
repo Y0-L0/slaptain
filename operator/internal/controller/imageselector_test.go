@@ -36,12 +36,12 @@ func TestImageTagSuffixForSelector(t *testing.T) {
 		},
 		{
 			name: "the default cell, stated explicitly",
-			sel:  &ldapv1alpha1.SlapdImageSelector{StorageFormat: "lmdb1.0", Flavour: "pure"},
+			sel:  &ldapv1alpha1.SlapdImageSelector{StorageFormat: storageFormatCurrent, Flavour: flavourPure},
 			want: "",
 		},
 		{
 			name: "current format, our patches",
-			sel:  &ldapv1alpha1.SlapdImageSelector{StorageFormat: "lmdb1.0", Flavour: flavourSlaptain},
+			sel:  &ldapv1alpha1.SlapdImageSelector{StorageFormat: storageFormatCurrent, Flavour: flavourSlaptain},
 			want: tagSuffixSlaptain27,
 		},
 		{
@@ -190,5 +190,32 @@ func TestSuffixTableAgreesWithTheBuiltOpenLDAPVersion(t *testing.T) {
 	if got := imageTagSuffixes[storageFormatCurrent][flavourSlaptain]; got != want {
 		t.Errorf("the selector resolves flavour %q to %q, but the Makefile builds that pair as %q "+
 			"(derived from %s). Update imageTagSuffixes.", flavourSlaptain, got, want, changelog)
+	}
+}
+
+// The selector's VALUES are pinned here as literals, on purpose and exactly
+// once. Everywhere else in this file the table's want column uses the
+// constants, so without this test a change to a constant moves both sides of
+// every assertion together and none of them can catch it — which is what
+// happened when the suffixes were turned into constants to satisfy goconst.
+//
+// These are not arbitrary strings. The two selector axes are CRD enum values a
+// user writes in a spec, and the suffixes are published image tags: moving
+// either silently is an API break or a pull of an image that does not exist.
+func TestSelectorValuesArePinned(t *testing.T) {
+	for _, tc := range []struct{ name, got, want string }{
+		{"storageFormatCurrent", storageFormatCurrent, "lmdb1.0"},
+		{"storageFormatLegacy", storageFormatLegacy, "lmdb0.9"},
+		{"flavourPure", flavourPure, "pure"},
+		{"flavourSlaptain", flavourSlaptain, "slaptain"},
+		{"tagSuffixSlaptain27", tagSuffixSlaptain27, "-ol2.7.2-slaptain"},
+		{"tagSuffixOL26", tagSuffixOL26, "-ol26"},
+		{"tagSuffixOL26Src", tagSuffixOL26Src, "-ol26src"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q — a CRD enum value or a published image tag moved; "+
+				"if that is deliberate, the chart values, docs/OPENLDAP-VERSIONS.md and "+
+				"docs/UPGRADING.md move with it", tc.name, tc.got, tc.want)
+		}
 	}
 }

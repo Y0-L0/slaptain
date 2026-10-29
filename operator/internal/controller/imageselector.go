@@ -29,7 +29,7 @@ const (
 
 	// The tag suffix naming each build. The unsuffixed cell is the default
 	// (ADR-040 decision 2), so an unqualified tag means pure 2.7.
-	tagSuffixSlaptain27 = "-ol2.7.1-slaptain"
+	tagSuffixSlaptain27 = "-ol2.7.2-slaptain"
 	tagSuffixOL26       = "-ol26"
 	tagSuffixOL26Src    = "-ol26src"
 )

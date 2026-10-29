@@ -99,8 +99,8 @@ Last-Update: 2026-10-20
 +	int li_phased;
  	struct re_s *li_task;
  	Filter *li_oldf;
- 	Entry *li_old;
-@@ -123,7 +125,7 @@
+ 	log_attr *li_oldattrs;
+@@ -128,7 +130,7 @@
  			"DESC 'Operation types to log' "
  			"EQUALITY caseIgnoreMatch "
  			"SYNTAX OMsDirectoryString )", NULL, NULL },
@@ -109,7 +109,7 @@ Last-Update: 2026-10-20
  		log_cf_gen, "( OLcfgOvAt:4.3 NAME 'olcAccessLogPurge' "
  			"DESC 'Log cleanup parameters' "
  			"EQUALITY caseIgnoreMatch "
-@@ -857,8 +859,8 @@
+@@ -862,8 +864,8 @@
  	struct log_info *li = on->on_bi.bi_private;
  	int rc = 0;
  	slap_mask_t tmask = 0;
@@ -120,7 +120,7 @@ Last-Update: 2026-10-20
  
  	switch( c->op ) {
  	case SLAP_CONFIG_EMIT:
-@@ -894,6 +896,14 @@
+@@ -899,6 +901,14 @@
  			cyclebv.bv_val = agebv.bv_val + agebv.bv_len;
  			log_age_unparse( li->li_cycle, &cyclebv, sizeof( agebuf ) - agebv.bv_len );
  			agebv.bv_len += cyclebv.bv_len;
@@ -135,7 +135,7 @@ Last-Update: 2026-10-20
  			value_add_one( &c->rvalue_vals, &agebv );
  			break;
  		case LOG_SUCCESS:
-@@ -964,6 +974,8 @@
+@@ -969,6 +979,8 @@
  			}
  			li->li_age = 0;
  			li->li_cycle = 0;
@@ -144,7 +144,7 @@ Last-Update: 2026-10-20
  			break;
  		case LOG_SUCCESS:
  			li->li_success = 0;
-@@ -1071,19 +1083,45 @@
+@@ -1076,19 +1088,45 @@
  				li->li_cycle = log_age_parse( c->argv[2] );
  				if ( li->li_cycle < 1 ) {
  					rc = 1;
@@ -194,7 +194,7 @@ Last-Update: 2026-10-20
  				}
  			}
  			break;
-@@ -2681,6 +2719,10 @@
+@@ -2674,6 +2712,10 @@
  		li->li_task = ldap_pvt_runqueue_insert( &slapd_rq,
  				li->li_cycle, accesslog_purge, li,
  				"accesslog_purge", li->li_db->be_suffix[0].bv_val );

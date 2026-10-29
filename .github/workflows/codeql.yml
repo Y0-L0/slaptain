@@ -21,9 +21,9 @@ concurrency:
 jobs:
   analyze:
     name: Analyze
-    # Extraction, TRAP import and the queries all scale with cores; 4 cores
-    # spent about 120 of 190 s there.
-    runs-on: namespace-profile-8x16
+    # Measured: 1.6 of 4 cores on average, near 4 only for ~40 s of queries;
+    # 8x16 finished 10 s sooner, so the extra 4 vCPU of quota bought little.
+    runs-on: namespace-profile-yo-lo
     steps:
       - name: Checkout
         uses: actions/checkout@v7

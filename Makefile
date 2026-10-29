@@ -141,6 +141,11 @@ SLAPD_IMAGE_OL26SRC = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)-ol26src
 # which makes it comparable to 2.6.10 in a way no 2.7 build is.
 OPENLDAP_OL2616_VERSION     ?= 2.6.16
 OPENLDAP_OL2616_SHA256      ?= 8d8452bc3f56aa7a392c62dd377733f83d1314eed6c52fe44028439a3bb4df18
+# Debian's packaging base: sid's, the newest Debian has. NOT the vendored
+# debian/ fork, which is rebased onto 2.7 and whose getaddrinfo-is-threadsafe
+# fails on a 2.6 tree at the zero fuzz dpkg-source enforces — a build that took
+# that route failed on exactly it.
+OPENLDAP_OL2616_DEBIAN_PKG  ?= 2.6.14+dfsg-2
 OPENLDAP_OL2616_PKG_VERSION ?= 2.6.16-0+slaptain1
 # Both local patches, not just the phase one: 2.6 does not emit the purge
 # timing line natively, and without it a purge's duration and delete rate --
@@ -410,9 +415,10 @@ $(STAMPS)/slapd-ol26src: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-ol26src $(STAMPS)/
 # vendored packaging, same gates, three build args. Nothing else depends on
 # these stamps, so the normal loop never pays for them.
 $(STAMPS)/openldap-deb-ol2616: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
-	$(CONTAINER_ENGINE) build -f images/openldap-deb/Containerfile \
+	$(CONTAINER_ENGINE) build -f images/openldap-deb/Containerfile.ol2616 \
 		--build-arg OPENLDAP_VERSION=$(OPENLDAP_OL2616_VERSION) \
 		--build-arg OPENLDAP_SHA256=$(OPENLDAP_OL2616_SHA256) \
+		--build-arg DEBIAN_PKG_VERSION=$(OPENLDAP_OL2616_DEBIAN_PKG) \
 		--build-arg OPENLDAP_PKG_VERSION=$(OPENLDAP_OL2616_PKG_VERSION) \
 		--build-arg SLAPTAIN_PATCH_LIST="$(OPENLDAP_OL2616_PATCHES)" \
 		-t $(OPENLDAP_DEB_IMAGE_OL2616) images/openldap-deb/

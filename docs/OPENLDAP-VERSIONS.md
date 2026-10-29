@@ -71,34 +71,51 @@ measured against on 2.6.10. That makes it comparable to those figures in a
 way no 2.7 build is, while carrying 17 months of fixes — five of them on the
 delta-syncrepl path (ITS#10360, #10385, #10413, #10440, #10448).
 
-**Status: DOES NOT BUILD YET.** `make build-ol2616` is wired and fails, for a
-reason this repository had already written down.
+**How it is built.** `images/openldap-deb/Containerfile.ol2616`: Debian **sid's**
+packaging (`2.6.14+dfsg-2`, the newest Debian has) over pristine upstream
+2.6.16, with both local patches appended last.
 
-The vendored `debian/` tree is **our fork, rebased onto 2.7** — not Debian's
-packaging as shipped. Several of its patches no longer apply to a 2.6 tree,
-and `Containerfile.ol26src`'s own header names the first one:
-*"getaddrinfo-is-threadsafe is the first to fail"*. It is exactly the one that
-fails. Verified both ways at the setting that matters: the vendored
-`getaddrinfo-is-threadsafe` applies to 2.7.2 at zero fuzz and fails on 2.6.16
-at zero fuzz.
+It does **not** use the vendored `debian/` tree, and that is the whole reason
+it has a file of its own. That tree is *our fork, rebased onto 2.7*, and
+several of its patches no longer apply to a 2.6 tree —
+`Containerfile.ol26src`'s header already named `getaddrinfo-is-threadsafe` as
+the first to fail, and a first attempt down that route failed on exactly it.
 
-Zero fuzz is the detail that hid this. `dpkg-source` applies with `-F 0` and
-refuses fuzz outright; plain `patch` defaults to fuzz 2. A feasibility check
-run with `patch` therefore reports "applies" for a series the build will
-reject — the checker was more permissive than the gate, so its reassuring
-answer and a correct one were indistinguishable.
+**Zero fuzz is the bar.** `dpkg-source` applies with `-F 0` and refuses fuzz;
+plain `patch` defaults to fuzz 2. A feasibility check run with `patch`
+therefore answers a more permissive question than the build asks, and will
+report "applies" for a series the build rejects. Checked at `-F 0` before the
+file was written: sid's 17 patches apply to 2.6.16, and both local patches
+apply on top of them.
 
-**The fix, not yet written:** start from Debian's own 2.6 packaging rather
-than our 2.7-rebased fork — sid's `2.6.14+dfsg-2`, the newest Debian has —
-and put upstream 2.6.16 under it, the way `Containerfile.ol26src` already
-takes Debian's source package for 2.6.10. The parameterisation that exists
-(`OPENLDAP_PKG_VERSION`, `SLAPTAIN_PATCH_LIST`) is sound and was exercised:
-the changelog override produced `2.7.2-0+slaptain1 -> 2.6.16-0+slaptain1` and
-both local patches applied. Only the packaging base is wrong.
+**Provenance is rewritten, not inherited.** Sid's `debian/control` names the
+Debian OpenLDAP Maintainers, correctly for *their* package — but this is not
+their package, and an image announcing their name for it misattributes our
+build. The build therefore sets `Maintainer` to slaptain and preserves
+`XSBC-Original-Maintainer`, the same derivative convention the vendored 2.7
+fork uses, and a **maintainer gate** fails the build if the package still
+names Debian. The version is set by a new `dch` entry rather than a rewrite of
+sid's version line, because `debian/rules` derives `SOURCE_DATE_EPOCH` from
+that line's date: rewriting the version alone produced a binary reporting a
+build date two months before the release it contained.
 
-**What is verified:** the package-version override, the patch list, and both
-local patches applying to 2.6.16. Nothing has been measured with it, no e2e
-has run against it, and no image has been produced.
+**Verified** (2026-10-29), by two routes. In-build gates: package and binary
+agree on `2.6.16-0+slaptain1`; the maintainer is not Debian's; a three-value
+`logpurge` is accepted, which a stock 2.6 refuses at config-parse time and so
+proves the patch took. And from the finished image:
+
+```
+$ slapd -VV
+@(#) $OpenLDAP: slapd 2.6.16-0+slaptain1 (Oct 29 2026 20:33:24) $
+	slaptain <noreply@chuck-chuck-chuck.net>
+```
+
+The second route is what found the misattribution: the version gate passed
+throughout, because the version string was honest all along and the wrong
+maintainer sat beside it, untested.
+
+**Not verified:** nothing has been measured with it, and no e2e has run
+against it.
 
 **The default pair is PURE since 0.5.0.** It used to carry the local patches;
 it no longer does, because nobody should run a patched slapd without having

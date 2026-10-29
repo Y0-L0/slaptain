@@ -1,0 +1,187 @@
+# EXPERIMENTAL: upstream OpenLDAP 2.6.16 under DEBIAN SID's packaging, plus the
+# local patches in images/openldap-deb/local-patches/. Internal use only —
+# never in all/push, never in a chart, and deliberately not a select.flavour
+# cell (docs/OPENLDAP-VERSIONS.md says why).
+#
+# Why a file of its own rather than the 2.7 Containerfile with build args: the
+# packaging base is different, and that is the whole point. The vendored
+# debian/ tree is OUR fork, rebased onto 2.7, and several of its patches no
+# longer apply to a 2.6 tree — Containerfile.ol26src's header already named
+# getaddrinfo-is-threadsafe as the first to fail, and a build that took this
+# route failed on exactly that. So this starts from Debian's own 2.6 packaging
+# instead, which is sid's 2.6.14+dfsg-2, the newest Debian has.
+#
+# Why not Containerfile.ol26src, which also takes Debian's source: that build
+# keeps Debian's SOURCE as well as its packaging, pinned to trixie's 2.6.10.
+# Here the packaging is Debian's and the source is pristine upstream 2.6.16 —
+# a forward-port, which is a different artifact with a different contract.
+#
+# Zero fuzz is the bar. dpkg-source applies with -F 0 and refuses fuzz; plain
+# `patch` defaults to fuzz 2, so a feasibility check run with it answers a more
+# permissive question than this build asks. Verified at -F 0 before this file
+# was written: sid's 17 patches apply to 2.6.16, and both local patches apply
+# on top of them.
+FROM debian:trixie-slim AS deb-build
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+ARG OPENLDAP_VERSION=2.6.16
+ARG OPENLDAP_SHA256=8d8452bc3f56aa7a392c62dd377733f83d1314eed6c52fe44028439a3bb4df18
+ARG OPENLDAP_URL=https://www.openldap.org/software/download/OpenLDAP/openldap-release/openldap-${OPENLDAP_VERSION}.tgz
+# Debian's packaging, pinned for the reason ADR-040 decision 1 gives: an
+# unpinned fetch resolves to whatever the archive serves today, and the patches
+# would then be applied to a moving target.
+ARG DEBIAN_PKG_VERSION=2.6.14+dfsg-2
+# The package version this build reports. It MUST name the source it contains:
+# a package claiming Debian's 2.6.14 while holding 2.6.16 would defeat
+# `slapd -VV`, the OCI labels and ADR-040's provenance argument at once.
+ARG OPENLDAP_PKG_VERSION=2.6.16-0+slaptain1
+# Both local patches. 2.6 does not emit the purge timing line natively, and
+# without it a purge's duration and delete rate — the two quantities this arm
+# exists to measure — are unreadable.
+ARG SLAPTAIN_PATCH_LIST="accesslog-purge-phase.patch accesslog-purge-logging.patch"
+
+RUN set -eux; \
+    sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/debian.sources; \
+    printf 'Types: deb-src\nURIs: http://deb.debian.org/debian\nSuites: sid\nComponents: main\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n' \
+        > /etc/apt/sources.list.d/sid-src.sources; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        build-essential ca-certificates curl devscripts equivs fakeroot quilt; \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Debian's packaging only — the source that comes with it is discarded. apt
+# verifies the download against the archive signature.
+RUN set -eux; \
+    apt-get update; \
+    apt-get source --download-only slapd="${DEBIAN_PKG_VERSION}"; \
+    rm -rf /var/lib/apt/lists/*; \
+    mkdir -p /build/sidpkg; \
+    tar xJf openldap_*.debian.tar.xz -C /build/sidpkg; \
+    test -f /build/sidpkg/debian/patches/series
+
+# Pristine upstream, checksum-gated. This is the only integrity check on the
+# download and must never be relaxed.
+RUN set -eux; \
+    curl -fsSL -o openldap-${OPENLDAP_VERSION}.tgz "${OPENLDAP_URL}"; \
+    echo "${OPENLDAP_SHA256}  openldap-${OPENLDAP_VERSION}.tgz" | sha256sum -c -; \
+    tar xzf openldap-${OPENLDAP_VERSION}.tgz; \
+    cp openldap-${OPENLDAP_VERSION}.tgz openldap_${OPENLDAP_VERSION}.orig.tar.gz; \
+    cp -a /build/sidpkg/debian openldap-${OPENLDAP_VERSION}/debian
+
+COPY local-patches /build/local-patches
+
+WORKDIR /build/openldap-${OPENLDAP_VERSION}
+
+# The package version and WHO MAINTAINS IT.
+#
+# A new changelog entry rather than a rewrite of sid's version line, because
+# the line carries a date as well as a version: debian/rules derives
+# SOURCE_DATE_EPOCH from it, so a rewritten version with sid's date makes
+# `slapd -VV` report a build date months before the release it contains.
+#
+# And the maintainer must move with it. Sid's debian/control names the Debian
+# OpenLDAP Maintainers, correctly for their package — but this is not their
+# package: it is upstream 2.6.16 with our patches, and an image announcing
+# their name for it misattributes our build to them and tells a reader of
+# `slapd -VV` the wrong thing about where it came from. The vendored 2.7 fork
+# already uses the standard derivative convention (Maintainer ours,
+# XSBC-Original-Maintainer theirs); this does the same.
+ARG SLAPTAIN_MAINTAINER="slaptain <noreply@chuck-chuck-chuck.net>"
+RUN set -eux; \
+    cur=$(dpkg-parsechangelog -S Version); \
+    case "${OPENLDAP_PKG_VERSION}" in \
+      "${OPENLDAP_VERSION}"-*) ;; \
+      *) echo "OPENLDAP_PKG_VERSION '${OPENLDAP_PKG_VERSION}' does not name the \
+source version '${OPENLDAP_VERSION}' it will contain" >&2; exit 1 ;; \
+    esac; \
+    orig=$(sed -n 's/^Maintainer: //p' debian/control | head -1); \
+    sed -i "0,/^Maintainer: /s|^Maintainer: .*|Maintainer: ${SLAPTAIN_MAINTAINER}\nXSBC-Original-Maintainer: ${orig}|" debian/control; \
+    DEBEMAIL="${SLAPTAIN_MAINTAINER#* <}"; DEBEMAIL="${DEBEMAIL%>}"; \
+    export DEBEMAIL; \
+    export DEBFULLNAME="${SLAPTAIN_MAINTAINER%% <*}"; \
+    dch --newversion "${OPENLDAP_PKG_VERSION}" --distribution UNRELEASED --force-bad-version \
+        "Forward-port: upstream OpenLDAP ${OPENLDAP_VERSION} under Debian ${DEBIAN_PKG_VERSION} packaging, plus slaptain local patches. EXPERIMENTAL, internal use only."; \
+    got=$(dpkg-parsechangelog -S Version); \
+    [ "$got" = "${OPENLDAP_PKG_VERSION}" ] || { \
+        echo "package version: dch wrote '$got', want '${OPENLDAP_PKG_VERSION}'" >&2; \
+        exit 1; }; \
+    echo "package version: $cur -> $got (forward-port)"; \
+    echo "maintainer: ${SLAPTAIN_MAINTAINER} (was: $orig)"
+
+# Ours last, after Debian's series. Pushing and popping the whole series fails
+# here rather than halfway through dpkg-buildpackage if anything does not apply.
+RUN set -eux; \
+    for p in ${SLAPTAIN_PATCH_LIST}; do \
+        test -f "/build/local-patches/$p" || { \
+            echo "no such patch in local-patches/: $p" >&2; exit 1; }; \
+        cp "/build/local-patches/$p" debian/patches/; \
+        echo "$p" >> debian/patches/series; \
+    done; \
+    QUILT_PATCHES=debian/patches quilt --quiltrc /dev/null push -a; \
+    QUILT_PATCHES=debian/patches quilt --quiltrc /dev/null pop -a; \
+    echo "slaptain patches: applied"
+
+RUN apt-get update \
+    && mk-build-deps -i -r -t 'apt-get -y --no-install-recommends' debian/control \
+    && rm -rf /var/lib/apt/lists/*
+
+# DFSG_NONFREE=1 for the same reason the 2.7 build sets it: this is the
+# pristine upstream tarball, so debian/rules must skip its DFSG-freeness
+# assertion and the schema substitution that expects a +dfsg source layout.
+RUN set -eux; \
+    export DFSG_NONFREE=1; \
+    export DEB_BUILD_OPTIONS="nocheck parallel=$(nproc)"; \
+    dpkg-buildpackage -us -uc -b
+
+# ── gates ───────────────────────────────────────────────────────────────────
+# A deliberately narrower set than the 2.7 Containerfile's: this artifact is
+# internal and has no pure flavour, so there is no symmetric pure/slaptain
+# assertion to make. The two that still earn their place are the ones that
+# would let a wrong image look right — the version the package and the binary
+# report, and whether the patch that defines this build actually took.
+RUN set -eux; \
+    deb_ver=$(dpkg-deb -f /build/slapd_*.deb Version); \
+    [ "$deb_ver" = "${OPENLDAP_PKG_VERSION}" ] || { \
+        echo "version gate: package reports '$deb_ver', want '${OPENLDAP_PKG_VERSION}'" >&2; \
+        exit 1; }; \
+    root=/tmp/vg; rm -rf "$root"; mkdir -p "$root/pkg"; \
+    for f in /build/slapd_*.deb /build/libldap2_*.deb /build/libldap-common_*.deb; do \
+        dpkg-deb -x "$f" "$root/pkg"; \
+    done; \
+    export LD_LIBRARY_PATH="$root/pkg/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)"; \
+    bin_ver=$("$root/pkg/usr/sbin/slapd" -VV 2>&1 | head -1); \
+    case "$bin_ver" in \
+      *"${OPENLDAP_PKG_VERSION}"*) ;; \
+      *) echo "version gate: binary says '$bin_ver', want ${OPENLDAP_PKG_VERSION}" >&2; exit 1 ;; \
+    esac; \
+    maint=$(dpkg-deb -f /build/slapd_*.deb Maintainer); \
+    case "$maint" in \
+      *Debian*) echo "maintainer gate: the package still names '$maint' — this \
+is not Debian's build and must not claim to be" >&2; exit 1 ;; \
+    esac; \
+    echo "version gate: OK (package and binary agree on ${OPENLDAP_PKG_VERSION})"; \
+    echo "maintainer gate: OK ($maint)"
+
+# The patch that defines this build: a THREE-value logpurge must be accepted.
+# A stock 2.6 refuses it at config-parse time, so this fails loudly if the
+# patch silently did not take.
+RUN set -eux; \
+    root=/tmp/pg; rm -rf "$root"; mkdir -p "$root/pkg" "$root/db" "$root/alog"; \
+    for f in /build/slapd_*.deb /build/libldap2_*.deb /build/libldap-common_*.deb; do \
+        dpkg-deb -x "$f" "$root/pkg"; \
+    done; \
+    export LD_LIBRARY_PATH="$root/pkg/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)"; \
+    printf 'include %s\nmodulepath %s\nmoduleload back_mdb\nmoduleload accesslog\n\ndatabase mdb\nsuffix "cn=accesslog"\ndirectory %s\n\ndatabase mdb\nsuffix "dc=example,dc=com"\ndirectory %s\noverlay accesslog\nlogdb cn=accesslog\nlogops writes\nlogpurge 0+00:15 0+00:05 0+00:02\n' \
+        "$root/pkg/etc/ldap/schema/core.schema" "$root/pkg/usr/lib/ldap" \
+        "$root/alog" "$root/db" > "$root/slapd.conf"; \
+    "$root/pkg/usr/sbin/slaptest" -f "$root/slapd.conf" -u > "$root/out" 2>&1 || { \
+        echo "logpurge phase gate: the patched build REFUSED a three-value \
+logpurge — the patch did not take" >&2; cat "$root/out" >&2; exit 1; }; \
+    echo "logpurge phase gate: OK (three values accepted)"
+
+# ── carrier ─────────────────────────────────────────────────────────────────
+FROM scratch
+COPY --from=deb-build /build/*.deb /debs/

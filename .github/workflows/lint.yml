@@ -80,7 +80,7 @@ jobs:
 
   chart:
     name: Helm charts
-    runs-on: namespace-profile-2x4
+    runs-on: namespace-profile-1x2
     steps:
       - name: Clone the code
         uses: actions/checkout@v7

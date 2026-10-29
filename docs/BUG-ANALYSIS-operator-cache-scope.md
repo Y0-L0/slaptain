@@ -1,7 +1,9 @@
 # Bug analysis: the operator caches every Secret, Pod and Service in the cluster
 
-**Status:** ANALYSED, NOT FIXED — this is the phase-4 writeup of the root-cause pass,
-presented for a design decision. Nothing has been changed.
+**Status:** SUPERSEDED IN PART, 2026-10-29, by PR #29 and ADR-042. The analysis below
+is kept **as written**, because its §8 rejections still hold and its §4 hazard is real —
+but §6's first piece is **withdrawn** and §5 is **dissolved rather than deferred**. Read
+the Amendment at the end before acting on §6 or §10.
 **Reported:** 2026-10-28, [issue #28](https://github.com/chuck-chuck-chuck-net/slaptain/issues/28), by an external contributor
 **Severity:** The operator is OOMKilled at the chart's own default limit on any
 sufficiently large Kubernetes cluster, while managing a single `SlapdCluster`.
@@ -263,3 +265,81 @@ owner-referenced ones did.
   and what that implies for anything that narrows an event stream.
 - ADR-025 — unreadable evidence never counts as absence. §4 is that rule meeting a
   cache.
+
+---
+
+## Amendment, 2026-10-29: what the implementation changed about this analysis
+
+PR #29 implements the fix as **ADR-042**, and it is a better design than §6. Recorded
+here because a document that keeps recommending what the merged code deliberately does
+not do is the same drift between two records that caused the original defect (§3).
+
+### §6 piece 1 is withdrawn
+
+§6 recommended dropping `Owns(&corev1.Secret{})` and reading every Secret uncached.
+That is ADR-042's **option 2**, and the ADR rejects it on a case this document raised
+and then failed to apply to its own proposal:
+
+> a deleted `<cluster>-config-password` would be recreated only on the next reconcile,
+> and a Running standalone cluster has no periodic requeue (reconcile step 7), so it
+> would wait for an unrelated event. The watch is worth keeping; it only has to be
+> narrow.
+
+That is §5's own finding, turned around. §5 treated the missing periodic resync as a
+**prerequisite to fix before narrowing anything**; ADR-042 keeps the watch and labels
+the objects instead, so no event stream is lost and **the prerequisite never arises**.
+`BACKLOG.md:1885` stays open on its own merits and is no longer sequencing-critical to
+this work.
+
+The lesson against this document: §5 correctly identified that narrowing an event
+stream is the hazard, then §6 proposed narrowing one anyway. Finding a hazard and
+routing the proposal around it are two steps, and only the first was taken.
+
+### §4 was right, and is answered rather than avoided
+
+The upgrade deadlock over create-only state is real, and ADR-042 does not sidestep it:
+
+- **Secrets** are read through the API reader at all 15 call sites, so `reconcileSecret`
+  finds the existing Secret and §4's `AlreadyExists` loop cannot start. An owned but
+  unlabelled Secret is then patched by `labelOwnedSecret`, which refuses to label
+  anything whose controller reference is not this cluster.
+- **StatefulSets and Services** use `managedGet` — cache, then one uncached GET on
+  NotFound. ADR-042 names the two concrete failures this document had only described
+  in general: `volumeClaimTemplates` re-asserted against an existing StatefulSet so the
+  labelling apply never lands, and a `<cluster>-write` Service frozen on one pod never
+  widening.
+
+### §3's root cause stands, and the implementation closes it
+
+"The scope is a declaration nobody made" is answered directly: `CacheOptions()` is that
+declaration, in one place, and `managedLabels()` is the single definition of what the
+operator claims. `database_resync.go`'s comment — this document's evidence for the root
+cause — was itself amended in the PR rather than left to contradict the new behaviour.
+
+### What is still open after the implementation
+
+Raised in review on PR #29; none is a redesign:
+
+1. **The guard is a convention, not a mechanism.** `client.Client` satisfies
+   `client.Reader`, so a future `r.Get` of a Secret compiles, passes the unit suite and
+   finds nothing in production — the exact failure the PR fixes. Adding
+   `client.CacheOptions{DisableFor: []client.Object{&corev1.Secret{}}}` to the manager's
+   **client** options makes it impossible rather than discouraged, and does **not**
+   disturb the `Owns()` watch: `DisableFor` governs the client's reads, the informer
+   belongs to the cache. This is §6 piece 1 returning in the only form that still has a
+   job — as a structural guard beside the label filter, not as a replacement for it.
+2. **Jobs get no `managedGet` fallback** (`slapdbackup_controller.go:181`,
+   `dirjob.go:112`, `slapdcluster_restore.go:462`). Benign — Jobs are TTL'd under
+   ADR-018 and the failure is loud and self-healing — but the asymmetry with Services
+   and StatefulSets is undocumented.
+3. **The e2e has not run**, by the author's disclosure. Not a replication-path change,
+   but it changes how the ADR-027 replication credential is read on every per-pod
+   convergence.
+
+### What §7 said and what the implementation measured
+
+§7 recorded that the 553Mi was not reproduced here and the attribution across the five
+kinds was **argued**. ADR-042 measured it: 96 Secrets of 768 KiB (72 MiB, Helm release
+records) in a namespace the operator has no business in cost **+97.5 MiB of heap**
+before and **+1.6 MiB** after. The attribution to Secrets was correct, and is now
+measured rather than argued.

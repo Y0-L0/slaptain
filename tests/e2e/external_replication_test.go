@@ -462,6 +462,47 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 			// 2026-08-26). Worst case is a full tick, the follow-up SlapdDatabase
 			// reconcile on every pod, and the pod template rolling back underneath
 			// all of it.
+
+			// And the roll has to be OVER before this spec hands the cluster to
+			// the next one. "Every pod carries the stanza again" does not mean
+			// that — the stanza is written to a running slapd while the pod
+			// template change (the peer's CA volume coming back) rolls the
+			// StatefulSet underneath it, and a roll walks ordinals downward, so
+			// the pod a later spec talks to may be the one not yet replaced.
+			// Measured 2026-10-29: this spec returned at 13:03:57 with the roll
+			// in flight, the scale spec opened a connection to slapd-0 and began
+			// a 1200-entry seed, and slapd-0 was killed under it at 13:04:02 —
+			// entry 448, "unable to read LDAP response packet: EOF". The suite
+			// read that as a scale defect; it was this spec's unfinished roll.
+			//
+			// Settled is not one reading, it is several in a row. A roll that has
+			// been REQUESTED but not yet observed by the StatefulSet controller
+			// looks exactly like a finished one — measured during this fix: a
+			// sample taken immediately after the restore patch read settled, and
+			// three seconds later the same predicate read "1/3 pods at the
+			// updated revision". A single check would have believed the first.
+			//
+			// So require the fleet to read settled for several consecutive polls,
+			// and treat a roll that starts inside that run as a reason to go back
+			// to waiting rather than to fail — the spec's obligation is to leave
+			// the cluster still, not to police what else moves it.
+			settledPolls := 0
+			Eventually(ctx, func() error {
+				if err := rolloutSettled(ctx); err != nil {
+					settledPolls = 0
+					return err
+				}
+				settledPolls++
+				if settledPolls < 4 {
+					return fmt.Errorf("settled, but only for %d consecutive polls — "+
+						"waiting out a roll that may have been requested and not yet observed",
+						settledPolls)
+				}
+				return nil
+			}).WithTimeout(10*time.Minute).WithPolling(5*time.Second).Should(Succeed(),
+				"this spec re-added a mesh site, which rolls the StatefulSet; it must not return "+
+					"while that roll is in flight — the next spec's connection lands on a pod that "+
+					"is about to be killed under it")
 		}, NodeTimeout(20*time.Minute))
 
 	// ── 5. External peer status reported in CR ───────────────────────────────

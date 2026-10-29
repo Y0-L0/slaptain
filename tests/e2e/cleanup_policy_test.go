@@ -10,7 +10,6 @@ import (
 	. "github.com/onsi/gomega"
 
 	ldap "github.com/go-ldap/ldap/v3"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -241,26 +240,7 @@ func waitClusterSettled(ctx SpecContext, absent ...string) {
 				}
 			}
 		}
-		for _, sts := range []string{"slapd", "slapd-readonly"} {
-			s, err := k8sClient.AppsV1().StatefulSets(namespace).Get(ctx, sts, metav1.GetOptions{})
-			if err != nil {
-				// A cluster with readReplicas=0 has no RO StatefulSet.
-				if sts == "slapd-readonly" && apierrors.IsNotFound(err) {
-					continue
-				}
-				return false
-			}
-			desired := int32(1)
-			if s.Spec.Replicas != nil {
-				desired = *s.Spec.Replicas
-			}
-			if s.Status.ObservedGeneration != s.Generation ||
-				s.Status.UpdatedReplicas != desired ||
-				s.Status.ReadyReplicas != desired {
-				return false
-			}
-		}
-		return true
+		return rolloutSettled(ctx) == nil
 	}).WithTimeout(10*time.Minute).WithPolling(5*time.Second).Should(BeTrue(),
 		"cluster did not settle (databases still listed, or pods not ready)")
 }

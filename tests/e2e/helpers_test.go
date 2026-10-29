@@ -16,6 +16,7 @@ import (
 	. "github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -639,4 +640,49 @@ func clusterExternalPeerNames(ctx context.Context, clusterName string) []string 
 		names = append(names, ps.Name)
 	}
 	return names
+}
+
+// ── StatefulSet rollout ───────────────────────────────────────────────────────
+
+// rolloutSettled reports whether both slapd StatefulSets have finished rolling:
+// the controller has observed the current pod template, every pod is at the
+// updated revision, and every pod is Ready. It returns an error naming what is
+// unsettled rather than a bool, so a caller's failure message says which
+// StatefulSet is still moving and why — "not settled" and "could not read the
+// StatefulSet" are different answers and must not look alike.
+//
+// This is the condition a spec that rolls the fleet has to leave behind. A roll
+// walks ordinals downward, so a pod that is still serving is no evidence the
+// roll is over: the pod a client is talking to may be the one that has not been
+// replaced yet. That is the 2026-10-29 scale-seed failure — a 1200-entry seed
+// opened a connection to slapd-0 five seconds into a roll started by the
+// mesh-peer-removal spec, and slapd-0 was killed under it at entry 448.
+func rolloutSettled(ctx context.Context) error {
+	for _, name := range []string{"slapd", "slapd-readonly"} {
+		s, err := k8sClient.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			// A cluster with readReplicas=0 has no RO StatefulSet.
+			if name == "slapd-readonly" && apierrors.IsNotFound(err) {
+				continue
+			}
+			return fmt.Errorf("reading StatefulSet %s: %w", name, err)
+		}
+		desired := int32(1)
+		if s.Spec.Replicas != nil {
+			desired = *s.Spec.Replicas
+		}
+		if s.Status.ObservedGeneration != s.Generation {
+			return fmt.Errorf("%s: the StatefulSet controller has not observed generation %d yet (at %d) — "+
+				"a pod template change is pending, so the roll has not even started",
+				name, s.Generation, s.Status.ObservedGeneration)
+		}
+		if s.Status.UpdatedReplicas != desired {
+			return fmt.Errorf("%s: %d/%d pods at the updated revision %s — roll in flight",
+				name, s.Status.UpdatedReplicas, desired, s.Status.UpdateRevision)
+		}
+		if s.Status.ReadyReplicas != desired {
+			return fmt.Errorf("%s: %d/%d pods ready", name, s.Status.ReadyReplicas, desired)
+		}
+	}
+	return nil
 }

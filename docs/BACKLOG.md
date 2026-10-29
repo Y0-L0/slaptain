@@ -4081,7 +4081,49 @@ Any future claim resting on drop rates has to carry that discriminator.
   pod `k` and 0 elsewhere, against the same pure grid function the write
   endpoint uses.
 
-## OpenLDAP 2.7.1 segfaults reliably under load testing
+## OpenLDAP 2.7.1 segfaults reliably under load testing — ITS#10597, almost certainly, and shipped fixed in 2.7.2
+
+**Update 2026-10-29.** This has a name, and the default moved to 2.7.2, which
+carries its fix. The identification is strong but **not confirmed**: the arms
+have not been re-run on 2.7.2 and no stack was ever captured.
+
+ITS#10597, "slapo-accesslog handling of per-op info state": the overlay freed a
+shared `entryUUID` from a path **non-write** operations reach via `goto skip`
+before taking `li_op_rmutex`, while writes take it properly. Concurrent
+searches against a provider carrying an accesslog double-free it. The reporter
+measured 10 SIGSEGVs in 30 minutes unpatched and 0 after. Present in 2.7.0,
+2.7.1, 2.6.14 and 2.6.15; fixed in 2.7.2 and 2.6.16.
+
+Everything matches: the right versions, the accesslog overlay present, a
+read-dominated workload (0.3 % writes), a reliable crash under sustained load.
+
+**And we had already written it down.** ADR-037's option-A section says purge
+pacing is *"blocked on upstream: measuring it needs read-heavy load against
+2.7.x, which frees a shared entryUUID from an unlocked path (ITS#10597)"*. The
+explanation was in this repository while this entry called the crashes
+unexplained — two records, one fact, no link between them.
+
+**Three consequences:**
+
+1. **The bearing on ADR-040 decision 8 is gone.** The amendment held 2.7 as
+   the default on the argument that ITS#10597 was *"temporary and
+   self-resolving (2.7.2, inside the same format line, no migration)"*. 2.7.2
+   released 2026-10-21, five days before v0.5.0. The trade was called
+   correctly and this entry no longer weighs against it.
+2. **ADR-037 option A is unblocked.** The pacing measurement was parked
+   *"until a release carries the fix"*. It does now, on a stock build rather
+   than a custom one nobody deploys.
+3. **The 2.6 scale-down SIGSEGV below is NOT this bug** — that image is 2.6.10,
+   which predates ITS#10597's introduction in 2.6.14.
+
+**What is left of this entry:** re-run the load arm on 2.7.2. If it is clean,
+the identification holds and this closes. If it is not, there is a second
+crash and the material below still applies.
+
+---
+
+### The original entry, as written 2026-10-26
+
 
 Observed 2026-10-25 during load-tooling work: 2.7.1 segfaults quite reliably
 under test load, and the measurement arms moved back to the `-ol26` 2.6.10 pair
@@ -4192,6 +4234,25 @@ The patch's own comment records that this path was already racy before it
 known-delicate site that we narrowed rather than one we introduced from
 nothing — but it is ours, locally maintained, and in the crash's path. Treat
 "slapd has a bug" as the second hypothesis, not the first.
+
+**Narrowed 2026-10-29, and the obvious suspect is excluded.** Two candidates
+are now ruled out, which is most of the value this entry had left to give:
+
+- **Not the unlocked phase/aligned write.** The `2.7.1-0+slaptain3` changelog
+  entry (2026-10-20) fixes exactly that race — it takes `slapd_rq.rq_mutex`
+  around the live update of an existing purge task, and it was written from a
+  SIGSEGV observed 13 s after a three-value to two-value `olcAccessLogPurge`
+  change, which is this crash's shape. The image that crashed on 2026-10-25
+  was built from a tree carrying that fix. So the remaining defect is **not**
+  the one already found and fixed on this path.
+- **Not ITS#10597.** Upstream's accesslog double-free was introduced in 2.6.14
+  and the crashed image is 2.6.10, which predates it. The one upstream
+  candidate that would have explained a crash in this overlay does not apply.
+
+What is left is a race in the same path that survives the `rq_mutex` fix, or
+something else entirely. Both exclusions are from reading dates and versions,
+not from a reproduction — the recipe below is still unattempted and still the
+next step.
 
 ### Shape of a reproduction (not attempted)
 

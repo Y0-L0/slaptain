@@ -71,12 +71,34 @@ measured against on 2.6.10. That makes it comparable to those figures in a
 way no 2.7 build is, while carrying 17 months of fixes — five of them on the
 delta-syncrepl path (ITS#10360, #10385, #10413, #10440, #10448).
 
-**What is verified and what is not.** Every patch application is checked:
-Debian's 15-patch series applies to 2.6.16 in sequence, and both local
-patches apply clean on top of it. The package version is overridden to
-`2.6.16-0+slaptain1` so `slapd -VV` cannot claim the 2.7 version the vendored
-changelog names. Nothing has been measured with it, and no e2e has run
-against it.
+**Status: DOES NOT BUILD YET.** `make build-ol2616` is wired and fails, for a
+reason this repository had already written down.
+
+The vendored `debian/` tree is **our fork, rebased onto 2.7** — not Debian's
+packaging as shipped. Several of its patches no longer apply to a 2.6 tree,
+and `Containerfile.ol26src`'s own header names the first one:
+*"getaddrinfo-is-threadsafe is the first to fail"*. It is exactly the one that
+fails. Verified both ways at the setting that matters: the vendored
+`getaddrinfo-is-threadsafe` applies to 2.7.2 at zero fuzz and fails on 2.6.16
+at zero fuzz.
+
+Zero fuzz is the detail that hid this. `dpkg-source` applies with `-F 0` and
+refuses fuzz outright; plain `patch` defaults to fuzz 2. A feasibility check
+run with `patch` therefore reports "applies" for a series the build will
+reject — the checker was more permissive than the gate, so its reassuring
+answer and a correct one were indistinguishable.
+
+**The fix, not yet written:** start from Debian's own 2.6 packaging rather
+than our 2.7-rebased fork — sid's `2.6.14+dfsg-2`, the newest Debian has —
+and put upstream 2.6.16 under it, the way `Containerfile.ol26src` already
+takes Debian's source package for 2.6.10. The parameterisation that exists
+(`OPENLDAP_PKG_VERSION`, `SLAPTAIN_PATCH_LIST`) is sound and was exercised:
+the changelog override produced `2.7.2-0+slaptain1 -> 2.6.16-0+slaptain1` and
+both local patches applied. Only the packaging base is wrong.
+
+**What is verified:** the package-version override, the patch list, and both
+local patches applying to 2.6.16. Nothing has been measured with it, no e2e
+has run against it, and no image has been produced.
 
 **The default pair is PURE since 0.5.0.** It used to carry the local patches;
 it no longer does, because nobody should run a patched slapd without having

@@ -15,7 +15,9 @@ permissions:
 jobs:
   analyze:
     name: Analyze
-    runs-on: namespace-profile-yo-lo
+    # Extraction, TRAP import and the queries all scale with cores; 4 cores
+    # spent about 120 of 190 s there.
+    runs-on: namespace-profile-8x16
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -42,5 +44,10 @@ jobs:
       - name: Autobuild
         uses: github/codeql-action/autobuild@v4
 
+      # The database upload only feeds variant analysis, and waiting for
+      # processing only reports what the Security tab shows anyway.
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@v4
+        with:
+          upload-database: false
+          wait-for-processing: false

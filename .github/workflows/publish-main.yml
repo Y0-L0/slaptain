@@ -17,6 +17,10 @@ jobs:
     name: Build and push images
     runs-on: namespace-profile-yo-lo
     timeout-minutes: 120
+    env:
+      # The runner is itself a container that forbids mounting a fresh /proc,
+      # so RUN steps get a chroot instead of their own namespaces.
+      BUILDAH_ISOLATION: chroot
     steps:
       - name: Checkout
         uses: actions/checkout@v7

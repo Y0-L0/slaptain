@@ -91,15 +91,13 @@ Last-Update: 2026-10-20
  	}
 --- a/servers/slapd/overlays/accesslog.c
 +++ b/servers/slapd/overlays/accesslog.c
-@@ -73,6 +73,8 @@
- 	slap_mask_t li_ops;
+@@ -74,4 +74,6 @@
  	int li_age;
  	int li_cycle;
 +	int li_phase;
 +	int li_phased;
  	struct re_s *li_task;
  	Filter *li_oldf;
- 	log_attr *li_oldattrs;
 @@ -128,7 +130,7 @@
  			"DESC 'Operation types to log' "
  			"EQUALITY caseIgnoreMatch "

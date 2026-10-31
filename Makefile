@@ -279,7 +279,7 @@ define import-if-needed
 	fi
 endef
 
-.PHONY: all build-slaptain push-slaptain build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-openldap-deb-ol26src build-init-ol26src build-slapd-ol26src build-ol26src build-openldap-deb-ol2616 build-init-ol2616 build-slapd-ol2616 build-ol2616 import-init-ol2616 import-slapd-ol2616 import-ol2616 import-init-ol26src import-slapd-ol26src import-ol26src build-openldap-deb-debug build-slapd-debug build-openldap-deb-asan build-slapd-asan import-slapd-debug import-slapd-asan push-slapd-debug push-slapd-asan build-toolkit build-operator build-exporter build-slctl install-slctl push gencert helm-deploy cluster-helm-install cluster-helm-uninstall mesh-helm-install mesh-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-exporter import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag helm-lint verify-generated tidy test-init
+.PHONY: all build-slaptain push-slaptain build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-openldap-deb-ol26src build-init-ol26src build-slapd-ol26src build-ol26src build-openldap-deb-ol2616 build-init-ol2616 build-slapd-ol2616 build-ol2616 import-init-ol2616 import-slapd-ol2616 import-ol2616 push-init-ol2616 push-slapd-ol2616 push-ol2616 import-init-ol26src import-slapd-ol26src import-ol26src build-openldap-deb-debug build-slapd-debug build-openldap-deb-asan build-slapd-asan import-slapd-debug import-slapd-asan push-slapd-debug push-slapd-asan build-toolkit build-operator build-exporter build-slctl install-slctl push gencert helm-deploy cluster-helm-install cluster-helm-uninstall mesh-helm-install mesh-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-exporter import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag helm-lint verify-generated tidy test-init
 
 ## all: the seven pushable images plus slctl. build-ol26 is included so a
 ## release build carries the legacy OpenLDAP 2.6 pair too (ADR-021).
@@ -506,6 +506,16 @@ import-init-ol2616: build-init-ol2616
 import-slapd-ol2616: build-slapd-ol2616
 	$(call import-if-needed,$(SLAPD_IMAGE_OL2616))
 import-ol2616: import-init-ol2616 import-slapd-ol2616
+
+## push-ol2616: deliver the experimental pair to $(REGISTRY) so a cluster can
+## pull it. Excluded from the aggregate `push` on purpose — an experimental
+## forward-port must never ride along with a release — but pushable on its own,
+## exactly as the debug and asan variants are. Pin BOTH tags when deploying it.
+push-init-ol2616: build-init-ol2616
+	$(CONTAINER_ENGINE) push $(INIT_IMAGE_OL2616)
+push-slapd-ol2616: build-slapd-ol2616
+	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE_OL2616)
+push-ol2616: push-init-ol2616 push-slapd-ol2616
 build-toolkit: $(STAMPS)/toolkit
 build-operator: $(STAMPS)/operator
 build-exporter: $(STAMPS)/exporter

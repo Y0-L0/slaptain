@@ -4381,3 +4381,79 @@ have an opinion here at all, and if so what it costs:
 **Deliberately not fixed inline.** A default that governs durability and write
 amplification across every deployment is an ADR, not a patch applied while
 looking at something else.
+
+## A hand-applied cluster lands in `StartupConfigConverged=False/RestartRequired` and stays there
+
+Apply a `SlapdCluster`, then a `SlapdDatabase`, and the cluster comes up with a
+False condition that only a human can clear. Observed 2026-10-31 on a freshly
+created cluster: pod created at `10:18:44`, `SlapdDatabase` at `10:18:56` —
+twelve seconds apart, and enough.
+
+```
+olcSpSessionlogSource: live <absent>, declared "cn=accesslog-example-db"
+```
+
+**The mechanism, and it is nobody's bug in isolation.** The `SlapdCluster`
+controller builds `<cluster>-startup-config` from the `SlapdDatabase` CRs that
+exist *at that moment*. Apply the cluster alone and that table is EMPTY, the
+StatefulSet is created, and the init container converges nothing. The database
+arrives seconds later, the operator adds `olcSpSessionlogSource` to the
+ConfigMap — and nothing re-runs the init container. The attribute is
+startup-only (ADR-034), so it cannot be written to a running slapd, and the
+operator deliberately will not restart a pod to apply it, because a provider
+restart is a topology event at every peer (ADR-016).
+
+Every rule involved is behaving as designed. The result is still that
+**applying custom resources does not converge the cluster**, which is the
+contract users expect of a declarative API.
+
+### Why this was not caught
+
+**It is order-dependent, and the validated path takes the lucky order.**
+`docs/RELEASE-PLAN.md` records of the 0.5.0 mesh cycle: *"First mesh exposure
+of the session-log default, and it converged: the pods did take
+olcSpSessionlogSource on a fresh three-site cluster."* The mesh chart applies
+`SlapdMesh`, `SlapdCluster`, `SlapdDatabase` and `SlapdSchema` **together**, so
+the database CR already exists when the cluster controller builds the table and
+the pods start converged. Apply the two separately — which is what a user
+reading the README's `kubectl apply` examples does, and what every hand-built
+lab cluster does — and they do not.
+
+So the e2e and the mesh cycles pass while the documented manual path fails, and
+the two differ only in whether one `kubectl apply` or two produced the objects.
+
+### Why it is worse since 0.5.0
+
+Before, `syncprovSessionlogSource` was unset and resolved to `InMemory`, which
+is slapd's own default — there was nothing to converge and the table was empty
+for everyone. 0.5.0 made `Accesslog` the default, so **every** cluster now has
+a startup-only attribute to converge, and every cluster built the two-step way
+now lands in `RestartRequired`. A release note covered the upgrade path for
+existing clusters; the first-run experience of a NEW one was not considered.
+
+### Shape of a fix — a decision, not a patch
+
+The obvious repair is for the operator to roll the StatefulSet when the
+startup-config table changes. That collides head-on with two accepted rules:
+ADR-013 forbids rolling a fleet because another resource's lifecycle moved
+(adding a database is exactly its example), and ADR-016 prices a provider
+restart as a topology event at every peer. **ADR-035 says a collision is itself
+a decision, taken on the merits and recorded in both** — so this wants that
+treatment rather than a quiet change to either side.
+
+Options worth costing when someone takes it, none chosen here:
+
+- roll on startup-config change, accepting the ADR-013/ADR-016 cost, possibly
+  only for the FIRST transition out of an empty table (a cluster with no
+  databases has no peers to disturb, which weakens ADR-016's objection
+  considerably for exactly the case that bites);
+- make the init container's convergence reachable without a full pod restart;
+- converge nothing and make the condition's remediation a documented install
+  step — honest, and an admission that the API is not declarative here;
+- have the cluster controller withhold the StatefulSet until the first
+  database's startup-only table is known, which trades a manual restart for a
+  slower first start and needs a rule for clusters that legitimately have no
+  database.
+
+Meanwhile the workaround is to apply all CRs in one go, or to
+`kubectl rollout restart` once after the first database lands.

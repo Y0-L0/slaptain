@@ -4301,3 +4301,83 @@ between this entry and a root cause.
 - It is **2.6**, which means it is not the 2.7.1 crash recorded above and the
   two entries should not be merged until someone checks whether they are one
   defect.
+
+## The accesslog syncprov checkpoint does not retrofit, and the data DB has no default at all
+
+Two findings from one observation, 2026-10-31. They point in opposite
+directions and only the second is a design question.
+
+**Observed.** Two clusters on one lab Kubernetes cluster, same operator build,
+same `SlapdDatabase` shape — one created 2026-10-13 under a pre-0.5.0
+operator, one created 2026-10-31 under 0.5.0. Read from `cn=config` on both:
+
+| | data DB (`dc=example,dc=org`) | accesslog DB (`cn=accesslog-<db>`) |
+|---|---|---|
+| older cluster | `olcSpCheckpoint: 500 15` (set in the CR) | **absent** |
+| newer cluster | absent | `olcSpCheckpoint: 1 1` |
+
+Exactly inverted, and neither CR sets `accesslogSyncprovCheckpoint`.
+
+### 1. Defect candidate: the 0.5.0 default did not reach an existing cluster
+
+`accesslogSyncprovCheckpoint` defaults to `1 1`
+(`accesslogSyncprovCheckpointDefault`, `slapddatabase_controller.go`), and it
+is the **ITS#9398 mitigation** — the change this release leads with, and the
+one two consecutive clean mesh cycles are attributed to. The newer cluster has
+it. The older one, reconciled by the same operator, does not.
+
+If the default only lands when the accesslog database is **created**, then
+every cluster built before 0.5.0 is in that position: carrying the release's
+central fix in its spec defaults and not on the wire, with nothing reporting
+the discrepancy. That is the whole installed base, not an edge case.
+
+**Not diagnosed.** One cluster is an observation, not a root cause, and the
+correlation with age rather than configuration is suggestive and not proof.
+The convergence path has to be read before this is called a defect — and the
+alternative explanation worth excluding first is that something about the
+older cluster's accesslog database (created by an operator that predates the
+field) makes the converger decline rather than never attempt.
+
+#### Shape of an investigation (not attempted)
+
+- Read whether the checkpoint is converged on every reconcile or only on the
+  accesslog database's ADD. The ADR-019 R8 withdrawal is the precedent for why
+  "repair on the condition it repairs" matters here (ADR-026 R3).
+- Then force it: set `accesslogSyncprovCheckpoint: "1 1"` explicitly on the
+  older cluster and watch whether the operator writes it. If an explicit value
+  lands where the default did not, the gap is in the defaulting, not the write.
+- Red first: a test that an accesslog database which predates the field
+  acquires the checkpoint on a later reconcile.
+
+### 2. Design question, and it wants an ADR rather than a patch
+
+`syncprovCheckpoint` — the **data** database's — has **no default**, and
+slapd's own default is no checkpointing at all. Verified two ways rather than
+from memory: `slapo-syncprov(5)` states *"Checkpointing is disabled by
+default"*, and `syncprov.c` gates the checkpoint path on
+`if ( si->si_chkops || si->si_chktime )` with both zeroed when the directive is
+absent. The widely-quoted `500 15` is the man page's **example**, not a
+default — which is probably why it reads as one.
+
+So a `SlapdDatabase` that says nothing gets a data database whose
+`contextCSN` reaches disk only on a clean shutdown. After an unclean stop the
+pod returns claiming an older position and replays more from its peers — the
+same mechanic already recorded for log databases in CLAUDE.md's `slctl`
+section.
+
+The question is not "should we copy `500 15`". It is whether slaptain should
+have an opinion here at all, and if so what it costs:
+
+- we already decided to have one for the **accesslog** database (`1 1`), on
+  ITS#9398 grounds, and that asymmetry is currently unexplained — either the
+  data database wants one for its own reasons or the accesslog one should say
+  why it is special;
+- a checkpoint is a write amplification, and ADR-037's whole subject is that
+  writes to these databases are the scarce resource;
+- ADR-024 would have to place it — converged per pod, or create-only — and
+  changing a default later is the thing ADR-040 decision 8 priced as a forced
+  migration for everyone who said nothing.
+
+**Deliberately not fixed inline.** A default that governs durability and write
+amplification across every deployment is an ADR, not a patch applied while
+looking at something else.

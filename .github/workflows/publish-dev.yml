@@ -74,3 +74,12 @@ jobs:
           GHA_CACHE: '1'
           CACHE_SUFFIX: -${{ matrix.runner }}
         run: docker buildx bake --push "$GROUP"
+
+  e2e:
+    name: e2e
+    # Needs every matrix job, so the tests start only once all images are pushed.
+    needs: images
+    uses: ./.github/workflows/e2e.yml
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}
+      branch: ${{ github.head_ref }}

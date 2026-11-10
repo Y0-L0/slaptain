@@ -32,10 +32,21 @@ jobs:
       # exporter (exporter/) and the Ginkgo e2e suite (tests/e2e/) are separate
       # modules. They declare the same Go version; the operator's is used here.
       - name: Setup Go
+        id: go
         uses: actions/setup-go@v7
         with:
           go-version-file: operator/go.mod
           cache: false
+
+      - name: Restore the Go caches
+        id: gocache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: test-go-${{ matrix.runner }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('operator/go.sum', 'exporter/go.sum', 'tests/e2e/go.sum') }}
+          restore-keys: test-go-${{ matrix.runner }}-${{ steps.go.outputs.go-version }}-
 
       # `make tidy` is the one list of modules; dependabot-tidy.yml runs the
       # same target to finish a Dependabot bump, so the two cannot disagree.
@@ -54,8 +65,20 @@ jobs:
 
       # envtest: the operator Makefile downloads the control-plane binaries for
       # the Kubernetes minor that operator/go.mod pins.
+      # Experiment: gocachetest=1 logs why each test result is not reused.
       - name: Run unit tests
-        run: make -C operator test
+        env:
+          GODEBUG: gocachetest=1
+        run: |
+          set -o pipefail
+          make -C operator test 2>&1 | tee "$RUNNER_TEMP/test.log"
+
+      - name: Summarise the test cache
+        if: ${{ !cancelled() }}
+        run: |
+          echo "packages reported cached: $(grep -c '(cached)' "$RUNNER_TEMP/test.log" || true)"
+          echo "packages reported ok:     $(grep -cE '^ok ' "$RUNNER_TEMP/test.log" || true)"
+          grep -E 'testcache' "$RUNNER_TEMP/test.log" | sed -E 's/[0-9a-f]{64}/<hash>/g' | sort | uniq -c | sort -rn | head -40 || true
 
       # The exporter is its own module and image (ADR-033 decision 4); its
       # tests need no cluster and no envtest.
@@ -73,3 +96,13 @@ jobs:
       # that no longer compiles against the API types it exercises.
       - name: Compile the e2e suite
         run: cd tests/e2e && go vet ./...
+
+      # Experiment: every branch saves, so a rerun of the same commit shows the warm case.
+      - name: Save the Go caches
+        if: ${{ !cancelled() && steps.gocache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ steps.gocache.outputs.cache-primary-key }}

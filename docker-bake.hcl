@@ -31,16 +31,21 @@ variable "GHA_CACHE" {
   default = "0"
 }
 
+# Keeps each runner kind's layer cache apart when CI runs one job per runner.
+variable "CACHE_SUFFIX" {
+  default = ""
+}
+
 function "cache_from" {
   params = [scope]
-  result = GHA_CACHE == "1" ? ["type=gha,scope=${scope}"] : []
+  result = GHA_CACHE == "1" ? ["type=gha,scope=${scope}${CACHE_SUFFIX}"] : []
 }
 
 # mode=max keeps the package build stages too, which is where the time goes. A
 # failed cache upload must not fail a build whose images were pushed.
 function "cache_to" {
   params = [scope]
-  result = GHA_CACHE == "1" ? ["type=gha,scope=${scope},mode=max,ignore-error=true"] : []
+  result = GHA_CACHE == "1" ? ["type=gha,scope=${scope}${CACHE_SUFFIX},mode=max,ignore-error=true"] : []
 }
 
 function "image" {

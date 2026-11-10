@@ -21,7 +21,11 @@ concurrency:
 jobs:
   govulncheck:
     name: Go vulnerability check
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(vars.CI_RUNNERS || '["ubuntu-latest"]') }}
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -50,7 +54,11 @@ jobs:
 
   trivy:
     name: Trivy filesystem scan
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(vars.CI_RUNNERS || '["ubuntu-latest"]') }}
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7

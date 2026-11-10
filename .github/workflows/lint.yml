@@ -19,7 +19,11 @@ concurrency:
 jobs:
   lint:
     name: golangci-lint
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(vars.CI_RUNNERS || '["ubuntu-latest"]') }}
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Clone the code
         uses: actions/checkout@v7
@@ -60,7 +64,11 @@ jobs:
 
   chart:
     name: Helm charts
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(vars.CI_RUNNERS || '["ubuntu-latest"]') }}
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Clone the code
         uses: actions/checkout@v7

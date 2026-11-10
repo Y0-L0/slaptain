@@ -14,22 +14,24 @@ permissions:
 
 jobs:
   images:
-    name: Build and push dev images (${{ matrix.group }})
+    name: Build and push dev images (${{ matrix.group }}, ${{ matrix.runner }})
     # A fork's pull request gets a read-only token and could not push. Adding some
     # other label to a labelled pull request is no reason to rebuild.
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
       contains(github.event.pull_request.labels.*.name, 'dev images') &&
       (github.event.action != 'labeled' || github.event.label.name == 'dev images')
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     strategy:
+      fail-fast: false
       matrix:
+        runner: ${{ fromJSON(vars.CI_RUNNERS || '["ubuntu-latest"]') }}
         group: [publish-pure, publish-slaptain, publish-ol26src, publish-other]
     # Job-level, so a run whose job is skipped cannot cancel a build in progress.
     # The matrix group is in the key, or the four jobs would cancel each other.
     concurrency:
-      group: publish-dev-${{ github.event.pull_request.number }}-${{ matrix.group }}
+      group: publish-dev-${{ github.event.pull_request.number }}-${{ matrix.group }}-${{ matrix.runner }}
       cancel-in-progress: true
     steps:
       - name: Checkout
@@ -70,4 +72,5 @@ jobs:
         env:
           GROUP: ${{ matrix.group }}
           GHA_CACHE: '1'
+          CACHE_SUFFIX: -${{ matrix.runner }}
         run: docker buildx bake --push "$GROUP"

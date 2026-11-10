@@ -14,10 +14,12 @@ permissions:
 
 jobs:
   images:
-    name: Build and push images (${{ matrix.group }})
-    runs-on: ubuntu-latest
+    name: Build and push images (${{ matrix.group }}, ${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
+        runner: ${{ fromJSON(vars.CI_RUNNERS || '["ubuntu-latest"]') }}
         group: [publish-pure, publish-slaptain, publish-ol26src, publish-other]
     timeout-minutes: 120
     steps:
@@ -54,4 +56,5 @@ jobs:
         env:
           GROUP: ${{ matrix.group }}
           GHA_CACHE: '1'
+          CACHE_SUFFIX: -${{ matrix.runner }}
         run: docker buildx bake --push "$GROUP"

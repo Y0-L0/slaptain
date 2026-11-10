@@ -26,7 +26,15 @@ jobs:
       matrix:
         runner: ${{ fromJSON(vars.CI_RUNNERS || '["ubuntu-latest"]') }}
     runs-on: ${{ matrix.runner }}
+    # Experiment: is Autobuild slow on GitHub-hosted runners because of disk I/O?
+    # The database (with its TRAP files) and Go's caches go to tmpfs.
+    env:
+      GOCACHE: /dev/shm/go-build
+      GOMODCACHE: /dev/shm/go-mod
     steps:
+      - name: Show the disks
+        run: df -h / /dev/shm "$RUNNER_TEMP"; nproc; free -g
+
       - name: Checkout
         uses: actions/checkout@v7
 
@@ -43,6 +51,7 @@ jobs:
         uses: github/codeql-action/init@v4
         with:
           languages: go
+          db-location: /dev/shm/codeql-db
 
       - name: Autobuild
         uses: github/codeql-action/autobuild@v4

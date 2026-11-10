@@ -30,10 +30,20 @@ jobs:
 
       # The modules that ship code declare the same Go version; the operator's is used here.
       - name: Setup Go
+        id: go
         uses: actions/setup-go@v7
         with:
           go-version-file: operator/go.mod
           cache: false
+
+      # Experiment: Go's build cache only. The module cache made the entry 425 MiB.
+      - name: Restore the Go build cache
+        id: gocache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/go-build
+          key: lint-gobuild-${{ matrix.runner }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('operator/go.sum', 'exporter/go.sum') }}
+          restore-keys: lint-gobuild-${{ matrix.runner }}-${{ steps.go.outputs.go-version }}-
 
       # `version` is the same pin as GOLANGCI_LINT_VERSION in operator/Makefile;
       # move them together, so `make -C operator lint` and CI judge by the same
@@ -61,6 +71,13 @@ jobs:
         with:
           version: v2.12.2
           working-directory: exporter
+
+      - name: Save the Go build cache
+        if: ${{ !cancelled() && steps.gocache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/go-build
+          key: ${{ steps.gocache.outputs.cache-primary-key }}
 
   chart:
     name: Helm charts

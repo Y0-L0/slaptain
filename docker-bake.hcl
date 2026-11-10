@@ -36,16 +36,31 @@ variable "CACHE_SUFFIX" {
   default = ""
 }
 
+# CACHE_REGISTRY, when set, moves the layer cache from the Actions cache to an
+# OCI repository, one tag per scope and branch. A branch reads main's tag and its
+# own, and writes only its own, so a pull request never overwrites main's cache.
+variable "CACHE_REGISTRY" {
+  default = ""
+}
+variable "CACHE_BRANCH" {
+  default = "main"
+}
+
 function "cache_from" {
   params = [scope]
-  result = GHA_CACHE == "1" ? ["type=gha,scope=${scope}${CACHE_SUFFIX}"] : []
+  result = GHA_CACHE != "1" ? [] : CACHE_REGISTRY == "" ? ["type=gha,scope=${scope}${CACHE_SUFFIX}"] : [
+    "type=registry,ref=${CACHE_REGISTRY}:${scope}${CACHE_SUFFIX}-main",
+    "type=registry,ref=${CACHE_REGISTRY}:${scope}${CACHE_SUFFIX}-${CACHE_BRANCH}",
+  ]
 }
 
 # mode=max keeps the package build stages too, which is where the time goes. A
 # failed cache upload must not fail a build whose images were pushed.
 function "cache_to" {
   params = [scope]
-  result = GHA_CACHE == "1" ? ["type=gha,scope=${scope}${CACHE_SUFFIX},mode=max,ignore-error=true"] : []
+  result = GHA_CACHE != "1" ? [] : CACHE_REGISTRY == "" ? ["type=gha,scope=${scope}${CACHE_SUFFIX},mode=max,ignore-error=true"] : [
+    "type=registry,ref=${CACHE_REGISTRY}:${scope}${CACHE_SUFFIX}-${CACHE_BRANCH},mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true",
+  ]
 }
 
 function "image" {

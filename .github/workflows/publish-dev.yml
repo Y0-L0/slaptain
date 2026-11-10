@@ -72,5 +72,11 @@ jobs:
         env:
           GROUP: ${{ matrix.group }}
           GHA_CACHE: '1'
+          CACHE_REGISTRY: ghcr.io/${{ github.repository }}/buildcache
+          CACHE_BRANCH_REF: ${{ github.head_ref }}
           CACHE_SUFFIX: -${{ matrix.runner }}
-        run: docker buildx bake --push "$GROUP"
+        run: |
+          export CACHE_REGISTRY="${CACHE_REGISTRY,,}"
+          CACHE_BRANCH=$(scripts/branch-slug.sh "$CACHE_BRANCH_REF")
+          export CACHE_BRANCH
+          docker buildx bake --push "$GROUP"

@@ -40,20 +40,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Experiment: kind on GitHub-hosted and Namespace runners, unprivileged and
-        # privileged, and a short-lived Namespace cluster ("nscluster") driven from a 2x4 runner.
+        # Experiment: kind on a GitHub-hosted runner against a short-lived Namespace
+        # cluster driven from a 2x4 runner, reached through NodePort forwards
+        # ("nscluster") or by running the suite in the cluster ("nscluster-job").
         runner:
           - ubuntu-latest
-          - namespace-profile-4x8
-          - namespace-profile-4x8;container.privileged=true
           - nscluster
+          - nscluster-job
         tier: >-
           ${{ fromJSON(
             (github.event_name == 'workflow_dispatch' && format('["{0}"]', inputs.tier)) ||
             (github.event.label.name == 'e2e slow' && '["slow"]') ||
             (contains(github.event.pull_request.labels.*.name, 'e2e slow') && '["smoke","slow"]') ||
             '["smoke"]') }}
-    runs-on: ${{ matrix.runner == 'nscluster' && 'namespace-profile-2x4' || matrix.runner }}
+    runs-on: ${{ startsWith(matrix.runner, 'nscluster') && 'namespace-profile-2x4' || matrix.runner }}
     timeout-minutes: ${{ matrix.tier == 'slow' && 180 || 60 }}
     permissions:
       contents: read
@@ -108,13 +108,13 @@ jobs:
 
       # Everything up to here, and the two steps below, overlaps the image builds.
       - name: Create the kind cluster
-        if: matrix.runner != 'nscluster'
+        if: ${{ !startsWith(matrix.runner, 'nscluster') }}
         uses: helm/kind-action@v1
         with:
           cluster_name: slaptain
 
       - name: Create a Namespace cluster
-        if: matrix.runner == 'nscluster'
+        if: startsWith(matrix.runner, 'nscluster')
         uses: namespacelabs/nscloud-cluster-action@v0
         with:
           kubernetes-version: '1.33'
@@ -122,7 +122,7 @@ jobs:
           duration: 90m
 
       - name: Address the Namespace cluster
-        if: matrix.runner == 'nscluster'
+        if: startsWith(matrix.runner, 'nscluster')
         run: |
           echo "KUBE_CONTEXT=$(kubectl config current-context)" | tee -a "$GITHUB_ENV"
           kubectl get nodes -o wide
@@ -183,7 +183,17 @@ jobs:
           done
 
       - name: Run the specs
+        env:
+          E2E_IN_CLUSTER: ${{ matrix.runner == 'nscluster-job' && '1' || '' }}
         run: tests/e2e.sh test "$KUBE_CONTEXT"
+
+      # Experiment: how long the cluster spent pulling each image.
+      - name: Image pull times
+        if: ${{ !cancelled() }}
+        run: |
+          kubectl --context "$KUBE_CONTEXT" get events -A --field-selector reason=Pulled \
+            -o custom-columns=NS:.metadata.namespace,POD:.involvedObject.name,MESSAGE:.message --no-headers |
+            grep -i 'successfully pulled' | sed -E 's/Image size: [0-9]+ bytes\.//' || true
 
       - name: Collect cluster state
         if: failure()

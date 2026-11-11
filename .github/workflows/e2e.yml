@@ -167,13 +167,19 @@ jobs:
         run: tests/e2e.sh setup "$KUBE_CONTEXT"
 
       # Experiment: can the runner reach the cluster's NodePorts at all?
-      - name: Probe the NodePorts
-        if: ${{ !cancelled() }}
+      # A Namespace cluster's NodePorts are not reachable from the runner
+      # (connection refused on the node's InternalIP), so mirror every NodePort
+      # Service on the same port on localhost, including Services created later
+      # and pods that restart under a forward.
+      - name: Forward the NodePorts to localhost
+        if: matrix.runner == 'nscluster'
         run: |
-          kubectl --context "$KUBE_CONTEXT" get svc -A | grep NodePort || true
-          ip=$(kubectl --context "$KUBE_CONTEXT" get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+          ip -4 -brief addr
+          nohup scripts/forward-nodeports.sh "$KUBE_CONTEXT" > "$RUNNER_TEMP/port-forward.log" 2>&1 &
+          echo "E2E_NODE_ACCESS_IP=127.0.0.1" >> "$GITHUB_ENV"
+          sleep 8
           for port in $(kubectl --context "$KUBE_CONTEXT" get svc -A -o jsonpath='{range .items[*]}{range .spec.ports[*]}{.nodePort}{" "}{end}{end}'); do
-            if timeout 5 bash -c "</dev/tcp/$ip/$port" 2>/dev/null; then echo "reachable $ip:$port"; else echo "UNREACHABLE $ip:$port"; fi
+            if timeout 5 bash -c "</dev/tcp/127.0.0.1/$port" 2>/dev/null; then echo "reachable :$port"; else echo "UNREACHABLE :$port"; fi
           done
 
       - name: Run the specs
@@ -184,6 +190,7 @@ jobs:
         run: |
           mkdir -p e2e-debug
           kubectl --context "$KUBE_CONTEXT" get pods -A -o wide > e2e-debug/pods.txt || true
+          cp "$RUNNER_TEMP/port-forward.log" e2e-debug/ 2>/dev/null || true
           kubectl --context "$KUBE_CONTEXT" get events -A --sort-by=.lastTimestamp > e2e-debug/events.txt || true
           kubectl --context "$KUBE_CONTEXT" -n slaptain-system logs deploy/slaptain --all-containers > e2e-debug/operator.log || true
           make build-slctl

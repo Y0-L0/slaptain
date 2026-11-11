@@ -367,11 +367,28 @@ func refreshReadOnlyPodConn(conn *ldap.Conn, cancel context.CancelFunc, ns, podN
 	return dialReadOnlyPodLDAP(ns, podName, localPort)
 }
 
+// inCluster (E2E_IN_CLUSTER=1) dials pods and Services by their cluster DNS names
+// instead of NodePorts, as an application inside the cluster would.
+var inCluster = os.Getenv("E2E_IN_CLUSTER") == "1"
+
+// serviceAddr is how the suite reaches a Service it created: its DNS name in
+// cluster, its NodePort on nodeIP otherwise.
+func serviceAddr(svc *corev1.Service, nodeIP string) string {
+	if inCluster {
+		return fmt.Sprintf("%s.%s.svc:%d", svc.Name, svc.Namespace, svc.Spec.Ports[0].Port)
+	}
+	return fmt.Sprintf("%s:%d", nodeIP, svc.Spec.Ports[0].NodePort)
+}
+
 // podNodePortAddr returns the NodePort address for a specific pod if per-pod
 // NodePort env vars are configured (E2E_NODE_IP + E2E_POD_NODEPORT_BASE).
 // Returns "" if not configured. The ordinal is extracted from the pod name
 // (e.g. "slapd-2" → 2).
 func podNodePortAddr(podName, baseEnv string) string {
+	if inCluster {
+		sts := podName[:strings.LastIndex(podName, "-")]
+		return fmt.Sprintf("%s.%s-headless.%s.svc:1024", podName, sts, namespace)
+	}
 	nodeIP := os.Getenv("E2E_NODE_IP")
 	baseStr := os.Getenv(baseEnv)
 	if nodeIP == "" || baseStr == "" {

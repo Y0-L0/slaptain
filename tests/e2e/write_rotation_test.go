@@ -598,7 +598,7 @@ var _ = Describe("ADR-037: the write endpoint rotates",
 				DeferCleanup(func(ctx SpecContext) {
 					_ = k8sClient.CoreV1().Services(namespace).Delete(ctx, probeSvcName, metav1.DeleteOptions{})
 				})
-				addr := fmt.Sprintf("%s:%d", nodeIP, probe.Spec.Ports[0].NodePort)
+				addr := serviceAddr(probe, nodeIP)
 				GinkgoWriter.Printf("probe endpoint %s mirrors %s\n", addr, first)
 
 				// whereDidItLand writes one entry over conn and reports the

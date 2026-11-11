@@ -1225,14 +1225,24 @@ run_tests() {
     # reached. errexit is off only for these three steps; each runs in a
     # subshell that turns it back on, so a gate's own `die` (and any command it
     # does not guard) ends that gate alone. The run fails if any of them did.
+    # E2E_IN_CLUSTER=1 runs the suite in a pod and dials slapd by Service and pod
+    # DNS names, the way an application in the cluster does, so no NodePort is needed.
+    if [[ "${E2E_IN_CLUSTER:-}" == "1" ]]; then
+        test_env=("${test_env[@]/#KUBECONFIG=*/E2E_IN_CLUSTER=1}")
+        test_env=("${test_env[@]/#LDAP_ADDR=*/LDAP_ADDR=slapd.$NAMESPACE_TESTING.svc:389}")
+    fi
     local suite_rc gate_rc rc=0
     set +e
     (
         set -e
         cd "$PROJECT_ROOT/tests/e2e"
-        env "${test_env[@]}" go test -v ./... \
-            -timeout 65m \
-            "${ginkgo_flags[@]}"
+        if [[ "${E2E_IN_CLUSTER:-}" == "1" ]]; then
+            run_suite_in_cluster "$ctx0" "${test_env[@]}" -- "${ginkgo_flags[@]}"
+        else
+            env "${test_env[@]}" go test -v ./... \
+                -timeout 65m \
+                "${ginkgo_flags[@]}"
+        fi
     )
     suite_rc=$?
     ( set -e; check_data_present_every_site )
@@ -1245,6 +1255,26 @@ run_tests() {
         warn "the e2e suite failed (exit $suite_rc); the post-suite gates ran anyway — see above"
         return "$suite_rc"
     fi
+    return "$rc"
+}
+
+# run_suite_in_cluster <ctx> <env...> -- <ginkgo flags...> runs the compiled
+# suite in a pod of <ctx>, as cluster-admin, and removes the pod afterwards.
+run_suite_in_cluster() {
+    local ctx=$1 env=() bin pod=e2e-runner; shift
+    while [[ $1 != -- ]]; do env+=("$1"); shift; done; shift
+    bin=$(mktemp -d /tmp/e2e-suite.XXXXXX)/e2e.test
+    CGO_ENABLED=0 go test -c -o "$bin" .
+    kctl "$ctx" -n "$NAMESPACE_TESTING" create serviceaccount "$pod" --dry-run=client -o yaml | kctl "$ctx" apply -f -
+    kctl "$ctx" create clusterrolebinding "$pod" --clusterrole=cluster-admin \
+        --serviceaccount="$NAMESPACE_TESTING:$pod" --dry-run=client -o yaml | kctl "$ctx" apply -f -
+    kctl "$ctx" -n "$NAMESPACE_TESTING" run "$pod" --image=busybox:stable --restart=Never \
+        --overrides='{"spec":{"serviceAccountName":"e2e-runner"}}' --command -- sleep infinity
+    kctl "$ctx" -n "$NAMESPACE_TESTING" wait --for=condition=Ready "pod/$pod" --timeout=120s
+    kctl "$ctx" -n "$NAMESPACE_TESTING" cp "$bin" "$pod:/tmp/e2e.test"
+    local rc=0
+    kctl "$ctx" -n "$NAMESPACE_TESTING" exec "$pod" -- env "${env[@]}" /tmp/e2e.test -test.v -test.timeout 65m "$@" || rc=$?
+    kctl "$ctx" -n "$NAMESPACE_TESTING" delete pod "$pod" --wait=false
     return "$rc"
 }
 

@@ -381,9 +381,8 @@ func exposeRestoreNodePort(ctx SpecContext, cluster, svcName, nodeIP string) str
 	}
 	created, err := k8sClient.CoreV1().Services(namespace).Create(ctx, svc, metav1.CreateOptions{})
 	Expect(err).NotTo(HaveOccurred(), "create restore NodePort service")
-	np := created.Spec.Ports[0].NodePort
-	Expect(np).NotTo(BeZero(), "NodePort should be assigned")
-	return fmt.Sprintf("%s:%d", nodeIP, np)
+	Expect(created.Spec.Ports[0].NodePort).NotTo(BeZero(), "NodePort should be assigned")
+	return serviceAddr(created, nodeIP)
 }
 
 // ── Failure inspectability (docs/BACKLOG.md: the bootstrapFrom restore flake) ──

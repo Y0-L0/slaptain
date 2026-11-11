@@ -26,7 +26,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: ${{ fromJSON(vars.CI_RUNNERS || '["ubuntu-latest"]') }}
+        # Experiment branch: the e2e arms differ, the images they test do not.
+        runner: [ubuntu-latest]
         group: [publish-pure, publish-slaptain, publish-ol26src, publish-other]
     # Job-level, so a run whose job is skipped cannot cancel a build in progress.
     # The matrix group is in the key, or the four jobs would cancel each other.

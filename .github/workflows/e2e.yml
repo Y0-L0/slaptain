@@ -28,7 +28,7 @@ permissions:
 
 jobs:
   e2e:
-    name: e2e (${{ matrix.tier }})
+    name: e2e (${{ matrix.tier }}, ${{ matrix.runner }})
     # A push or the "dev images" label needs that label; adding "e2e slow" starts the
     # slow tier on its own. A fork's pull request gets no dev images.
     if: >-
@@ -40,17 +40,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Experiment: kind on GitHub-hosted and Namespace runners, unprivileged and
+        # privileged, and a short-lived Namespace cluster ("nscluster") driven from a 2x4 runner.
+        runner:
+          - ubuntu-latest
+          - namespace-profile-4x8
+          - namespace-profile-4x8;container.privileged=true
+          - nscluster
         tier: >-
           ${{ fromJSON(
             (github.event_name == 'workflow_dispatch' && format('["{0}"]', inputs.tier)) ||
             (github.event.label.name == 'e2e slow' && '["slow"]') ||
             (contains(github.event.pull_request.labels.*.name, 'e2e slow') && '["smoke","slow"]') ||
             '["smoke"]') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner == 'nscluster' && 'namespace-profile-2x4' || matrix.runner }}
     timeout-minutes: ${{ matrix.tier == 'slow' && 180 || 60 }}
     permissions:
       contents: read
       actions: write
+      id-token: write
     env:
       KUBE_CONTEXT: kind-slaptain
       GH_TOKEN: ${{ github.token }}
@@ -100,9 +108,25 @@ jobs:
 
       # Everything up to here, and the two steps below, overlaps the image builds.
       - name: Create the kind cluster
+        if: matrix.runner != 'nscluster'
         uses: helm/kind-action@v1
         with:
           cluster_name: slaptain
+
+      - name: Create a Namespace cluster
+        if: matrix.runner == 'nscluster'
+        uses: namespacelabs/nscloud-cluster-action@v0
+        with:
+          kubernetes-version: '1.33'
+          machine-shape: 4x8
+          duration: 90m
+
+      - name: Address the Namespace cluster
+        if: matrix.runner == 'nscluster'
+        run: |
+          echo "KUBE_CONTEXT=$(kubectl config current-context)" | tee -a "$GITHUB_ENV"
+          kubectl get nodes -o wide
+          for tool in kubectl helm yq jq; do printf '%s: ' "$tool"; command -v "$tool" || echo missing; done
 
       - name: Compile the suite and slctl
         run: |
@@ -141,6 +165,16 @@ jobs:
 
       - name: Deploy the operator and the fixture
         run: tests/e2e.sh setup "$KUBE_CONTEXT"
+
+      # Experiment: can the runner reach the cluster's NodePorts at all?
+      - name: Probe the NodePorts
+        if: ${{ !cancelled() }}
+        run: |
+          kubectl --context "$KUBE_CONTEXT" get svc -A | grep NodePort || true
+          ip=$(kubectl --context "$KUBE_CONTEXT" get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+          for port in $(kubectl --context "$KUBE_CONTEXT" get svc -A -o jsonpath='{range .items[*]}{range .spec.ports[*]}{.nodePort}{" "}{end}{end}'); do
+            if timeout 5 bash -c "</dev/tcp/$ip/$port" 2>/dev/null; then echo "reachable $ip:$port"; else echo "UNREACHABLE $ip:$port"; fi
+          done
 
       - name: Run the specs
         run: tests/e2e.sh test "$KUBE_CONTEXT"

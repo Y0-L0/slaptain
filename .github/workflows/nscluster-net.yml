@@ -1,0 +1,80 @@
+# Experiment: how can a runner reach TCP services in a separate Namespace cluster?
+name: nscluster network probe
+on:
+  push:
+    branches: [jlohmer/exp-nscluster-net]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: namespace-profile-2x4
+    timeout-minutes: 20
+    steps:
+      - name: Create a Namespace cluster
+        id: cluster
+        uses: namespacelabs/nscloud-cluster-action@v0
+        with:
+          kubernetes-version: '1.33'
+
+      - name: What the cluster runs
+        run: |
+          set -x
+          ip -4 -brief addr; ip route
+          command -v nsc && nsc version || true
+          kubectl get nodes -o wide
+          kubectl get pods,svc -A -o wide
+          kubectl get crd -o name | grep -Ei 'traefik|gateway' || echo "no traefik or gateway CRDs"
+          kubectl get gatewayclass -o wide || true
+          kubectl get ingressclass -o wide || true
+          kubectl -n kube-system get helmcharts.helm.cattle.io -o wide || true
+          echo "instance-id=${{ steps.cluster.outputs.instance-id }}"
+
+      - name: A TCP service as NodePort and LoadBalancer
+        run: |
+          set -x
+          kubectl create deployment echo --image=nginx:alpine --port=80
+          kubectl expose deployment echo --name=echo-np --type=NodePort --port=80
+          kubectl expose deployment echo --name=echo-lb --type=LoadBalancer --port=8080 --target-port=80
+          kubectl rollout status deployment/echo --timeout=120s
+          for i in $(seq 30); do
+            ip=$(kubectl get svc echo-lb -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+            [ -n "$ip" ] && break; sleep 2
+          done
+          kubectl get svc,endpointslices -o wide
+          kubectl get pods -o wide
+
+      - name: Reach it from the runner
+        run: |
+          probe() { if timeout 5 bash -c "</dev/tcp/$1/$2" 2>/dev/null; then echo "OPEN    $1:$2 ($3)"; else echo "CLOSED  $1:$2 ($3)"; fi; }
+          node=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+          np=$(kubectl get svc echo-np -o jsonpath='{.spec.ports[0].nodePort}')
+          lb=$(kubectl get svc echo-lb -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          lbnp=$(kubectl get svc echo-lb -o jsonpath='{.spec.ports[0].nodePort}')
+          cip=$(kubectl get svc echo-np -o jsonpath='{.spec.clusterIP}')
+          pod=$(kubectl get pods -l app=echo -o jsonpath='{.items[0].status.podIP}')
+          probe "$node" "$np" "node InternalIP, NodePort"
+          probe "${lb:-none}" 8080 "LoadBalancer ingress IP"
+          probe "$node" "$lbnp" "node InternalIP, LB's NodePort"
+          probe "$cip" 80 "ClusterIP"
+          probe "$pod" 80 "pod IP"
+          server=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+          echo "API server: $server"
+          host=$(echo "$server" | sed -E 's|https?://([^:/]+).*|\1|')
+          getent hosts "$host" || true
+          probe "$host" "$np" "API server host, NodePort"
+          probe "$host" 8080 "API server host, LB port"
+
+      - name: nsc instance port-forward to a NodePort
+        run: |
+          set -x
+          np=$(kubectl get svc echo-np -o jsonpath='{.spec.ports[0].nodePort}')
+          command -v nsc || { echo "nsc missing"; exit 0; }
+          nsc instance port-forward --help | head -30 || true
+          nohup nsc instance port-forward "${{ steps.cluster.outputs.instance-id }}" --target_port "$np" > "$RUNNER_TEMP/pf.log" 2>&1 &
+          sleep 8
+          cat "$RUNNER_TEMP/pf.log"
+          port=$(grep -oE '127\.0\.0\.1:[0-9]+' "$RUNNER_TEMP/pf.log" | head -1 | cut -d: -f2)
+          [ -n "$port" ] && curl -sS -m 5 -o /dev/null -w 'via nsc port-forward: HTTP %{http_code}\n' "http://127.0.0.1:$port/" || echo "no local port found"

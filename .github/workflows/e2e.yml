@@ -1,0 +1,219 @@
+name: e2e
+
+# The e2e suite on a single-site kind cluster, against a pull request's dev
+# images (ADR-046). Both tiers follow a pull request's labels:
+#   smoke: every push to a pull request labelled "dev images", and adding that label.
+#   slow:  the same, while the pull request is also labelled "e2e slow", and adding
+#          that label. Run it once by adding the label and removing it again.
+# Run workflow on this file starts either tier on a branch.
+# The images are tagged by branch, so a run first waits until publish-dev has
+# pushed this commit's. No concurrency group: a new push never cancels a run.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: smoke runs on every labelled push; slow runs what smoke leaves out
+        required: true
+        type: choice
+        options: [smoke, slow]
+        default: slow
+
+run-name: e2e ${{ github.head_ref || github.ref_name }}
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: e2e (${{ matrix.tier }}, ${{ matrix.runner }})
+    # A push or the "dev images" label needs that label; adding "e2e slow" starts the
+    # slow tier on its own. A fork's pull request gets no dev images.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       (github.event.label.name == 'e2e slow' ||
+        (contains(github.event.pull_request.labels.*.name, 'dev images') &&
+         (github.event.action != 'labeled' || github.event.label.name == 'dev images'))))
+    strategy:
+      fail-fast: false
+      matrix:
+        # Experiment: kind on a GitHub-hosted runner against a short-lived Namespace
+        # cluster driven from a 2x4 runner, reached through NodePort forwards
+        # ("nscluster") or by running the suite in the cluster ("nscluster-job").
+        runner:
+          - ubuntu-latest
+          - nscluster
+          - nscluster-job
+          # The same two on a cluster twice the size: does the suite compete with slapd?
+          - nscluster-8x16
+          - nscluster-job-8x16
+        tier: >-
+          ${{ fromJSON(
+            (github.event_name == 'workflow_dispatch' && format('["{0}"]', inputs.tier)) ||
+            (github.event.label.name == 'e2e slow' && '["slow"]') ||
+            (contains(github.event.pull_request.labels.*.name, 'e2e slow') && '["smoke","slow"]') ||
+            '["smoke"]') }}
+    runs-on: ${{ startsWith(matrix.runner, 'nscluster') && 'namespace-profile-2x4' || matrix.runner }}
+    timeout-minutes: ${{ matrix.tier == 'slow' && 180 || 60 }}
+    permissions:
+      contents: read
+      actions: write
+      id-token: write
+    env:
+      KUBE_CONTEXT: kind-slaptain
+      GH_TOKEN: ${{ github.token }}
+      TIER: ${{ matrix.tier }}
+      SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      BRANCH: ${{ github.head_ref || github.ref_name }}
+      # Specs that roll, restart or mutate the cluster for minutes, or are flaky for now.
+      # The smoke tier leaves them out and the slow tier runs them.
+      SLOW_LABELS: >-
+        cleanup-policy || scale-topology || database-hotadd || write-rotation ||
+        purge-rotation || image-selector || monitor-at-rest || startup-config ||
+        tls-gate || monitor
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SHA }}
+
+      - name: Address the dev images and select the tier
+        run: |
+          slug=$(scripts/branch-slug.sh "$BRANCH")
+          {
+            echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/dev"
+            echo "IMAGE_TAG=$slug"
+            echo "EXPORTER_IMAGE_TAG=$slug"
+            echo "E2E_SEED=$(date +%s)"
+            # Every failure, not the first one: the full report is what a reader needs.
+            echo "FAIL_FAST=0"
+            if [ "$TIER" = slow ]; then
+              # The env-gated groups need only one cluster; external replication needs two.
+              echo "E2E_LABEL_FILTER=$SLOW_LABELS || backup || restore || scale || scaleup"
+              echo "E2E_BACKUP=1"
+              echo "E2E_SCALE=1"
+              echo "E2E_SCALEUP=1"
+            else
+              echo "E2E_LABEL_FILTER=!($SLOW_LABELS)"
+            fi
+          } | tee -a "$GITHUB_ENV"
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: tests/e2e/go.mod
+          cache-dependency-path: |
+            tests/e2e/go.sum
+            operator/go.sum
+
+      # Everything up to here, and the two steps below, overlaps the image builds.
+      - name: Create the kind cluster
+        if: ${{ !startsWith(matrix.runner, 'nscluster') }}
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: slaptain
+
+      - name: Create a Namespace cluster
+        if: startsWith(matrix.runner, 'nscluster')
+        uses: namespacelabs/nscloud-cluster-action@v0
+        with:
+          kubernetes-version: '1.33'
+          machine-shape: ${{ endsWith(matrix.runner, '-8x16') && '8x16' || '4x8' }}
+          duration: 90m
+
+      - name: Address the Namespace cluster
+        if: startsWith(matrix.runner, 'nscluster')
+        run: |
+          echo "KUBE_CONTEXT=$(kubectl config current-context)" | tee -a "$GITHUB_ENV"
+          kubectl get nodes -o wide
+          for tool in kubectl helm yq jq; do printf '%s: ' "$tool"; command -v "$tool" || echo missing; done
+
+      - name: Compile the suite and slctl
+        run: |
+          (cd tests/e2e && go test -c -o /dev/null .)
+          (cd operator && go build -o /dev/null ./cmd/slctl)
+
+      - name: Wait for this commit's dev images
+        run: |
+          for i in $(seq 1 120); do
+            runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow publish-dev.yml \
+              --commit "$SHA" --json databaseId,status)
+            for id in $(jq -r '.[] | select(.status == "completed") | .databaseId' <<<"$runs"); do
+              builds=$(gh run view "$id" --repo "$GITHUB_REPOSITORY" --json jobs --jq \
+                '[.jobs[] | select(.name | startswith("Build and push")) | .conclusion]')
+              if jq -e 'length > 0 and all(. == "success")' <<<"$builds" >/dev/null; then
+                exit 0
+              fi
+              # A newer push cancelled this commit's builds: nothing here to test.
+              if jq -e 'any(. == "cancelled")' <<<"$builds" >/dev/null; then
+                echo "::notice::A newer push superseded the images of $SHA; cancelling this run"
+                gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
+                sleep 60
+              fi
+            done
+            if [ "$i" -gt 4 ] && ! jq -e 'any(.[]; .status != "completed")' <<<"$runs" >/dev/null; then
+              echo "::error::No publish-dev run built images for $SHA. Is the pull request labelled dev images?"
+              exit 1
+            fi
+            sleep 30
+          done
+          echo "::error::Timed out waiting for the dev images of $SHA"
+          exit 1
+
+      - name: Record the spec-order seed
+        run: echo "Ginkgo seed \`$E2E_SEED\`, replay with \`E2E_SEED=$E2E_SEED\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy the operator and the fixture
+        run: tests/e2e.sh setup "$KUBE_CONTEXT"
+
+      # Experiment: can the runner reach the cluster's NodePorts at all?
+      # A Namespace cluster's NodePorts are not reachable from the runner
+      # (connection refused on the node's InternalIP), so mirror every NodePort
+      # Service on the same port on localhost, including Services created later
+      # and pods that restart under a forward.
+      - name: Forward the NodePorts to localhost
+        if: startsWith(matrix.runner, 'nscluster') && !contains(matrix.runner, '-job')
+        run: |
+          ip -4 -brief addr
+          nohup scripts/forward-nodeports.sh "$KUBE_CONTEXT" > "$RUNNER_TEMP/port-forward.log" 2>&1 &
+          echo "E2E_NODE_ACCESS_IP=127.0.0.1" >> "$GITHUB_ENV"
+          sleep 8
+          for port in $(kubectl --context "$KUBE_CONTEXT" get svc -A -o jsonpath='{range .items[*]}{range .spec.ports[*]}{.nodePort}{" "}{end}{end}'); do
+            if timeout 5 bash -c "</dev/tcp/127.0.0.1/$port" 2>/dev/null; then echo "reachable :$port"; else echo "UNREACHABLE :$port"; fi
+          done
+
+      - name: Run the specs
+        env:
+          E2E_IN_CLUSTER: ${{ contains(matrix.runner, '-job') && '1' || '' }}
+        run: tests/e2e.sh test "$KUBE_CONTEXT"
+
+      # Experiment: how long the cluster spent pulling each image.
+      - name: Image pull times
+        if: ${{ !cancelled() }}
+        run: |
+          kubectl --context "$KUBE_CONTEXT" get events -A --field-selector reason=Pulled \
+            -o custom-columns=NS:.metadata.namespace,POD:.involvedObject.name,MESSAGE:.message --no-headers |
+            grep -i 'successfully pulled' | sed -E 's/Image size: [0-9]+ bytes\.//' || true
+
+      - name: Collect cluster state
+        if: failure()
+        run: |
+          mkdir -p e2e-debug
+          kubectl --context "$KUBE_CONTEXT" get pods -A -o wide > e2e-debug/pods.txt || true
+          cp "$RUNNER_TEMP/port-forward.log" e2e-debug/ 2>/dev/null || true
+          kubectl --context "$KUBE_CONTEXT" get events -A --sort-by=.lastTimestamp > e2e-debug/events.txt || true
+          kubectl --context "$KUBE_CONTEXT" -n slaptain-system logs deploy/slaptain --all-containers > e2e-debug/operator.log || true
+          make build-slctl
+          (cd e2e-debug && ../bin/slctl --context "$KUBE_CONTEXT" debug-dump -n slaptain-testing slapd) || true
+          kind export logs --name slaptain e2e-debug/kind || true
+
+      - name: Upload cluster state
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-debug-${{ matrix.tier }}
+          path: e2e-debug/
+          retention-days: 7

@@ -47,6 +47,9 @@ jobs:
           - ubuntu-latest
           - nscluster
           - nscluster-job
+          # The same two on a cluster twice the size: does the suite compete with slapd?
+          - nscluster-8x16
+          - nscluster-job-8x16
         tier: >-
           ${{ fromJSON(
             (github.event_name == 'workflow_dispatch' && format('["{0}"]', inputs.tier)) ||
@@ -118,7 +121,7 @@ jobs:
         uses: namespacelabs/nscloud-cluster-action@v0
         with:
           kubernetes-version: '1.33'
-          machine-shape: 4x8
+          machine-shape: ${{ endsWith(matrix.runner, '-8x16') && '8x16' || '4x8' }}
           duration: 90m
 
       - name: Address the Namespace cluster
@@ -172,7 +175,7 @@ jobs:
       # Service on the same port on localhost, including Services created later
       # and pods that restart under a forward.
       - name: Forward the NodePorts to localhost
-        if: matrix.runner == 'nscluster'
+        if: startsWith(matrix.runner, 'nscluster') && !contains(matrix.runner, '-job')
         run: |
           ip -4 -brief addr
           nohup scripts/forward-nodeports.sh "$KUBE_CONTEXT" > "$RUNNER_TEMP/port-forward.log" 2>&1 &
@@ -184,7 +187,7 @@ jobs:
 
       - name: Run the specs
         env:
-          E2E_IN_CLUSTER: ${{ matrix.runner == 'nscluster-job' && '1' || '' }}
+          E2E_IN_CLUSTER: ${{ contains(matrix.runner, '-job') && '1' || '' }}
         run: tests/e2e.sh test "$KUBE_CONTEXT"
 
       # Experiment: how long the cluster spent pulling each image.

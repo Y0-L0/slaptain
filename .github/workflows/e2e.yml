@@ -9,7 +9,8 @@ name: e2e
 #          and the migration scenario.
 # Run workflow on this file starts either tier on a branch.
 # The images are tagged by branch, so a run first waits until publish-dev has
-# pushed this commit's. No concurrency group: a new push never cancels a run.
+# pushed this commit's. A new push never cancels a run. A second run of one tier on
+# the same commit, as a label added beside a push starts, replaces the first.
 
 on:
   pull_request:
@@ -52,6 +53,9 @@ jobs:
             '["smoke"]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    concurrency:
+      group: e2e-${{ github.event.pull_request.head.sha || github.sha }}-${{ matrix.tier }}
+      cancel-in-progress: true
     permissions:
       contents: read
       actions: write
@@ -153,14 +157,19 @@ jobs:
               if jq -e 'length > 0 and all(. == "success")' <<<"$builds" >/dev/null; then
                 exit 0
               fi
-              # A newer push cancelled this commit's builds: nothing here to test.
               if jq -e 'any(. == "cancelled")' <<<"$builds" >/dev/null; then
-                echo "::notice::A newer push superseded the images of $SHA; cancelling this run"
-                gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
-                sleep 60
+                cancelled=1
               fi
             done
-            if [ "$i" -gt 4 ] && ! jq -e 'any(.[]; .status != "completed")' <<<"$runs" >/dev/null; then
+            pending=$(jq 'any(.[]; .status != "completed")' <<<"$runs")
+            # A newer push cancelled this commit's builds: nothing here to test.
+            # While another run still builds them, a label event only replaced a duplicate.
+            if [ "${cancelled:-}" = 1 ] && [ "$pending" = false ]; then
+              echo "::notice::A newer push superseded the images of $SHA; cancelling this run"
+              gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
+              sleep 60
+            fi
+            if [ "$i" -gt 4 ] && [ "$pending" = false ]; then
               echo "::error::No publish-dev run built images for $SHA. Is the pull request labelled dev images?"
               exit 1
             fi

@@ -270,6 +270,9 @@ Environment variables (with defaults):
   TEST_RESOURCES       = $TEST_RESOURCES  (example or lab)
   IMAGE_TAG            = $IMAGE_TAG  (set it to address a tag GIT_TAG cannot derive,
                          such as a dev image's branch slug; EXPORTER_IMAGE_TAG likewise)
+  E2E_TEST_BIN         = a suite binary built by `go test -c` in tests/e2e, run instead
+                         of `go test` (unset: compile from this checkout)
+  SLCTL                = an slctl binary for the refresh-storm gate (unset: build one)
 
 Node access (NodePort reachability + cert SAN; defaults to the k8s InternalIP):
   E2E_NODE_ACCESS_IP   = single-site override, e.g. <reachable-node-ip>
@@ -1227,12 +1230,20 @@ run_tests() {
     # does not guard) ends that gate alone. The run fails if any of them did.
     local suite_rc gate_rc rc=0
     set +e
+    local test_bin=""
+    [[ -n "${E2E_TEST_BIN:-}" ]] && test_bin=$(realpath "$E2E_TEST_BIN")
     (
         set -e
         cd "$PROJECT_ROOT/tests/e2e"
-        env "${test_env[@]}" go test -v ./... \
-            -timeout 65m \
-            "${ginkgo_flags[@]}"
+        if [[ -n "$test_bin" ]]; then
+            env "${test_env[@]}" "$test_bin" -test.v \
+                -test.timeout 65m \
+                "${ginkgo_flags[@]}"
+        else
+            env "${test_env[@]}" go test -v ./... \
+                -timeout 65m \
+                "${ginkgo_flags[@]}"
+        fi
     )
     suite_rc=$?
     ( set -e; check_data_present_every_site )
@@ -1264,10 +1275,15 @@ run_tests() {
 # One sample per site, no retry: a firing sample is conclusive. A clean one
 # only means clean now — the condition has been seen to clear by itself.
 check_no_refresh_storm_every_site() {
-    local slctl ctx out status detail failed=()
-    slctl=$(mktemp -d /tmp/e2e-slctl.XXXXXX)/slctl
-    (cd "$PROJECT_ROOT/operator" && go build -o "$slctl" ./cmd/slctl) \
-        || die "building slctl for the refresh-storm gate failed"
+    local slctl slctl_dir="" ctx out status detail failed=()
+    if [[ -n "${SLCTL:-}" ]]; then
+        slctl=$(realpath "$SLCTL")
+    else
+        slctl_dir=$(mktemp -d /tmp/e2e-slctl.XXXXXX)
+        slctl=$slctl_dir/slctl
+        (cd "$PROJECT_ROOT/operator" && go build -o "$slctl" ./cmd/slctl) \
+            || die "building slctl for the refresh-storm gate failed"
+    fi
 
     log "Checking every site for the ITS#9398 refresh storm (slctl inspect: accesslog-mincsn)..."
     for ctx in "${CONTEXTS[@]}"; do
@@ -1283,7 +1299,7 @@ check_no_refresh_storm_every_site() {
             *)    failed+=("[$ctx] no accesslog-mincsn verdict from slctl inspect") ;;
         esac
     done
-    rm -rf "$(dirname "$slctl")"
+    [[ -n "$slctl_dir" ]] && rm -rf "$slctl_dir"
 
     if (( ${#failed[@]} > 0 )); then
         printf '  %s\n' "${failed[@]}" >&2

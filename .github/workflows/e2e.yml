@@ -7,6 +7,7 @@ name: e2e
 #          that label. Run it once by adding the label and removing it again.
 #          It is four jobs, each on its own cluster: three shards of the slow specs
 #          and the migration scenario.
+# One job compiles the suite and slctl; every tier runs those binaries.
 # Run workflow on this file starts either tier on a branch.
 # The images are tagged by branch, so a run first waits until publish-dev has
 # pushed this commit's. Runs of one commit and tier cancel each other, so opening a
@@ -31,16 +32,50 @@ permissions:
   contents: read
 
 jobs:
-  e2e:
-    name: e2e (${{ matrix.tier }})
+  build:
+    name: e2e build
     # Every run needs the "dev images" label; adding "e2e slow" starts the slow tier on
-    # its own. A fork's pull request gets no dev images.
+    # its own. A fork's pull request gets no dev images. Skipping this skips the tiers.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        contains(github.event.pull_request.labels.*.name, 'dev images') &&
        (github.event.action != 'labeled' ||
         github.event.label.name == 'dev images' || github.event.label.name == 'e2e slow'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: tests/e2e/go.mod
+          cache-dependency-path: |
+            tests/e2e/go.sum
+            operator/go.sum
+
+      - name: Compile the suite and slctl
+        run: |
+          (cd tests/e2e && go test -c -o "$RUNNER_TEMP/e2e-bin/e2e.test" .)
+          (cd operator && go build -o "$RUNNER_TEMP/e2e-bin/slctl" ./cmd/slctl)
+
+      - name: Upload the binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-bin
+          path: ${{ runner.temp }}/e2e-bin/
+          if-no-files-found: error
+          # A re-run of all jobs builds again under the same name.
+          overwrite: true
+          retention-days: 1
+
+  e2e:
+    name: e2e (${{ matrix.tier }})
+    needs: build
     strategy:
       fail-fast: false
       matrix:
@@ -92,6 +127,8 @@ jobs:
             # Every failure, not the first one: the full report is what a reader needs.
             echo "FAIL_FAST=0"
             echo "E2E_SCRIPT=tests/e2e.sh"
+            echo "E2E_TEST_BIN=$RUNNER_TEMP/e2e-bin/e2e.test"
+            echo "SLCTL=$RUNNER_TEMP/e2e-bin/slctl"
             # The env-gated groups need only one cluster; external replication needs two.
             case "$TIER" in
               smoke)
@@ -117,35 +154,21 @@ jobs:
             esac
           } | tee -a "$GITHUB_ENV"
 
-      - name: Set up Go
-        uses: actions/setup-go@v7
+      - name: Download the suite and slctl
+        uses: actions/download-artifact@v8
         with:
-          go-version-file: tests/e2e/go.mod
-          cache-dependency-path: |
-            tests/e2e/go.sum
-            operator/go.sum
+          name: e2e-bin
+          path: ${{ runner.temp }}/e2e-bin
+
+      # The artifact zip drops the executable bit.
+      - name: Make the binaries executable
+        run: chmod +x "$E2E_TEST_BIN" "$SLCTL"
 
       # Everything up to the wait for the images overlaps the image builds.
-      # The compile fills the Go build cache in the background while kind starts.
-      - name: Start compiling the suite and slctl
-        run: |
-          (
-            rc=0
-            { (cd tests/e2e && go test -c -o /dev/null .) &&
-                (cd operator && go build -o /dev/null ./cmd/slctl); } || rc=$?
-            echo "$rc" > "$RUNNER_TEMP/compile.rc"
-          ) > "$RUNNER_TEMP/compile.log" 2>&1 &
-
       - name: Create the kind cluster
         uses: helm/kind-action@v1
         with:
           cluster_name: slaptain
-
-      - name: Wait for the compile
-        run: |
-          until [ -e "$RUNNER_TEMP/compile.rc" ]; do sleep 2; done
-          cat "$RUNNER_TEMP/compile.log"
-          exit "$(cat "$RUNNER_TEMP/compile.rc")"
 
       - name: Wait for this commit's dev images
         run: |
@@ -191,8 +214,7 @@ jobs:
           kubectl --context "$KUBE_CONTEXT" get pods -A -o wide > e2e-debug/pods.txt || true
           kubectl --context "$KUBE_CONTEXT" get events -A --sort-by=.lastTimestamp > e2e-debug/events.txt || true
           kubectl --context "$KUBE_CONTEXT" -n slaptain-system logs deploy/slaptain --all-containers > e2e-debug/operator.log || true
-          make build-slctl
-          (cd e2e-debug && ../bin/slctl --context "$KUBE_CONTEXT" debug-dump -n slaptain-testing slapd) || true
+          (cd e2e-debug && "$SLCTL" --context "$KUBE_CONTEXT" debug-dump -n slaptain-testing slapd) || true
           kind export logs --name slaptain e2e-debug/kind || true
 
       - name: Upload cluster state

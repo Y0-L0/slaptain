@@ -24,6 +24,9 @@
 #   ./tests/e2e-migration.sh test      [context]
 #   ./tests/e2e-migration.sh teardown  [context]
 #   ./tests/e2e-migration.sh all       [context]
+#
+# E2E_TEST_BIN names a suite binary built by `go test -c` in tests/e2e to run
+# instead of `go test`.
 set -euo pipefail
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -390,6 +393,8 @@ run_tests() {
     fi
     trap "rm -f '$tmp_kubeconfig'" EXIT
 
+    local test_cmd=(go test -v ./... -timeout 20m)
+    [[ -n "${E2E_TEST_BIN:-}" ]] && test_cmd=("$(realpath "$E2E_TEST_BIN")" -test.v -test.timeout 20m)
     (
         cd "$PROJECT_ROOT/tests/e2e"
         KUBECONFIG="$tmp_kubeconfig" \
@@ -402,7 +407,7 @@ run_tests() {
         E2E_MIGRATION_NS_SLAPTAIN="$NAMESPACE_SLAPTAIN" \
         E2E_MIGRATION_NS_FAKEPROD="$NAMESPACE_FAKEPROD" \
         E2E_MIGRATION_SUFFIX="$SUFFIX" \
-        go test -v ./... -timeout 20m --ginkgo.v --ginkgo.timeout=15m --ginkgo.label-filter=migration
+        "${test_cmd[@]}" --ginkgo.v --ginkgo.timeout=15m --ginkgo.label-filter=migration
     )
 }
 

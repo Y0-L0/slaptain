@@ -394,6 +394,7 @@ run_tests() {
         cd "$PROJECT_ROOT/tests/e2e"
         KUBECONFIG="$tmp_kubeconfig" \
         E2E_MIGRATION=1 \
+        LDAP_ADDR="${NODE_IP}:${NODEPORT_SLAPTAIN}" \
         E2E_MIGRATION_LDAP_ADDR="${NODE_IP}:${NODEPORT_SLAPTAIN}" \
         E2E_MIGRATION_ADMIN_PW="$admin_pw" \
         E2E_MIGRATION_FAKEPROD_LDAP_ADDR="${NODE_IP}:${NODEPORT_FAKEPROD}" \

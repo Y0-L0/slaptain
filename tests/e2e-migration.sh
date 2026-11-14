@@ -241,6 +241,7 @@ spec:
     mode: consumer-only
     externalPeers:
       - name: fake-prod
+        siteIndex: 1
         uri: "ldap://fakeprod.${NAMESPACE_FAKEPROD}.svc.cluster.local:389"
         bindDN: "cn=replication,$SUFFIX"
         bindPasswordSecretName: mig-replication-pw

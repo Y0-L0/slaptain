@@ -11,6 +11,202 @@ would say the same thing, it belongs here and `CHANGELOG.md` points at it.
 
 ---
 
+## v0.6.0 — one rolling restart, pods that spread, and a default checkpoint
+
+### Apply the CRDs before upgrading the operator
+
+`helm upgrade` does **not** update CustomResourceDefinitions — they are
+cluster-scoped and shared between releases, so Helm declines to own them, and
+`--skip-crds` only turns the install off; no flag updates an existing one.
+Apply them yourself, then upgrade:
+
+```bash
+kubectl apply --server-side --force-conflicts -f \
+  https://github.com/chuck-chuck-chuck-net/slaptain/releases/download/v0.6.0/slaptain-crds.yaml
+```
+
+`--force-conflicts` is required, not defensive: Helm installed the CRDs as the
+field manager `helm`, so a plain server-side apply refuses with `conflict with
+"helm": .spec.versions`. Forcing hands the schema to `kubectl`, which is the
+correct outcome — Helm skips an existing CRD on install and never touches one on
+upgrade, so nothing takes it back.
+
+**Skipping this does not fail — and in this release it fails invisibly.** The API
+server prunes fields the CRD does not know about without an error: `kubectl apply`
+reports success and the field is simply absent. Against a 0.5.0 CRD that drops
+all of `spec.placement`, so no spread constraint is generated and no pod moves —
+which is **exactly what the next section tells you to expect**. The failed
+upgrade and the successful one look identical from the outside. Check the CRD
+rather than the pods:
+
+```bash
+kubectl get crd slapdclusters.ldap.chuck-chuck-chuck.net \
+  -o jsonpath='{.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.placement}'
+```
+
+An empty result means the old CRD is still installed. Re-apply it, then re-apply
+your CRs — pruned values are gone from the stored object and have to be sent
+again.
+
+### One rolling restart, for two reasons
+
+Two changes in this release touch the slapd Pod template — the default spread
+constraint that comes with `spec.placement`, and the cache labels the operator
+now stamps on what it creates. They land together, so each StatefulSet replaces
+its Pods **once**, not once per change. Expect one rolling restart of the
+read-write StatefulSet and, where `readReplicas > 0`, one of the read-only
+StatefulSet. Upgrade one site at a time and let each finish rolling. ADR-035
+permits an operator upgrade to change the pod template once; this is the release
+doing it on purpose.
+
+**Nothing moves.** Every pod comes back on the node it was already on: its PVC is
+`ReadWriteOnce` on local storage, the PV's node affinity admits exactly one node,
+and the new constraint is soft, so the scheduler has one choice and takes it. "We
+added spreading and nothing moved" is the correct outcome.
+
+While a StatefulSet rolls:
+
+- The `<name>-write` Service can move off a Pod that has not been replaced yet,
+  because the operator does not see unlabelled Pods and counts them as not ready.
+  It settles once the roll completes.
+- A backup, restore or mkdir Job that the old operator started
+  reports its failures without Pod detail.
+
+### Pods are spread across nodes by default (ADR-043)
+
+`spec.placement` arrives (ADR-043), and with it one thing the operator now
+generates for a cluster that says nothing: a single topology spread constraint
+per fleet — `maxSkew: 1` over `kubernetes.io/hostname`,
+`whenUnsatisfiable: ScheduleAnyway`, selecting that fleet of that cluster
+alone. Read-write pods spread among read-write pods, read-only among read-only.
+
+#### Nothing to set, unless you already manage scheduling yourself
+
+If you place slapd pods through something outside the `SlapdCluster` — a
+mutating webhook, a scheduler plugin, a policy engine — the generated
+constraint is now one more input to that decision. Switch it off explicitly:
+
+```yaml
+spec:
+  placement:
+    topologySpreadConstraints: []     # an EMPTY LIST, not an absent key
+```
+
+The empty list means "no constraint". Leaving the key out means "the operator's
+default" — the two are deliberately different answers, and the Helm charts
+carry the distinction.
+
+#### Verifying
+
+Nothing in the CR status reports what placement resolved to. Read the
+StatefulSet:
+
+```bash
+kubectl -n <ns> get statefulset <cluster> \
+  -o jsonpath='{.spec.template.spec.topologySpreadConstraints}' | jq .
+```
+
+Full guide, including what a spread cannot express and why the default is
+`ScheduleAnyway`: [`PLACEMENT.md`](PLACEMENT.md).
+
+### The operator caches only labelled objects (ADR-044)
+
+The Pod template of every StatefulSet gains `app.kubernetes.io/managed-by: slaptain`
+and `ldap.chuck-chuck-chuck.net/cluster: <cluster name>`, which is the other half of
+the roll above.
+
+Services, StatefulSets and ConfigMaps get the labels on the first reconcile,
+before anything rolls.
+`<name>-config-password` gets them too, because the cluster owns it.
+Nothing else you created is written to.
+The operator reads every unlabelled Secret it needs straight from the API server,
+which costs one request per read.
+To have such a Secret cached, label it yourself:
+
+```bash
+kubectl -n <namespace> label secret <secret> ldap.chuck-chuck-chuck.net/cluster=<cluster name>
+```
+
+Use `multi_cluster` as the value for a Secret several clusters use,
+such as the peer kubeconfigs or a shared S3 Secret.
+
+That includes `<database>-credentials`.
+The operator cannot tell one it generated from one `scripts/mesh-share-credentials.sh` created,
+so it labels neither.
+
+### The data database gets a syncprov checkpoint, and it is on by default (ADR-045)
+
+One default moves. Every **replicated data** database whose `SlapdDatabase` does
+not declare `syncprovCheckpoint` gets `olcSpCheckpoint: 100 10` written to its
+syncprov overlay. (The *accesslog* database's checkpoint is a different
+attribute on a different overlay and is unchanged at `1 1`; v0.5.0 covers it.)
+
+#### What it does to a running mesh
+
+`olcSpCheckpoint` is a converged `cn=config` attribute, and `cn=config` is
+node-local, so the operator writes it to every pod individually at its next
+reconcile of that database. **No pod is restarted and no StatefulSet is
+rolled** — nothing about a pod template changes. The write is one `modify` per
+pod per database against a live slapd, on a path that was verified
+live-modifiable before this attribute was converged at all.
+
+It reaches overlays that already exist, which on an upgraded cluster is all of
+them: `ensureSyncprovTunables` searches one level under each data database for
+the syncprov overlay and uses the DN the server gives it, on every reconcile,
+whether or not the same pass created the overlay.
+
+A database that **already declares** `syncprovCheckpoint` is untouched — an
+explicit value is used verbatim, as it always was.
+
+#### What reports what while it happens
+
+Nothing goes False. There is no condition for this attribute and none is added:
+the write either succeeds, or the database's reconcile fails and says so in the
+operator log and on the usual `SlapdDatabase` conditions, as any `cn=config`
+convergence failure does.
+
+To watch it land:
+
+```bash
+slctl ldapsearch --as config -b cn=config \
+  '(objectClass=olcSyncProvConfig)' olcSpCheckpoint
+```
+
+Run it per pod with `--pod <ordinal>`; it is node-local state, so a value on
+one pod says nothing about the next.
+
+#### What it costs
+
+One modify of the suffix entry in the **data** environment per 100 writes — 1 %
+— and nothing at all in the accesslog environment: `syncprov_checkpoint` sets
+`o_dont_replicate`, and `accesslog_response` skips such operations, so the
+journal never sees it and ADR-037's write path is untouched.
+
+#### To decline it
+
+```yaml
+spec:
+  replication:
+    syncprovCheckpoint: none
+```
+
+That writes no `olcSpCheckpoint` at all and restores the pre-0.6.0 behaviour.
+Know what you are restoring: without a checkpoint an unclean stop leaves the
+database's `contextCSN` on disk stale, or absent entirely, and the startup
+repair upstream documents for that case does not run on back-mdb —
+`FIND_MAXCSN` is gated `!SLAP_DBCLEAN(be)` and back-mdb sets that flag
+unconditionally. A replicated pod heals itself on its first inbound cookie. A
+**non-replicated** one has no such path: it comes back with a `contextCSN`
+regenerated ahead of its own content, and will discard those entries if a peer
+ever replays them.
+
+Any explicit value is used verbatim. `1 1` — the accesslog database's value —
+is not recommended here and not forbidden; see
+[TUNING.md](TUNING.md#both-syncprov-checkpoints-default-on-and-not-to-the-same-value).
+
+---
+
+
 ## v0.5.0 — the default slapd image becomes PURE, and `spec.images.select` replaces pinning by tag
 
 Two changes to how a cluster gets its data-plane images. The second is the one

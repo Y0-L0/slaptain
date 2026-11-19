@@ -4385,6 +4385,16 @@ Leave the ADD at `:2258` alone. It works, and it is the only reason any cluster
 has a checkpoint at all — but it is the source of the asymmetry that made this
 hard to see, and a comment there naming it is cheap.
 
+**The CRD field doc asserts the thing that does not happen**, and the fix owns
+correcting it. `accesslogSyncprovCheckpoint`'s comment
+(`slapddatabase_types.go:186-189`) reads *"Converged on every reconcile, so the
+default reaches accesslog overlays that already exist — which is every one of
+them, since the attribute has never been written before."* Every clause of that
+is what the field was designed to do and none of it is in force. It is a public
+API doc, and `kubectl explain` is what people read (ADR-039), so it is also one
+more reason the defect reads as healthy: a reader who checks the documentation
+is told the retrofit happened.
+
 **Red first, and a mock will not do it.** A mocked connection answers whatever
 DN it is asked for. The spec has to run against a real slapd whose overlay
 **already exists**: create the overlay, *then* change the desired value, *then*
@@ -4518,3 +4528,38 @@ Options worth costing when someone takes it, none chosen here:
 
 Meanwhile the workaround is to apply all CRs in one go, or to
 `kubectl rollout restart` once after the first database lands.
+
+## `spec.placement: Invalid value: "null"` on one `helm upgrade --reset-values`
+
+Observed **once**, 2026-10-30, upgrading the mesh release during ADR-043 validation:
+
+```
+spec.placement: Invalid value: "null": spec.placement in body must be of type object
+```
+
+**Not reproduced**, and recorded for that reason rather than chased. A clean
+chart install / upgrade / remove cycle did not show it, nor did the analogous
+`monitoring` key, and the same upgrade carried an unrelated pre-existing SSA
+conflict on `example-db .spec.replication.accesslogPurge.retention` — so there
+is more than one candidate for what actually produced it.
+
+**Why it is worth a line anyway.** If it is real it is not a property of
+placement at all, but of **every conditionally-rendered object key in these
+charts** — `monitoring`, `rotation`, `accesslogPurge` and now `placement` are
+all emitted only when set, and all would be exposed to the same mechanism.
+That makes it worth recognising on sight rather than re-diagnosing from
+scratch, and it means a fix would belong to the chart idiom rather than to one
+key.
+
+### Shape of an investigation (not attempted)
+
+- Reproduce deliberately: install with the key set, upgrade with
+  `--reset-values` and the key absent, against a CRD that has the field.
+- The hypothesis to test first is that `--reset-values` renders the key as an
+  explicit `null` rather than omitting it, and that the structural schema
+  rejects null for an object. If so, the question is whether the chart should
+  be emitting the key at all in that state — which is the same `kindIs`
+  reasoning ADR-043 forced for `topologySpreadConstraints`, one level up.
+- Red first: a `helm template` case asserting the key is ABSENT, not null,
+  when the value is unset — cheap, and it would have caught this class before
+  a cluster ever saw it.

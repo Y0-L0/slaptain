@@ -29,6 +29,156 @@ One deliberate exception: for a BREAKING change this file still carries the
 single line that keeps today's behaviour, because a release note that makes a
 reader go somewhere else to learn what to set is a release note that failed.
 
+## v0.6.0
+
+### One rolling restart, for two reasons
+
+Two changes here touch the slapd Pod template — the default spread constraint
+that arrives with `spec.placement`, and the cache labels the operator now
+stamps on everything it creates. They land in the same release, so an upgrade
+replaces every slapd Pod **once**, not twice. Both fleets roll: read-write,
+and read-only where `readReplicas > 0`.
+
+Nothing moves. Every pod comes back on the node it was already on, because its
+PVC is `ReadWriteOnce` on local storage and the PV's node affinity admits
+exactly one node. ADR-035 permits an operator upgrade to change the pod
+template once; this is the release doing it on purpose, and
+[`docs/UPGRADING.md`](docs/UPGRADING.md) is the procedure.
+
+### New: `spec.placement`, and pods spread across nodes by default (ADR-043)
+
+`spec.placement` passes `nodeSelector`, `affinity`, `tolerations` and
+`topologySpreadConstraints` to both pod templates verbatim, and adds exactly
+one thing of its own: when `topologySpreadConstraints` is unset, the operator
+writes a single constraint per fleet — `maxSkew: 1` over
+`kubernetes.io/hostname`, `whenUnsatisfiable: ScheduleAnyway`, selecting that
+fleet of that cluster alone. Writers spread among writers, readers among
+readers; one combined group would let every writer share a node while the
+per-node totals still looked even.
+
+**Unset means one constraint, not none.** A list you supply replaces the
+generated one entirely and is never merged with it: Kubernetes rejects two
+constraints on one pod sharing a `{topologyKey, whenUnsatisfiable}` pair and
+ignores `labelSelector` when deciding that, so a merge would make your own
+hostname constraint unschedulable from a value you cannot see. An explicit
+empty list (`[]`) asks for no constraint at all.
+
+**`ScheduleAnyway` is deliberate.** The first scheduling decision is the only
+one this workload gets — with `WaitForFirstConsumer` local storage the volume
+binds where the pod first lands and pins it there for the life of the PVC. A
+hard constraint can strand a pod permanently, because the only node it may use
+is the one being refused. So the default protects the *next* pod created from
+scratch — a scale-up, a rebuild, a fresh cluster. It does not rebalance an
+existing cluster and cannot.
+
+Full guide: [`docs/PLACEMENT.md`](docs/PLACEMENT.md).
+
+### The operator caches only what it labelled (ADR-044)
+
+The operator used to cache every Secret, ConfigMap, Service, StatefulSet, Job and Pod in the cluster.
+On a cluster with 84 namespaces that came to 553Mi against the chart's 128Mi limit,
+and the operator was OOM-killed before it reconciled anything.
+
+Everything the operator creates now carries `app.kubernetes.io/managed-by: slaptain`
+and `ldap.chuck-chuck-chuck.net/cluster: <SlapdCluster name>`,
+and the cache holds those six kinds only when they carry the second label.
+A Secret you bring is read from the API server instead, and the operator never labels it.
+Label it `ldap.chuck-chuck-chuck.net/cluster: <cluster name>` yourself if you want it cached,
+or `multi_cluster` if several clusters use it.
+
+The operator's memory with the filtered cache is not measured yet.
+
+### The data database gets a syncprov checkpoint — and the reason is not ITS#9398 (ADR-045)
+
+`olcSpCheckpoint: 100 10` is now written to every replicated **data** database's
+syncprov overlay unless the `SlapdDatabase` declares its own value, and
+converged onto overlays that already exist. v0.5.0 did the same for the
+*accesslog* database at `1 1`; that value is unchanged and this is a different
+attribute on a different overlay.
+
+**Why the absent state was not "OpenLDAP's behaviour".** It was OpenLDAP's
+behaviour minus the startup repair upstream assumes is there. The Admin Guide
+says a database is scanned at startup for `entryCSN` values greater than the
+stored `contextCSN`, and names shortening that scan as a reason to configure a
+checkpoint. That scan is `FIND_MAXCSN`, gated `!SLAP_DBCLEAN(be)`, and
+`back-mdb` sets that flag unconditionally — `/* mdb is always clean */`,
+identical in 2.6.10 and 2.7.1. On the only backend slaptain ships the scan never
+runs. So the documented *cost* of omitting a checkpoint is one we never pay, and
+the undocumented *consequence* — a stale, unrepaired advertised `contextCSN` —
+is one we always do.
+
+**Measured** (single node, `slapd 2.7.2-0+pure1`, back-mdb, `SIGKILL`, restart):
+with no checkpoint `contextCSN` was absent on disk and **regenerated ahead of
+all content**; with a checkpoint the stale on-disk value was served unrepaired
+with entries beyond it. On a two-node mesh the stale own-serverID value
+self-healed on the first outbound refresh — the staleness is itself what makes
+the peer believe it has changes to send. A **non-replicated** cluster has no
+such path at all, and a pod that came back with a regenerated `contextCSN` will
+discard its own entries when a peer later replays them.
+
+**Why `100 10` and not `1 1`.** `1 1` closes the window on the operation itself,
+which is exactly why the accesslog database takes it — there the window is a
+permanent correctness cliff. On the data database it doubles writes into the
+data environment on the hot path, unmeasured; the accesslog's value was bought
+with a load-harness arm and this one would not be. `100 10` is what the
+ecosystem converged on (Symas, Ubuntu, Bitnami). Our own charts and fixtures
+shipped `500 15`, which is the man page's *example* and has no provenance beyond
+that — they no longer set it, so the default is the shape the suite runs.
+
+**Cost:** one suffix-entry modify in the data environment per 100 writes. None
+in the accesslog environment: `syncprov_checkpoint` sets `o_dont_replicate` and
+`accesslog_response` skips such operations, so ADR-037's scarce write path is
+untouched. It is a converged `cn=config` attribute, so it rolls no pod.
+
+**The window narrows, it does not close.** A checkpoint is only tested after a
+successful write, so the last write before an idle period is never flushed at
+any setting. What the default removes outright is the
+regeneration-ahead-of-content case, because a checkpointed database always has a
+`contextCSN` on disk to load.
+
+**To decline it:** `syncprovCheckpoint: none`. See
+[`docs/UPGRADING.md`](docs/UPGRADING.md) for what it does to a mesh you already
+run, and ADR-045 for the full reasoning.
+
+### slapd's open-file limit no longer comes from the node (ADR-048)
+
+The slapd images gain an entrypoint, a small C launcher, that **sets**
+`RLIMIT_NOFILE` to `min(hard limit, 65,536)` before exec'ing slapd — up or
+down, not only down.
+
+slapd reads the soft limit once, at startup, and uses it for two things at
+once: its descriptor allowance, and the length of its connection table
+(`ch_calloc(dtblsize, sizeof(Connection))`, indexed by descriptor number). The
+`FD_SETSIZE` clamp applies only to the `select(2)` build, so on Linux nothing
+bounds it. That single conflation produces both failure modes, which is why one
+value fixes both: an inherited 2²⁰ costs roughly 720 MiB of connection table
+before the first client connects, and systemd's default `1024:524288` leaves
+slapd 1024 descriptors in total — both listeners, every client, every syncrepl
+connection to every peer and the LMDB files.
+
+Raising the soft limit toward the hard limit needs no privilege, so this works
+as UID 1024 with every capability dropped. The launcher passes its arguments
+through unchanged, so nothing about how the operator starts slapd changes — but
+it is an `ENTRYPOINT`, and a pod spec that sets `command:` would skip it. The
+operator sets `args:` only, and a unit test now holds it to that.
+
+### Also in this release
+
+- **Go 1.26.11** in all three modules and both builder images, closing
+  GO-2026-6859 in `net/http` — the one vulnerability our code actually reached.
+- **`golang.org/x/net` 0.62.0 and `cel-go` 0.30.0**, the module findings that
+  have a released fix. Nothing here calls either; `x/crypto/openpgp`'s advisory
+  has no release to move to and stays open deliberately.
+- **e2e runs in CI**: a smoke tier on every push to a pull request labelled
+  `dev images`, and a slow tier behind a second label, both on a kind cluster
+  against that commit's branch-tagged images.
+- **Getting a BuildKit worker** in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md):
+  the three kinds of worker, the rootless `buildkitd` systemd user service, and
+  the three ways it bites.
+- `docs/BACKLOG.md` records that the accesslog checkpoint's convergence does not
+  retrofit onto an overlay that already exists — it constructs the overlay DN
+  while slapd stores the indexed one it assigned.
+
 ## v0.5.0
 
 Three defaults move in this release. Two of them change which binary your pods

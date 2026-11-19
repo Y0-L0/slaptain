@@ -1,6 +1,13 @@
 # ADR-045: The data database's syncprov checkpoint defaults on, for a reason that is not the accesslog's
 
-**Status:** Proposed
+**Status:** Accepted 2026-11-08 — on the pure seam red-first (3 of 7 table cases plus the
+bare-overlay convergence assertion failing against the undefaulted function), on the e2e
+spec red against a deployed pre-change operator (`example-db2`, which now declares nothing,
+carried no `olcSpCheckpoint` on any pod) and green after, and on a three-site mesh cycle at
+98 passed / 2 failed — both failures re-run clean and neither touches this attribute. Live:
+`100 10` on the database that declares nothing, `500 15` on the one that declares it, `1 1`
+on both accesslog databases, every RW pod; `syncprovCheckpoint: none` removed the attribute
+on all three pods and clearing the field put the default back.
 **Date:** 2026-11-07
 
 ## Context
@@ -149,9 +156,17 @@ on existing clusters.
 on every replicated data database, converged per pod like the value it replaces
 (ADR-024 R1/R4).
 
-**R2. The opt-out stays and keeps its spelling.** `""` or the explicit sentinel
-`"none"` writes no `olcSpCheckpoint` at all, restoring slapd's own behaviour —
-the same two spellings `accesslogSyncprovCheckpoint` already honours.
+**R2. The opt-out is the explicit sentinel, and only the sentinel.** `"none"`
+writes no `olcSpCheckpoint` at all, restoring slapd's own behaviour. An empty or
+whitespace-only field takes the default, because a `string` field cannot tell
+"the user asked for nothing" from "the user wrote nothing" — defaulting a field
+spends its empty value, which is the price of R1 and is what
+`accesslogSyncprovCheckpoint` has done since it was defaulted.
+
+*(This paragraph said `""` was also an opt-out when the ADR was proposed, and
+named the accesslog field as doing the same. Both halves were wrong: that field
+defaults an empty value, and a defaulted field cannot do otherwise. Corrected at
+acceptance, from the implementation.)*
 
 **R3. The justification is not durability tuning.** It is that the absent state
 regenerates `contextCSN` ahead of content on a non-replicated cluster, is never

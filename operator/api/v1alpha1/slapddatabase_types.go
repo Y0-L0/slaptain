@@ -140,15 +140,48 @@ type DatabaseReplicationConfig struct {
 	// Format: "<ops> <minutes>", e.g. "500 15" means checkpoint the contextCSN
 	// every 500 operations or 15 minutes.
 	//
-	// Empty (or the explicit sentinel "none") means no olcSpCheckpoint at all —
-	// OpenLDAP's own default behaviour. Unlike accesslogPurge this carries no
-	// operator default: an unwritten checkpoint is a performance trade, not a
-	// correctness cliff.
+	// DEFAULTS to "100 10" when unset (ADR-045). That is the ecosystem's value —
+	// Symas's delta-syncrepl article, Ubuntu's server documentation and the
+	// Bitnami image all ship it — and it admits a staleness of at most 100
+	// writes, or the writes of the last 10 minutes of write activity.
+	//
+	// Why a default at all, and the reason is NOT the accesslog checkpoint's:
+	// unset is not "OpenLDAP's behaviour", it is OpenLDAP's behaviour minus the
+	// startup repair upstream assumes is there. The Admin Guide says a database
+	// is scanned at startup for entryCSN values greater than the stored
+	// contextCSN; that scan is FIND_MAXCSN, gated !SLAP_DBCLEAN, and back-mdb
+	// sets that flag unconditionally ("mdb is always clean"), so on the only
+	// backend slaptain ships the scan never runs. Measured on 2.7.2-0+pure1,
+	// single node, SIGKILL and restart: with no checkpoint contextCSN was absent
+	// on disk and REGENERATED AHEAD OF ALL CONTENT; with a checkpoint the stale
+	// on-disk value was served unrepaired. A replicated pod heals itself on its
+	// first inbound cookie — a non-replicated one has no such path and will
+	// discard its own entries when a peer later replays them.
+	//
+	// The explicit sentinel "none" (or an empty field, which means "not filled
+	// in" and takes the default) writes no olcSpCheckpoint at all, restoring
+	// slapd's own behaviour and with it that exposure.
+	//
+	// "1 1" — what the accesslog checkpoint defaults to — is neither forbidden
+	// nor recommended here. It would close the window on the operation itself,
+	// but the residual window above chkops=1 is open by design anyway: a
+	// checkpoint is only tested after a successful write, so the last write
+	// before an idle period is never flushed whatever the value. Closing it on
+	// the data path costs a write amplification NOBODY HAS MEASURED — the
+	// accesslog's "1 1" was bought with a load-harness arm, this would not be.
+	// Whoever needs it measures it first (ADR-039: the default is tier 1, "1 1"
+	// on a data database is neither offered nor measured).
+	//
+	// Cost of the default itself: one suffix-entry modify in the data
+	// environment per <ops> writes — 1 % at 100 — and nothing at all in the
+	// accesslog environment, because syncprov_checkpoint sets o_dont_replicate
+	// and accesslog_response skips such operations. ADR-037's scarce resource is
+	// untouched.
 	//
 	// Converged on every reconcile: a later edit is applied to pods whose
-	// syncprov overlay already exists, and clearing the field removes the
-	// attribute. (It used to be written only when the overlay was first
-	// created, so edits were silently ignored — ADR-024 R4.)
+	// syncprov overlay already exists, and clearing the field restores the
+	// default. (It used to be written only when the overlay was first created,
+	// so edits were silently ignored — ADR-024 R4.)
 	// +optional
 	SyncprovCheckpoint string `json:"syncprovCheckpoint,omitempty"`
 	// accesslogSyncprovCheckpoint sets the syncprov checkpoint on this
@@ -431,6 +464,29 @@ type AccesslogPurgeConfig struct {
 	Retention *metav1.Duration `json:"retention,omitempty"`
 }
 
+// DatabaseOverlay is one overlay entry under the database's cn=config entry,
+// olcOverlay=<name>,olcDatabase={N}mdb,cn=config.
+//
+// Support tier 2 (ADR-039): the operator writes what is declared and reports
+// a refusal, but validates none of the overlay's semantics, and no overlay
+// beyond syncprov and accesslog is covered by the replication e2e.
+type DatabaseOverlay struct {
+	// name is the olcOverlay value, e.g. "memberof" or "refint".
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_-]+$`
+	Name string `json:"name"`
+	// objectClass is the overlay's configuration object class besides
+	// olcOverlayConfig, e.g. "olcMemberOf". Leave it unset for an overlay that
+	// has no dynamic configuration of its own.
+	// +optional
+	ObjectClass string `json:"objectClass,omitempty"`
+	// attributes are the overlay's cn=config attributes, e.g.
+	// {"olcRefintAttribute": ["uniqueMember"]}. Each listed attribute is
+	// replaced when its values differ; attributes not listed are left alone.
+	// +optional
+	Attributes map[string][]string `json:"attributes,omitempty"`
+}
+
 // DatabaseSeedConfig defines initial data to populate in the database.
 type DatabaseSeedConfig struct {
 	// entries is a list of LDIF entries to add when the database is first created.
@@ -670,6 +726,16 @@ type SlapdDatabaseSpec struct {
 	// "uid eq,sub". The operator applies these as olcDbIndex entries.
 	// +optional
 	Indices []string `json:"indices,omitempty"`
+	// overlays are further overlays on this database, beyond the syncprov and
+	// accesslog the operator manages itself. Each is added after those, in list
+	// order, and its attributes are converged on every reconcile. Removing an
+	// entry from the list leaves the overlay in place; the module must already be
+	// loaded, e.g. by a moduleload in the slapd-init image's bootstrap snippets.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:XValidation:rule="self.all(o, o.name != 'syncprov' && o.name != 'accesslog')",message="syncprov and accesslog are managed by the operator and cannot be listed in spec.overlays."
+	Overlays []DatabaseOverlay `json:"overlays,omitempty"`
 	// replication holds per-database replication settings. Always required —
 	// every SlapdDatabase must declare its replication intent at the CR level,
 	// even if the parent cluster doesn't replicate. Set replication.enabled=false
